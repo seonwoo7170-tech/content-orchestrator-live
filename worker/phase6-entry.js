@@ -129,7 +129,14 @@ async function trackingRedirect(request, env, code) {
   });
 }
 
+function externalDistributionEnabled(env) {
+  return String(env?.EXTERNAL_DISTRIBUTION_ENABLED || '').trim().toLowerCase() === 'true';
+}
+
 async function runExternalMaintenance(env, now = new Date()) {
+  if (!externalDistributionEnabled(env)) {
+    return { ok: true, skipped: true, reason: 'EXTERNAL_DISTRIBUTION_DISABLED' };
+  }
   const blogs = await loadConnectedBlogs(env);
   await ensureDefaultExternalSettings(env, blogs);
   const assets = await syncExternalContentAssets(env, { limit: 120 });
