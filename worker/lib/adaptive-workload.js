@@ -107,24 +107,29 @@ export function failedJobBlocksWork(row = {}, planDate = '') {
 
 async function operationalSignalsByBlog(env, planDate) {
   const result = await requireDb(env).prepare(
-    `SELECT blog_id, status, recovery_state, updated_at, COUNT(*) AS count
+    `SELECT blog_id,
+            SUM(CASE WHEN status IN ('queued','writing','critic_review','repairing','final_critic','updating_existing','publishing_new') THEN 1 ELSE 0 END) AS active_count,
+            SUM(CASE WHEN status = 'failed' AND (recovery_state IN ('retry_wait','held') OR substr(updated_at, 1, 10) = ?) THEN 1 ELSE 0 END) AS failed_count,
+            SUM(CASE WHEN status = 'needs_review' THEN 1 ELSE 0 END) AS review_count,
+            SUM(CASE WHEN recovery_state = 'retry_wait' THEN 1 ELSE 0 END) AS retry_wait_count,
+            SUM(CASE WHEN recovery_state = 'held' THEN 1 ELSE 0 END) AS held_count
      FROM jobs
-     WHERE blog_id IS NOT NULL AND blog_id <> '' AND status <> 'completed'
-     GROUP BY blog_id, status, recovery_state, updated_at`
-  ).all();
+     WHERE archived_at IS NULL
+       AND blog_id IS NOT NULL AND blog_id <> ''
+       AND status <> 'completed'
+     GROUP BY blog_id`
+  ).bind(planDate).all();
   const map = new Map();
   for (const row of result.results || []) {
     const blogId = String(row.blog_id || '');
-    if (!map.has(blogId)) map.set(blogId, { active: 0, failed: 0, needsReview: 0, retryWait: 0, held: 0 });
-    const signal = map.get(blogId);
-    const count = nonNegativeInteger(row.count);
-    const status = String(row.status || '');
-    const recoveryState = String(row.recovery_state || 'none');
-    if (ACTIVE_JOB_STATES.has(status)) signal.active += count;
-    if (failedJobBlocksWork(row, planDate)) signal.failed += count;
-    if (status === 'needs_review') signal.needsReview += count;
-    if (recoveryState === 'retry_wait') signal.retryWait += count;
-    if (recoveryState === 'held') signal.held += count;
+    if (!blogId) continue;
+    map.set(blogId, {
+      active: nonNegativeInteger(row.active_count),
+      failed: nonNegativeInteger(row.failed_count),
+      needsReview: nonNegativeInteger(row.review_count),
+      retryWait: nonNegativeInteger(row.retry_wait_count),
+      held: nonNegativeInteger(row.held_count)
+    });
   }
   return map;
 }
