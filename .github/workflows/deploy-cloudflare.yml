@@ -2,6 +2,12 @@ name: deploy-cloudflare
 
 on:
   workflow_dispatch:
+    inputs:
+      apply_migrations:
+        description: 'Apply remote D1 migrations before deploy'
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -75,7 +81,20 @@ jobs:
             '"crons": ["*/3 * * * *", "*/5 * * * *"]'
           ]) if (!text.includes(needle)) throw new Error(`PRODUCTION_GATE_INVALID:${needle}`);
           NODE
+      - name: Decide D1 migration mode
+        id: d1_migrations
+        shell: bash
+        run: |
+          APPLY=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.apply_migrations }}" = "true" ]; then
+            APPLY=true
+          elif [ -f .github/deploy-cloudflare-trigger ] && grep -qi 'with-migrations' .github/deploy-cloudflare-trigger; then
+            APPLY=true
+          fi
+          echo "apply=$APPLY" >> "$GITHUB_OUTPUT"
+          echo "D1 migrations requested: $APPLY"
       - name: Apply D1 migrations
+        if: steps.d1_migrations.outputs.apply == 'true'
         run: npx --yes wrangler@latest d1 migrations apply content-orchestrator --remote --config wrangler.jsonc
       - name: Deploy Worker and PWA while preserving existing runtime secrets
         run: npx --yes wrangler@latest deploy --config wrangler.jsonc
