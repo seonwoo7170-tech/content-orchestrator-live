@@ -1,0 +1,226 @@
+name: resume-existing-backlog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/resume-existing-backlog-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-backlog-resume
+  cancel-in-progress: false
+
+jobs:
+  resume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+    steps:
+      - name: Audit, safely resume, and push backlog toward publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$ADMIN_API_KEY"
+          node - <<'NODE'
+          const BASE = 'https://content-orchestrator.smileseon.workers.dev';
+          const CF = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}`;
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const adminHeaders = {
+            'x-admin-api-key': process.env.ADMIN_API_KEY,
+            'content-type': 'application/json'
+          };
+          const cfHeaders = {
+            authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+            'content-type': 'application/json'
+          };
+
+          async function cf(url, init = {}) {
+            const response = await fetch(url, {
+              ...init,
+              headers: { ...cfHeaders, ...(init.headers || {}) },
+              signal: AbortSignal.timeout(45000)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.success === false) {
+              throw new Error(`CF_API_FAILED:${response.status}`);
+            }
+            return data;
+          }
+
+          const dbList = await cf(`${CF}/d1/database`);
+          const db = (dbList.result || []).find((item) => item.name === 'content-orchestrator');
+          if (!db?.uuid) throw new Error('D1_DATABASE_NOT_FOUND');
+          const queryUrl = `${CF}/d1/database/${db.uuid}/query`;
+
+          async function query(sql) {
+            const data = await cf(queryUrl, { method: 'POST', body: JSON.stringify({ sql }) });
+            return (Array.isArray(data.result) ? data.result[0] : data.result) || {};
+          }
+
+          async function admin(path, { method = 'GET', timeout = 60000 } = {}) {
+            const response = await fetch(`${BASE}${path}`, {
+              method,
+              headers: adminHeaders,
+              ...(method === 'GET' ? {} : { body: '{}' }),
+              cache: 'no-store',
+              signal: AbortSignal.timeout(timeout)
+            });
+            const data = await response.json().catch(() => ({}));
+            return { ok: response.ok, status: response.status, data };
+          }
+
+          const auditSql = `SELECT
+            j.id, j.mode, j.blog_id, j.blogger_post_id, j.topic, j.status,
+            j.recovery_state, j.retry_count, j.last_error_code, j.hold_reason,
+            j.updated_at,
+            CASE WHEN j.result_json IS NULL THEN 0 ELSE 1 END AS has_result,
+            (SELECT p.status FROM job_publications p WHERE p.job_id=j.id ORDER BY p.rowid DESC LIMIT 1) AS pub_status,
+            (SELECT p.blogger_post_id FROM job_publications p WHERE p.job_id=j.id ORDER BY p.rowid DESC LIMIT 1) AS pub_post_id,
+            (SELECT p.error FROM job_publications p WHERE p.job_id=j.id ORDER BY p.rowid DESC LIMIT 1) AS pub_error,
+            (SELECT COUNT(*) FROM job_images i WHERE i.job_id=j.id) AS image_count,
+            (SELECT COUNT(*) FROM job_images i WHERE i.job_id=j.id AND i.status='attached') AS attached_images
+          FROM jobs j
+          WHERE j.archived_at IS NULL AND j.status <> 'completed'
+          ORDER BY j.id ASC`;
+
+          async function audit(label) {
+            const out = await query(auditSql);
+            const rows = out.results || [];
+            const counts = rows.reduce((acc, row) => {
+              const key = String(row.status || 'unknown');
+              acc[key] = (acc[key] || 0) + 1;
+              return acc;
+            }, {});
+            console.log(`${label} total=${rows.length} statuses=${JSON.stringify(counts)}`);
+            for (const row of rows) {
+              console.log(`${label}_JOB id=${row.id} mode=${row.mode} status=${row.status} recovery=${row.recovery_state || 'none'} retry=${Number(row.retry_count || 0)} error=${row.last_error_code || 'none'} pub=${row.pub_status || 'none'} pubPost=${row.pub_post_id ? 'yes' : 'no'} images=${Number(row.attached_images || 0)}/${Number(row.image_count || 0)} updated=${row.updated_at}`);
+            }
+            return rows;
+          }
+
+          function blockedCode(row) {
+            return [row.last_error_code, row.hold_reason, row.pub_error]
+              .map((value) => String(value || '').toUpperCase())
+              .join('|');
+          }
+
+          function unsafePublication(row) {
+            const code = blockedCode(row);
+            if (code.includes('DUPLICATE_TOPIC_PUBLICATION_BLOCKED')) return true;
+            if (code.includes('BLOGGER_WRITE_OUTCOME_UNKNOWN')) return true;
+            if (code.includes('STALE_PUBLICATION_CLAIM')) return true;
+            if (code.includes('MANUAL_RETRY_REQUIRES_PUBLICATION_REVIEW')) return true;
+            if (row.pub_post_id) return true;
+            const status = String(row.pub_status || '');
+            return Boolean(status && status !== 'failed');
+          }
+
+          function isStalePipeline(row) {
+            if (!['writing', 'critic_review', 'repairing', 'final_critic'].includes(String(row.status || ''))) return false;
+            const updated = new Date(String(row.updated_at || '').replace(' ', 'T') + (String(row.updated_at || '').includes('Z') ? '' : 'Z'));
+            if (Number.isNaN(updated.getTime())) return false;
+            return Date.now() - updated.getTime() >= 30 * 60 * 1000;
+          }
+
+          let rows = await audit('BACKLOG_PRE');
+
+          for (const row of rows) {
+            if (!isStalePipeline(row)) continue;
+            if (unsafePublication(row)) {
+              console.log(`STALE_SKIP_UNSAFE id=${row.id}`);
+              continue;
+            }
+            const status = String(row.status || '').replaceAll("'", "''");
+            const out = await query(`UPDATE jobs
+              SET status='failed', error='STALE_PIPELINE_EXECUTION', recovery_state='none',
+                  next_retry_at=NULL, hold_reason=NULL, last_error_code='STALE_PIPELINE_EXECUTION',
+                  last_failure_at=datetime('now'), updated_at=datetime('now')
+              WHERE id=${Number(row.id)} AND archived_at IS NULL AND status='${status}'`);
+            console.log(`STALE_RELEASE id=${row.id} changed=${Number(out.meta?.changes || 0)}`);
+          }
+
+          rows = await audit('BACKLOG_AFTER_STALE_CHECK');
+          let starts = 0;
+          let inBatch = 0;
+          const MAX_STARTS = 20;
+
+          for (const row of rows) {
+            if (starts >= MAX_STARTS) break;
+            const status = String(row.status || '');
+            if (status === 'ready') {
+              console.log(`READY_KEEP id=${row.id}`);
+              continue;
+            }
+            if (!['queued', 'failed', 'needs_review'].includes(status)) {
+              console.log(`ACTIVE_KEEP id=${row.id} status=${status}`);
+              continue;
+            }
+            if (unsafePublication(row)) {
+              console.log(`RESUME_SKIP_UNSAFE id=${row.id} status=${status}`);
+              continue;
+            }
+
+            if (['failed', 'needs_review'].includes(status)) {
+              const retry = await admin(`/api/jobs/${Number(row.id)}/retry`, { method: 'POST', timeout: 45000 });
+              console.log(`RETRY id=${row.id} http=${retry.status} ok=${retry.ok} code=${retry.data?.error || 'none'}`);
+              if (!retry.ok) continue;
+            }
+
+            const run = await admin(`/api/jobs/${Number(row.id)}/run`, { method: 'POST', timeout: 45000 });
+            console.log(`RUN id=${row.id} http=${run.status} ok=${run.ok} code=${run.data?.error || 'none'}`);
+            if (run.ok) {
+              starts += 1;
+              inBatch += 1;
+            }
+            if (inBatch >= 2) {
+              inBatch = 0;
+              await sleep(45000);
+            }
+          }
+
+          console.log(`BACKLOG_RUN_STARTS=${starts}`);
+          if (starts > 0) await sleep(60000);
+
+          for (let i = 1; i <= 6; i++) {
+            const pass = await admin('/api/operations/publish-tick?images=false', { method: 'POST', timeout: 90000 });
+            console.log(`PUBLISH_ONLY_${i} http=${pass.status} ok=${pass.ok} attempted=${Number(pass.data?.publications?.attempted || 0)} scheduled=${Number(pass.data?.publications?.scheduled || 0)} blocked=${Number(pass.data?.publications?.blocked || 0)}`);
+            await sleep(3000);
+          }
+
+          for (let i = 1; i <= 3; i++) {
+            try {
+              const pass = await admin('/api/operations/publish-tick', { method: 'POST', timeout: 155000 });
+              console.log(`IMAGE_PUBLISH_${i} http=${pass.status} ok=${pass.ok} images=${Number(pass.data?.images?.completed || 0)}/${Number(pass.data?.images?.attempted || 0)} scheduled=${Number(pass.data?.publications?.scheduled || 0)} blocked=${Number(pass.data?.publications?.blocked || 0)}`);
+            } catch (error) {
+              console.log(`IMAGE_PUBLISH_${i}_INCONCLUSIVE code=${String(error?.name || error?.message || 'unknown').slice(0,80)}`);
+            }
+            await sleep(5000);
+          }
+
+          try {
+            const repairs = await admin('/api/operations/repair-publish-tick', { method: 'POST', timeout: 150000 });
+            console.log(`REPAIR_PUBLISH http=${repairs.status} ok=${repairs.ok} code=${repairs.data?.error || 'none'}`);
+          } catch (error) {
+            console.log(`REPAIR_PUBLISH_INCONCLUSIVE code=${String(error?.name || error?.message || 'unknown').slice(0,80)}`);
+          }
+
+          for (let i = 1; i <= 4; i++) {
+            const pass = await admin('/api/operations/publish-tick?images=false', { method: 'POST', timeout: 90000 });
+            console.log(`FINAL_PUBLISH_ONLY_${i} http=${pass.status} ok=${pass.ok} scheduled=${Number(pass.data?.publications?.scheduled || 0)} blocked=${Number(pass.data?.publications?.blocked || 0)}`);
+            await sleep(3000);
+          }
+
+          const finalRows = await audit('BACKLOG_FINAL');
+          const unresolved = finalRows.filter((row) => !['writing', 'critic_review', 'repairing', 'final_critic'].includes(String(row.status || '')) || isStalePipeline(row));
+          const unsafe = finalRows.filter(unsafePublication);
+          console.log(`BACKLOG_RESULT active=${finalRows.length} needsAttention=${unresolved.length} publicationSafetyHeld=${unsafe.length}`);
+          NODE

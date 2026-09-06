@@ -1,0 +1,268 @@
+name: Phase 1 Final Private Draft Verification
+
+on:
+  push:
+    paths:
+      - '.github/phase1-private-draft-final-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase1-final-private-draft
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+      TARGET_BLOG_ID: '7741529904469657049'
+      TARGET_BLOG_NAME: '5Minutes Info(5분 정보)'
+      TEST_TOPIC: '스마트폰 저장공간 부족 경고가 뜰 때 안전하게 정리하는 순서'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify source
+        run: |
+          npm run verify
+          (cd api-hub-v2 && npm run verify)
+
+      - name: Validate secrets and safe normal state
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID HUB_API_KEY GEMINI_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN; do
+            test -n "${!name}" || { echo "$name is missing"; exit 1; }
+          done
+          node - <<'NODE'
+          const [hubResp, orchResp] = await Promise.all([
+            fetch(`${process.env.API_HUB_V2_BASE_URL}/health`, {cache:'no-store'}),
+            fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health`, {cache:'no-store'})
+          ]);
+          const hub = await hubResp.json().catch(()=>({}));
+          const orch = await orchResp.json().catch(()=>({}));
+          console.log(`Safe-state check: apiHubWrites=${hub.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, hubMode=${hub.bloggerWriteMode || 'unknown'}, critic=${hub.criticProvider || 'unknown'}, orchestratorWrites=${orch.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}`);
+          if (!hubResp.ok || hub.ok !== true) throw new Error('API_HUB_HEALTH_REQUIRED');
+          if (hub.bloggerWritesEnabled !== false || hub.bloggerWriteMode !== 'disabled') throw new Error('API_HUB_SAFE_NORMAL_STATE_REQUIRED');
+          if (hub.criticProvider !== 'google-gemini' || hub.criticConfigured !== true) throw new Error('GEMINI_CRITIC_NOT_READY');
+          const expectedSha = '0df7c83bb3874c4802ca7c02306beee7cd7032366930d66abfc7fa1bdb6cda66';
+          if (hub.masterV45?.bundled !== true || hub.masterV45?.sha256 !== expectedSha || Number(hub.masterV45?.size) !== 93282) throw new Error('MASTER_V45_NOT_VERIFIED');
+          if (!orchResp.ok || orch.ok !== true || orch.bloggerWritesEnabled !== false || orch.apiHubConfigured !== true) throw new Error('ORCHESTRATOR_SAFE_NORMAL_STATE_REQUIRED');
+          NODE
+
+      - name: Verify exact Blogger target read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/blogger/blogs`, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY},
+            body:JSON.stringify({action:'list'})
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok || !Array.isArray(data.blogs)) throw new Error(`BLOG_LIST_FAILED:${r.status}:${data?.error || 'unknown'}`);
+          const matches = data.blogs.filter(b => String(b.id || b.blogId) === process.env.TARGET_BLOG_ID && String(b.name || b.blogName) === process.env.TARGET_BLOG_NAME);
+          if (matches.length !== 1) throw new Error(`TARGET_BLOG_NOT_EXACT:${matches.length}`);
+          console.log(`Target verified read-only: ${process.env.TARGET_BLOG_NAME}; connectedBlogs=${data.blogs.length}`);
+          NODE
+
+      - name: Exercise live Repair and full pipeline without D1 or Blogger writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import { writeFileSync, chmodSync } from 'node:fs';
+          import { callHub } from './worker/lib/api-hub.js';
+          import { validateArticle } from './worker/lib/contracts.js';
+          import { lintNaturalWriting } from './worker/lib/natural-writing-linter.js';
+          import { runNewArticlePipeline } from './worker/lib/pipeline.js';
+
+          const env = {
+            API_HUB_BASE_URL: process.env.API_HUB_V2_BASE_URL,
+            HUB_API_KEY: process.env.HUB_API_KEY
+          };
+
+          const repairFixture = validateArticle({
+            title: 'PC 저장 공간 정리 기본 순서',
+            html: '<p>현대 사회에서 저장 공간 관리는 중요합니다.</p><h2>먼저 확인할 것</h2><p>설정에서 저장 공간 사용량을 확인하세요. 용량이 큰 파일부터 확인하고 필요한 파일은 백업한 뒤 지우세요.</p>',
+            searchDescription: 'PC 저장 공간을 안전하게 정리하는 기본 순서입니다.',
+            labels: ['PC 관리'],
+            sources: [],
+            language: 'ko',
+            topic: 'PC 저장 공간 정리'
+          });
+          const lintBefore = lintNaturalWriting(repairFixture);
+          if (lintBefore.status !== 'BLOCK' || lintBefore.blockingIssues.length < 1) throw new Error('REPAIR_FIXTURE_MUST_BLOCK');
+          const repaired = await callHub(env, '/api/hub/ai/repair', {
+            article: repairFixture,
+            issues: lintBefore.blockingIssues,
+            strategy: 'natural_writing_lint_targeted_only'
+          });
+          const repairedArticle = validateArticle(repaired.article ?? repaired);
+          const lintAfter = lintNaturalWriting(repairedArticle);
+          if (lintAfter.status === 'BLOCK') throw new Error('LIVE_REPAIR_DID_NOT_CLEAR_STYLE_BLOCK');
+          if (!['cloudflare-workers-ai','google-gemini'].includes(String(repaired.provider || ''))) throw new Error(`LIVE_REPAIR_PROVIDER_INVALID:${repaired.provider || 'missing'}`);
+          console.log(`LIVE_REPAIR_OK provider=${repaired.provider}; fallbackUsed=${repaired.fallbackUsed === true ? 'yes' : 'no'}; styleAfter=${lintAfter.status}; no writes`);
+
+          const stages = [];
+          const result = await runNewArticlePipeline(
+            env,
+            { blogId: process.env.TARGET_BLOG_ID, topic: process.env.TEST_TOPIC, language: 'ko' },
+            fetch,
+            { onStage: async stage => { stages.push(stage); console.log(`pipeline stage=${stage}`); } }
+          );
+          console.log(`Pipeline result: status=${result.status}; initial=${result.initialCritic?.status || 'none'}:${result.initialCritic?.score ?? 'n/a'}; final=${result.finalCritic?.status || 'none'}:${result.finalCritic?.score ?? 'n/a'}; repairApplied=${result.repairApplied === true ? 'yes' : 'no'}; styleRepairApplied=${result.styleRepairApplied === true ? 'yes' : 'no'}`);
+          if (result.status !== 'READY' || result.finalCritic?.status !== 'PASS') throw new Error('PIPELINE_NOT_READY_FOR_DRAFT');
+          if (!result.article?.title || !result.article?.html) throw new Error('FINAL_ARTICLE_MISSING');
+          const finalLint = lintNaturalWriting(result.article);
+          if (finalLint.status === 'BLOCK') throw new Error('FINAL_ARTICLE_STYLE_BLOCKED');
+          writeFileSync('.phase1-ready.json', JSON.stringify({
+            article: result.article,
+            initialCritic: result.initialCritic,
+            finalCritic: result.finalCritic,
+            repairApplied: result.repairApplied === true,
+            styleRepairApplied: result.styleRepairApplied === true,
+            stages
+          }));
+          chmodSync('.phase1-ready.json', 0o600);
+          console.log('PIPELINE_NO_DB_OK; no job/queue/D1/Blogger write endpoint called');
+          NODE
+
+      - name: Prepare exact-target guarded API Hub config
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOGLE_OAUTH_SETUP_ENABLED=false node api-hub-v2/scripts/render-wrangler.mjs
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const normalPath = 'api-hub-v2/wrangler.jsonc';
+          const normal = fs.readFileSync(normalPath, 'utf8');
+          if (!normal.includes('"BLOGGER_WRITES_ENABLED": "false"') || !normal.includes('"BLOGGER_WRITE_MODE": "disabled"')) throw new Error('NORMAL_WRITE_GATE_NOT_DISABLED');
+          fs.writeFileSync('api-hub-v2/wrangler.normal.jsonc', normal);
+          let guarded = normal
+            .replace('"BLOGGER_WRITES_ENABLED": "false"','"BLOGGER_WRITES_ENABLED": "true"')
+            .replace('"BLOGGER_WRITE_MODE": "disabled"','"BLOGGER_WRITE_MODE": "phase1_single_draft"')
+            .replace('"PHASE1_DRAFT_BLOG_ID": ""', `"PHASE1_DRAFT_BLOG_ID": "${process.env.TARGET_BLOG_ID}"`);
+          if (!guarded.includes('"BLOGGER_WRITES_ENABLED": "true"') || !guarded.includes('"BLOGGER_WRITE_MODE": "phase1_single_draft"') || !guarded.includes(`"PHASE1_DRAFT_BLOG_ID": "${process.env.TARGET_BLOG_ID}"`)) throw new Error('GUARDED_CONFIG_INVALID');
+          fs.writeFileSync('api-hub-v2/wrangler.phase1.jsonc', guarded);
+          fs.writeFileSync('api-hub-v2/.phase1-secrets.json', JSON.stringify({
+            ORCHESTRATOR_API_KEY: process.env.HUB_API_KEY,
+            GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+            GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+            GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN
+          }));
+          fs.chmodSync('api-hub-v2/.phase1-secrets.json',0o600);
+          NODE
+
+      - name: Temporarily enable exact-target single-draft gate in API Hub v2
+        run: npx --yes wrangler@latest deploy --config wrangler.phase1.jsonc --secrets-file .phase1-secrets.json
+        working-directory: api-hub-v2
+
+      - name: Wait for guarded gate to propagate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const sleep = ms => new Promise(r=>setTimeout(r,ms));
+          for (let i=1;i<=20;i++) {
+            const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/health`,{cache:'no-store'});
+            const h = await r.json().catch(()=>({}));
+            const ok = r.ok && h.bloggerWritesEnabled === true && h.bloggerWriteMode === 'phase1_single_draft' && h.criticProvider === 'google-gemini' && h.criticConfigured === true;
+            console.log(`Guard propagation ${i}: writes=${h.bloggerWritesEnabled === true ? 'enabled' : 'disabled'}, mode=${h.bloggerWriteMode || 'unknown'}, critic=${h.criticConfigured === true ? 'ready' : 'not-ready'}`);
+            if (ok) process.exit(0);
+            await sleep(1500);
+          }
+          throw new Error('GUARDED_GATE_NOT_READY');
+          NODE
+
+      - name: Create and read back exactly one Blogger private draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
+          const ready = JSON.parse(readFileSync('.phase1-ready.json','utf8'));
+          async function jsonFetch(path, body) {
+            const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}${path}`, {
+              method:'POST',
+              headers:{'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY},
+              body:JSON.stringify(body)
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(`${path}:${r.status}:${data?.error || 'REQUEST_FAILED'}`);
+            return data;
+          }
+          const write = await jsonFetch('/api/blogger/post', {
+            phase1Test:true,
+            operation:'create',
+            publishMode:'draft',
+            blogId:process.env.TARGET_BLOG_ID,
+            article:ready.article
+          });
+          const postId = String(write.bloggerPostId || '');
+          if (!postId) throw new Error('BLOGGER_POST_ID_MISSING');
+          if (String(write.status || '').toUpperCase() !== 'DRAFT') throw new Error(`BLOGGER_NOT_DRAFT:${write.status || 'unknown'}`);
+          writeFileSync('.phase1-created.json',JSON.stringify({postId,title:ready.article.title}));
+          chmodSync('.phase1-created.json',0o600);
+
+          const verify = await jsonFetch('/api/blogger/post/get', {
+            blogId:process.env.TARGET_BLOG_ID,
+            bloggerPostId:postId,
+            language:'ko'
+          });
+          if (String(verify.identity?.bloggerPostId || '') !== postId) throw new Error('VERIFY_POST_ID_MISMATCH');
+          if (String(verify.identity?.status || '').toUpperCase() !== 'DRAFT') throw new Error(`VERIFY_NOT_DRAFT:${verify.identity?.status || 'unknown'}`);
+          if (String(verify.article?.title || '') !== String(ready.article.title)) throw new Error('VERIFY_TITLE_MISMATCH');
+          console.log(`PHASE1_PRIVATE_DRAFT_OK postId=${postId}; status=${verify.identity.status}; initial=${ready.initialCritic?.status || 'none'}:${ready.initialCritic?.score ?? 'n/a'}; final=${ready.finalCritic?.status || 'none'}:${ready.finalCritic?.score ?? 'n/a'}; repairApplied=${ready.repairApplied ? 'yes' : 'no'}; styleRepairApplied=${ready.styleRepairApplied ? 'yes' : 'no'}`);
+          NODE
+
+      - name: Restore API Hub v2 writes disabled
+        if: always()
+        shell: bash
+        working-directory: api-hub-v2
+        run: |
+          set -euo pipefail
+          if [ -f wrangler.normal.jsonc ] && [ -f .phase1-secrets.json ]; then
+            npx --yes wrangler@latest deploy --config wrangler.normal.jsonc --secrets-file .phase1-secrets.json
+          fi
+
+      - name: Verify final write gates disabled
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const sleep = ms => new Promise(r=>setTimeout(r,ms));
+          for (let i=1;i<=20;i++) {
+            const [hr,or] = await Promise.all([
+              fetch(`${process.env.API_HUB_V2_BASE_URL}/health`,{cache:'no-store'}),
+              fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health`,{cache:'no-store'})
+            ]);
+            const [h,o] = await Promise.all([hr.json().catch(()=>({})),or.json().catch(()=>({}))]);
+            const safe = hr.ok && or.ok && h.bloggerWritesEnabled === false && h.bloggerWriteMode === 'disabled' && h.criticConfigured === true && o.bloggerWritesEnabled === false;
+            console.log(`Final gate check ${i}: apiHub=${h.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, mode=${h.bloggerWriteMode || 'unknown'}, orchestrator=${o.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, critic=${h.criticConfigured === true ? 'ready' : 'not-ready'}`);
+            if (safe) process.exit(0);
+            await sleep(1500);
+          }
+          throw new Error('FINAL_WRITE_GATES_NOT_DISABLED');
+          NODE
+
+      - name: Cleanup ephemeral files
+        if: always()
+        run: rm -f .phase1-ready.json .phase1-created.json api-hub-v2/wrangler.jsonc api-hub-v2/wrangler.normal.jsonc api-hub-v2/wrangler.phase1.jsonc api-hub-v2/.phase1-secrets.json

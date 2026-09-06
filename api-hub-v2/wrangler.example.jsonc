@@ -1,0 +1,47 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "api-hub-v2",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-28",
+  "workers_dev": true,
+  "ai": {
+    "binding": "AI"
+  },
+  "secrets": {
+    "required": ["ORCHESTRATOR_API_KEY", "GEMINI_API_KEY", "KIE_API_KEY", "TAVILY_API_KEY"]
+  },
+  "vars": {
+    "TEXT_PRIMARY_PROVIDER": "gemini",
+    "TEXT_CLOUDFLARE_FALLBACK_ENABLED": "true",
+    "GEMINI_REQUEST_TIMEOUT_MS": "60000",
+    "AI_PROVIDER_RETRY_DELAY_MS": "4000",
+    "FREE_AI_FALLBACK_ENABLED": "true",
+    "FREE_AI_API_BASE_URL": "https://api.free.ai",
+    "FREE_AI_REQUEST_TIMEOUT_MS": "60000",
+    "FREE_AI_MODEL": "qwen7b",
+    "FREE_AI_WRITER_MODEL": "qwen7b",
+    "FREE_AI_CRITIC_MODEL": "qwen7b",
+    "FREE_AI_REPAIR_MODEL": "qwen7b",
+    "WRITER_MODEL": "@cf/openai/gpt-oss-120b",
+    "CRITIC_MODEL": "@cf/openai/gpt-oss-120b",
+    "REPAIR_MODEL": "@cf/openai/gpt-oss-120b",
+    "GEMINI_WRITER_MODEL": "gemini-3.5-flash-lite",
+    "GEMINI_CRITIC_MODEL": "gemini-3.5-flash-lite",
+    "GEMINI_REPAIR_MODEL": "gemini-3.5-flash-lite",
+    "GEMINI_IMAGE_QA_MODEL": "gemini-3.1-flash-lite",
+    "IMAGE_QA_REQUIRED": "true",
+    "IMAGE_QA_MAX_ATTEMPTS": "3",
+    "IMAGE_MODEL": "@cf/black-forest-labs/flux-1-schnell",
+    "KIE_IMAGE_MODEL": "z-image",
+    "KIE_API_BASE_URL": "https://api.kie.ai",
+    "BLOGGER_WRITES_ENABLED": "REPLACE_WITH_BLOGGER_WRITES_ENABLED",
+    "BLOGGER_WRITE_MODE": "REPLACE_WITH_BLOGGER_WRITE_MODE",
+    "BLOGGER_WRITE_ALLOWED_BLOG_IDS": "REPLACE_WITH_BLOGGER_WRITE_ALLOWED_BLOG_IDS",
+    "PHASE1_DRAFT_BLOG_ID": "",
+    "GOOGLE_OAUTH_SETUP_ENABLED": "REPLACE_WITH_GOOGLE_OAUTH_SETUP_ENABLED",
+    "GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED": "REPLACE_WITH_GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED",
+    "MASTER_V45_SHA256": "0df7c83bb3874c4802ca7c02306beee7cd7032366930d66abfc7fa1bdb6cda66",
+    "MASTER_V45_SIZE": "93282",
+    "MASTER_V45_BUNDLED": "true"
+  }
+}

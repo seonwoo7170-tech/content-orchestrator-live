@@ -1,0 +1,56 @@
+name: API Hub v2 Route Probe
+
+on:
+  push:
+    paths:
+      - '.github/api-hub-v2-route-probe-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_HUB_KEY: ${{ secrets.HUB_API_KEY }}
+    steps:
+      - name: Probe API Hub v2 routes without writes or AI generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then HUB_KEY="$API_HUB_V2_KEY"; else HUB_KEY="$EXISTING_HUB_KEY"; fi
+          export HUB_KEY
+          test -n "$HUB_KEY" || { echo 'HUB_KEY missing'; exit 1; }
+          node - <<'NODE'
+          async function probe(label, path, body, expectedStatuses) {
+            const r = await fetch(`${process.env.HUB_URL}${path}`, {
+              method: 'POST',
+              headers: {'content-type':'application/json','x-hub-api-key':process.env.HUB_KEY},
+              body: JSON.stringify(body)
+            });
+            const data = await r.json().catch(() => ({}));
+            console.log(`${label}: HTTP ${r.status}, error=${String(data?.error || 'none')}`);
+            if (!expectedStatuses.includes(r.status)) throw new Error(`${label}_UNEXPECTED_STATUS:${r.status}`);
+            return {status:r.status,data};
+          }
+
+          const health = await fetch(`${process.env.HUB_URL}/health?routeProbe=${Date.now()}`, {cache:'no-store'});
+          const h = await health.json().catch(() => ({}));
+          console.log(`health: HTTP ${health.status}, ok=${h?.ok === true ? 'yes' : 'no'}, writes=${h?.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, mode=${h?.bloggerWriteMode || 'unknown'}`);
+          if (!health.ok || h?.ok !== true) throw new Error('HEALTH_FAILED');
+
+          // Empty AI requests must reach each registered route and fail input validation before provider execution.
+          await probe('writer-empty', '/api/hub/ai/writer', {}, [400]);
+          await probe('critic-empty', '/api/hub/ai/critic', {}, [400]);
+          await probe('repair-empty', '/api/hub/ai/repair', {}, [400]);
+
+          // Read-only Blogger route confirms the same authenticated Worker surface.
+          const blogs = await probe('blogger-list', '/api/blogger/blogs', {action:'list'}, [200]);
+          const count = Array.isArray(blogs.data?.blogs) ? blogs.data.blogs.length : 0;
+          console.log(`blogger-list-count=${count}`);
+          if (count < 1) throw new Error('BLOGGER_LIST_EMPTY');
+          NODE

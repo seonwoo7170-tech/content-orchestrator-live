@@ -1,0 +1,137 @@
+name: Phase 2 Orchestrator Deploy Retry
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/phase2-orchestrator-deploy-retry-trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    env:
+      CONTROL_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      COMBINED_DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BUCKET_NAME: content-orchestrator-images
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Content Orchestrator dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify source
+        run: npm run verify
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CONTROL_API_TOKEN COMBINED_DEPLOY_TOKEN CLOUDFLARE_ACCOUNT_ID HUB_API_KEY ADMIN_API_KEY; do
+            test -n "${!name}" || { echo "$name missing"; exit 1; }
+          done
+
+      - name: Resolve existing D1 with control token
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_ID="$(CLOUDFLARE_API_TOKEN="$CONTROL_API_TOKEN" npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Existing content-orchestrator D1 database not found'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render Wrangler config
+        run: node scripts/render-wrangler.mjs
+
+      - name: Verify Phase 2 infrastructure without mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLOUDFLARE_API_TOKEN="$COMBINED_DEPLOY_TOKEN" npx --yes wrangler@latest r2 bucket list | grep -F "$BUCKET_NAME" >/dev/null
+          CLOUDFLARE_API_TOKEN="$CONTROL_API_TOKEN" npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --json --command "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('job_images','automation_settings','job_publications') ORDER BY name;" > /tmp/phase2-tables.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const input = JSON.parse(fs.readFileSync('/tmp/phase2-tables.json','utf8'));
+          const names = (Array.isArray(input) ? input : [input]).flatMap(x => x.results || []).map(x => x.name).sort();
+          const expected = ['automation_settings','job_images','job_publications'];
+          if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error(`PHASE2_TABLES_INVALID:${names.join(',')}`);
+          console.log('Phase 2 R2 and D1 preflight passed.');
+          NODE
+
+      - name: Snapshot existing queue read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          for table in jobs daily_plan_slots; do
+            CLOUDFLARE_API_TOKEN="$CONTROL_API_TOKEN" npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --json --command "SELECT * FROM ${table} ORDER BY id;" > "/tmp/${table}.before.json"
+          done
+          sha256sum /tmp/jobs.before.json /tmp/daily_plan_slots.before.json
+
+      - name: Prepare runtime secrets
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const { writeFileSync, chmodSync } = require('node:fs');
+          const values = { HUB_API_KEY: process.env.HUB_API_KEY, ADMIN_API_KEY: process.env.ADMIN_API_KEY };
+          if (!values.HUB_API_KEY || !values.ADMIN_API_KEY) throw new Error('RUNTIME_SECRETS_REQUIRED');
+          writeFileSync('.deploy-secrets.json', JSON.stringify(values));
+          chmodSync('.deploy-secrets.json', 0o600);
+          NODE
+
+      - name: Deploy with combined Workers and R2 token
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLOUDFLARE_API_TOKEN="$COMBINED_DEPLOY_TOKEN" npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
+
+      - name: Post-deploy provider smoke
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+        run: node scripts/postdeploy-smoke.mjs
+
+      - name: Verify health and safety gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEALTH="$(curl -fsS "$ORCHESTRATOR_URL/health")"
+          HEALTH="$HEALTH" node - <<'NODE'
+          const health = JSON.parse(process.env.HEALTH);
+          if (health.ok !== true) throw new Error('ORCHESTRATOR_HEALTH_FAILED');
+          if (health.bloggerWritesEnabled !== false) throw new Error('BLOGGER_WRITES_MUST_REMAIN_DISABLED');
+          if (health.phase2Images?.bucketBound !== true) throw new Error('R2_BUCKET_NOT_BOUND');
+          if (health.phase2Images?.publicBaseUrlConfigured !== true) throw new Error('IMAGE_PUBLIC_BASE_URL_NOT_CONFIGURED');
+          if (health.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_MUST_REMAIN_DISABLED');
+          console.log('Phase 2 health verified; all publish gates remain disabled.');
+          NODE
+
+      - name: Verify queue unchanged after deploy
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          for table in jobs daily_plan_slots; do
+            npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --json --command "SELECT * FROM ${table} ORDER BY id;" > "/tmp/${table}.after.json"
+            cmp -s "/tmp/${table}.before.json" "/tmp/${table}.after.json" || { echo "$table changed during Worker deploy"; exit 1; }
+          done
+          echo 'Existing queue preserved across Worker deploy.'
+
+      - name: Cleanup
+        if: always()
+        run: rm -f .deploy-secrets.json wrangler.jsonc /tmp/phase2-tables.json /tmp/*.before.json /tmp/*.after.json

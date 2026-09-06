@@ -1,0 +1,42 @@
+name: Orchestrator Writer Transport Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/orchestrator-writer-transport-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Compare API Hub transports inside production orchestrator
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ADMIN_API_KEY"
+          node --input-type=module - <<'NODE'
+          const response = await fetch(`${process.env.ORCHESTRATOR_BASE_URL}/api/diagnostics/hub-writer-transport`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-admin-api-key': process.env.ADMIN_API_KEY
+            },
+            body: '{}',
+            signal: AbortSignal.timeout(360000)
+          });
+          const text = await response.text();
+          console.log('ORCHESTRATOR_WRITER_TRANSPORT_PROBE', text);
+          if (!response.ok) process.exit(2);
+          const data = JSON.parse(text);
+          if (data?.ok !== true) process.exit(3);
+          NODE
+          # final production failover verification: 2026-09-04T14:58Z

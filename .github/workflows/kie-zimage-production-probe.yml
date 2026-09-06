@@ -1,0 +1,95 @@
+name: KIE Z-Image Production Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kie-zimage-production-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    environment: production
+    env:
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Generate and QA one production-style PC KIE image without Blogger writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_V2_BASE_URL;
+          const key = process.env.API_HUB_V2_KEY || process.env.EXISTING_ORCHESTRATOR_KEY;
+          if (!key) throw new Error('API_HUB_KEY_REQUIRED');
+
+          const prompt = 'Photorealistic real-world photograph focused on pc 렉 걸림 끝판왕 원인별 진단 및 체감 속도 % 개선 최적화 마스터 가이드. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic. One clear focal subject, natural lighting, realistic materials, uncluttered composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present. Wide landscape framing with comfortable open space around the focal subject.';
+          const headers = {'content-type':'application/json','x-hub-api-key':key};
+
+          async function call(taskId = null) {
+            const body = {
+              role: 'thumbnail',
+              providerMode: 'kie',
+              aspectRatio: '16:9',
+              prompt
+            };
+            if (taskId) body.taskId = taskId;
+            const response = await fetch(`${base}/api/hub/image/generate`, {
+              method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30000)
+            });
+            let json = {};
+            try { json = await response.json(); } catch {}
+            return { response, json };
+          }
+
+          let taskId = null;
+          let final = null;
+          for (let attempt = 1; attempt <= 30; attempt += 1) {
+            const { response, json } = await call(taskId);
+            const safe = {
+              poll: attempt,
+              status: response.status,
+              ok: json?.ok === true,
+              provider: json?.provider || null,
+              model: json?.model || null,
+              state: json?.state || null,
+              pending: json?.pending ?? null,
+              complete: json?.complete ?? null,
+              taskIdPresent: Boolean(json?.taskId),
+              error: json?.error || null,
+              qaPass: json?.imageQa?.pass ?? null,
+              qaAttempts: json?.imageQa?.attempts ?? null,
+              hasImage: Boolean(json?.imageBase64)
+            };
+            console.log(`KIE_PC_PROBE ${JSON.stringify(safe)}`);
+
+            if (!response.ok) {
+              throw new Error(`KIE_PC_PROBE_FAILED:${json?.error || response.status}`);
+            }
+            if (json?.provider !== 'kie-ai' || json?.model !== 'z-image') {
+              throw new Error('KIE_PC_PROBE_PROVIDER_CONTRACT_FAILED');
+            }
+            taskId = String(json?.taskId || taskId || '').trim();
+            if (json?.pending === true || json?.complete === false) {
+              if (!taskId) throw new Error('KIE_PC_PROBE_TASK_ID_MISSING');
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+              continue;
+            }
+            final = json;
+            break;
+          }
+
+          if (!final) throw new Error('KIE_PC_PROBE_TIMEOUT');
+          if (!final.imageBase64) throw new Error('KIE_PC_PROBE_IMAGE_MISSING');
+          if (final?.imageQa?.enabled === true && final?.imageQa?.pass !== true) {
+            throw new Error('KIE_PC_PROBE_QA_NOT_PASSED');
+          }
+          console.log(`KIE_PC_PROBE_PASS ${JSON.stringify({provider:final.provider,model:final.model,qaPass:final?.imageQa?.pass ?? null,hasImage:true})}`);
+          NODE
+
+# probe: pc-vent-text-safe-qa-2026-09-06

@@ -1,0 +1,14 @@
+{
+  "name": "content-orchestrator-api-hub-v2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check src/index.js && node --check src/lib/auth.js && node --check src/lib/cloudflare-ai.js && node --check src/lib/gemini-ai.js && node --check src/lib/ai-provider-router.js && node --check src/lib/contracts.js && node --check src/lib/master-v45-bundle.js && node --check src/lib/master-v45-role-prompts.js && node --check src/lib/ai-routes.js && node --check src/lib/topic-planner.js && node --check src/lib/tavily-search.js && node --check src/lib/image-routes.js && node --check src/lib/google-oauth.js && node --check src/lib/blogger.js && node --check src/lib/blogger-posts.js && node --check src/lib/write-policy.js && node --check scripts/render-wrangler.mjs && node --check scripts/postdeploy-smoke.mjs && node --check scripts/live-writer-route-probe.mjs && node --check scripts/gemini-role-dryrun.mjs && node --check scripts/gemini-critic-granularity-benchmark.mjs && node --check scripts/gemini-critic-clean-control.mjs",
+    "verify": "npm run check && npm test && node scripts/live-writer-route-probe.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

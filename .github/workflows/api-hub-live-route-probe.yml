@@ -1,0 +1,41 @@
+name: API Hub Live AI Route Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/api-hub-live-route-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment: production
+    env:
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Probe live AI routes without executing providers
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then KEY="$API_HUB_V2_KEY"; else KEY="$EXISTING_ORCHESTRATOR_KEY"; fi
+          test -n "$KEY"
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_V2_BASE_URL;
+          const key = process.env.API_HUB_V2_KEY || process.env.EXISTING_ORCHESTRATOR_KEY;
+          const headers = {'content-type':'application/json','x-hub-api-key':key};
+          const health = await fetch(`${base}/health?probe=${Date.now()}`, {cache:'no-store'});
+          console.log(`PROBE health status=${health.status}`);
+          if (health.status !== 200) throw new Error(`HEALTH_STATUS_${health.status}`);
+          for (const path of ['/api/hub/ai/writer','/api/hub/ai/critic','/api/hub/ai/repair']) {
+            const response = await fetch(`${base}${path}`, {method:'POST',headers,body:'{}'});
+            console.log(`PROBE ${path} status=${response.status}`);
+            if (response.status === 404) throw new Error(`ROUTE_404:${path}`);
+            if (response.status === 401 || response.status === 403) throw new Error(`ROUTE_AUTH_${response.status}:${path}`);
+          }
+          NODE

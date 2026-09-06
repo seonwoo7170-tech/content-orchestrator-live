@@ -1,0 +1,74 @@
+name: API Hub v2 Gemini Role Dry Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Gemini test mode'
+        required: true
+        default: 'critic-fault'
+        type: choice
+        options:
+          - critic-fault
+          - pipeline
+      topic:
+        description: 'Pipeline topic (used only in pipeline mode)'
+        required: false
+        default: 'PC가 갑자기 느려졌을 때 초보자가 확인할 순서'
+        type: string
+      language:
+        description: 'Pipeline language'
+        required: true
+        default: 'ko'
+        type: choice
+        options:
+          - ko
+          - en
+  push:
+    branches:
+      - feature/gemini-35-flash-lite-role-prompts
+    paths:
+      - '.github/gemini-role-dryrun-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY || secrets.GEMINI_API_KEY || secrets.GOOGLE_AI_API_KEY || secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
+      DRYRUN_MODE: ${{ inputs.mode }}
+      DRYRUN_TOPIC: ${{ inputs.topic }}
+      DRYRUN_LANGUAGE: ${{ inputs.language }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify API Hub v2 before live Gemini dry run
+        run: npm run verify
+        working-directory: api-hub-v2
+
+      - name: Validate Gemini dry-run secret presence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GEMINI_API_KEY" || { echo 'No compatible Gemini API key secret is configured in the production environment'; exit 1; }
+
+      - name: Run actual dedicated Gemini critic fault injection
+        run: node scripts/gemini-role-dryrun.mjs
+        working-directory: api-hub-v2
+
+      - name: Run Gemini critic granularity benchmark
+        if: ${{ github.event_name == 'push' }}
+        run: node scripts/gemini-critic-granularity-benchmark.mjs
+        working-directory: api-hub-v2
+
+      - name: Run Gemini critic clean control
+        if: ${{ github.event_name == 'push' }}
+        run: node scripts/gemini-critic-clean-control.mjs
+        working-directory: api-hub-v2

@@ -1,0 +1,46 @@
+name: HomeFix Aircon Media Repair Runner
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/homefix-aircon-media-repair-runner-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    env:
+      DEPLOY_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Verify source
+        run: |
+          npm run verify
+          (cd api-hub-v2 && npm run verify)
+          node --check scripts/homefix-aircon-media-repair.mjs
+      - name: Repair only broken media on exact HomeFix aircon post
+        run: node scripts/homefix-aircon-media-repair.mjs

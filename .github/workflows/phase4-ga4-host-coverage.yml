@@ -1,0 +1,96 @@
+name: Phase 4 GA4 Host Coverage
+
+on:
+  push:
+    paths:
+      - '.github/phase4-ga4-host-coverage-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    env:
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Discover current Blogger hosts in GA4 historical data
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_API_KEY" || { echo 'HUB_API_KEY is missing'; exit 1; }
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_URL;
+          const headers = {'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY};
+          const post = async (path, body={}) => {
+            const response = await fetch(`${base}${path}`, {method:'POST', headers, body:JSON.stringify(body)});
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(`${path}:HTTP_${response.status}:${String(data?.error||'FAILED').split(':')[0]}`);
+            return data;
+          };
+          const normalizeHost = (value) => {
+            try { return new URL(String(value||'')).hostname.toLowerCase().replace(/^www\./,''); }
+            catch { return String(value||'').trim().toLowerCase().replace(/^www\./,''); }
+          };
+          const iso = d => d.toISOString().slice(0,10);
+          const end = new Date();
+          end.setUTCDate(end.getUTCDate() - 1);
+          const start = new Date(end);
+          start.setUTCDate(start.getUTCDate() - 364);
+          const startDate = iso(start);
+          const endDate = iso(end);
+
+          const blogsPayload = await post('/api/blogger/blogs', {action:'list'});
+          const blogs = (Array.isArray(blogsPayload.blogs) ? blogsPayload.blogs : []).map(blog => ({
+            name:String(blog.name||blog.blogName||'Blog'),
+            host:normalizeHost(blog.url)
+          })).filter(blog => blog.host);
+          if (blogs.length !== 7) throw new Error(`BLOG_COUNT_INVALID:${blogs.length}`);
+
+          const inventory = await post('/api/ga4/properties', {});
+          const properties = Array.isArray(inventory.properties) ? inventory.properties : [];
+          const matches = new Map(blogs.map(blog => [blog.host, []]));
+          let queried = 0;
+          let failed = 0;
+
+          for (const property of properties) {
+            const propertyId = String(property.propertyId||'');
+            if (!/^\d+$/.test(propertyId)) continue;
+            try {
+              const report = await post('/api/ga4/report', {
+                propertyId,
+                startDate,
+                endDate,
+                dimensions:['hostName'],
+                metrics:['sessions'],
+                limit:1000
+              });
+              queried += 1;
+              for (const row of Array.isArray(report.rows) ? report.rows : []) {
+                const host = normalizeHost(row?.dimensions?.hostName);
+                if (!matches.has(host)) continue;
+                const sessions = Number(row?.metrics?.sessions || 0);
+                matches.get(host).push({propertyName:String(property.displayName||'GA4 property'),sessions});
+              }
+            } catch (error) {
+              failed += 1;
+              console.log(`GA4_PROPERTY_QUERY_FAILED code=${String(error?.message||'FAILED').split(':').pop()}`);
+            }
+          }
+
+          let covered = 0;
+          console.log(`GA4_HOST_COVERAGE_WINDOW start=${startDate} end=${endDate}`);
+          for (const blog of blogs) {
+            const found = matches.get(blog.host) || [];
+            const positive = found.filter(item => item.sessions > 0);
+            if (positive.length) covered += 1;
+            const totalSessions = positive.reduce((sum,item)=>sum+item.sessions,0);
+            const propertyNames = [...new Set(positive.map(item=>item.propertyName))];
+            console.log(`GA4_HOST_MATCH blog=${JSON.stringify(blog.name)} host=${blog.host} matched=${positive.length?'yes':'no'} propertyCount=${propertyNames.length} sessions=${totalSessions} properties=${JSON.stringify(propertyNames)}`);
+          }
+          console.log(`PHASE4_2_GA4_HOST_COVERAGE_OK blogs=${blogs.length} properties=${properties.length} queried=${queried} failed=${failed} covered=${covered} uncovered=${blogs.length-covered}`);
+          if (failed > 0) process.exitCode = 2;
+          NODE

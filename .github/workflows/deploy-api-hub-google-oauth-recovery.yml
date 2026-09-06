@@ -1,0 +1,121 @@
+name: Deploy API Hub Google OAuth Recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-api-hub-google-oauth-recovery.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      GOOGLE_OAUTH_SETUP_ENABLED: 'false'
+      GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED: 'true'
+      BLOGGER_WRITES_ENABLED: 'true'
+      BLOGGER_WRITE_MODE: managed_allowlist
+      BLOGGER_WRITE_ALLOWED_BLOG_IDS: '2028653002689012296,3842750331568707733,5540565797560833468,7741529904469657049'
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify API Hub v2
+        run: npm install --no-audit --no-fund && npm run verify
+        working-directory: api-hub-v2
+      - name: Validate recovery secrets and auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$GOOGLE_CLIENT_ID"
+          test -n "$GOOGLE_CLIENT_SECRET"
+          test -n "$GOOGLE_REFRESH_TOKEN"
+          if [ -n "$API_HUB_V2_KEY" ]; then
+            echo "ORCHESTRATOR_API_KEY=$API_HUB_V2_KEY" >> "$GITHUB_ENV"
+          elif [ -n "$EXISTING_ORCHESTRATOR_KEY" ]; then
+            echo "ORCHESTRATOR_API_KEY=$EXISTING_ORCHESTRATOR_KEY" >> "$GITHUB_ENV"
+          else
+            echo 'No orchestrator authentication key is configured.'; exit 1
+          fi
+      - name: Render OAuth recovery config
+        run: node scripts/render-wrangler.mjs
+        working-directory: api-hub-v2
+      - name: Validate recovery-only gate
+        shell: bash
+        working-directory: api-hub-v2
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const text=fs.readFileSync('wrangler.jsonc','utf8');
+          for(const needle of [
+            '"GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED": "true"',
+            '"BLOGGER_WRITES_ENABLED": "true"',
+            '"BLOGGER_WRITE_MODE": "managed_allowlist"'
+          ]) if(!text.includes(needle)) throw new Error(`OAUTH_RECOVERY_GATE_INVALID:${needle}`);
+          NODE
+      - name: Prepare runtime secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const {writeFileSync,chmodSync}=require('node:fs');
+          const values={
+            ORCHESTRATOR_API_KEY:process.env.ORCHESTRATOR_API_KEY,
+            GEMINI_API_KEY:process.env.GEMINI_API_KEY,
+            KIE_API_KEY:process.env.KIE_API_KEY,
+            TAVILY_API_KEY:process.env.TAVILY_API_KEY,
+            GOOGLE_CLIENT_ID:process.env.GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET:process.env.GOOGLE_CLIENT_SECRET,
+            GOOGLE_REFRESH_TOKEN:process.env.GOOGLE_REFRESH_TOKEN
+          };
+          for(const [k,v] of Object.entries(values)) if(!v) throw new Error(k+'_REQUIRED');
+          writeFileSync('api-hub-v2/.deploy-secrets.json',JSON.stringify(values));
+          chmodSync('api-hub-v2/.deploy-secrets.json',0o600);
+          NODE
+      - name: Deploy API Hub OAuth recovery mode
+        run: npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
+        working-directory: api-hub-v2
+      - name: Verify reauthorization endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 3
+          node --input-type=module - <<'NODE'
+          const base=process.env.API_HUB_V2_BASE_URL;
+          const healthResp=await fetch(`${base}/health?oauthRecovery=${Date.now()}`,{cache:'no-store'});
+          const health=await healthResp.json().catch(()=>({}));
+          if(!healthResp.ok||health.googleOAuthScopeUpgradeEnabled!==true) throw new Error('OAUTH_RECOVERY_HEALTH_GATE_FAILED');
+          const response=await fetch(`${base}/oauth/google/start?recovery=${Date.now()}`,{redirect:'manual',cache:'no-store'});
+          const location=String(response.headers.get('location')||'');
+          if(response.status!==302||!location.startsWith('https://accounts.google.com/')) throw new Error(`OAUTH_REAUTH_START_FAILED:${response.status}`);
+          console.log('GOOGLE_OAUTH_REAUTH_READY|start=/oauth/google/start|redirect=accounts.google.com');
+          NODE
+      - name: Cleanup
+        if: always()
+        run: rm -f api-hub-v2/.deploy-secrets.json api-hub-v2/wrangler.jsonc

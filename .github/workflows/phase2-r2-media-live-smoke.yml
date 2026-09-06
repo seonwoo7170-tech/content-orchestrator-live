@@ -1,0 +1,78 @@
+name: Phase 2 R2 Media Live Smoke
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/phase2-r2-media-smoke-trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase2-r2-media-live-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+      BUCKET_NAME: content-orchestrator-images
+      OBJECT_KEY: jobs/phase2-live-smoke/media-probe.png
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate inputs and safety gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_R2_API_TOKEN missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID missing'; exit 1; }
+          HEALTH="$(curl -fsS "$ORCHESTRATOR_URL/health")"
+          HEALTH="$HEALTH" node - <<'NODE'
+          const h = JSON.parse(process.env.HEALTH);
+          if (h.ok !== true) throw new Error('ORCHESTRATOR_HEALTH_FAILED');
+          if (h.bloggerWritesEnabled !== false) throw new Error('BLOGGER_WRITES_MUST_REMAIN_DISABLED');
+          if (h.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_MUST_REMAIN_DISABLED');
+          if (h.phase2Images?.bucketBound !== true) throw new Error('R2_BUCKET_NOT_BOUND');
+          console.log('Safety gates disabled and R2 binding present.');
+          NODE
+
+      - name: Create deterministic probe PNG
+        shell: bash
+        run: |
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZP5sAAAAASUVORK5CYII=' | base64 -d > /tmp/probe.png
+          test -s /tmp/probe.png
+          sha256sum /tmp/probe.png | sed 's#/tmp/probe.png#probe.png#'
+
+      - name: Put probe into remote R2
+        run: npx --yes wrangler@latest r2 object put "$BUCKET_NAME/$OBJECT_KEY" --file /tmp/probe.png --content-type image/png --remote
+
+      - name: Verify public media read-back byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS -D /tmp/headers.txt "$ORCHESTRATOR_URL/media/$OBJECT_KEY" -o /tmp/readback.png
+          test -s /tmp/readback.png
+          cmp -s /tmp/probe.png /tmp/readback.png || { echo 'MEDIA_BYTES_MISMATCH'; exit 1; }
+          grep -qi '^content-type: image/png' /tmp/headers.txt || { echo 'MEDIA_CONTENT_TYPE_INVALID'; exit 1; }
+          echo 'R2 media read-back verified byte-for-byte.'
+
+      - name: Delete probe from remote R2
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            npx --yes wrangler@latest r2 object delete "$BUCKET_NAME/$OBJECT_KEY" --remote || true
+          fi
+          rm -f /tmp/probe.png /tmp/readback.png /tmp/headers.txt

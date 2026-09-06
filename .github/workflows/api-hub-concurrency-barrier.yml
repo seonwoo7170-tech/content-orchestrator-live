@@ -1,0 +1,21 @@
+name: API Hub Concurrency Barrier
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/api-hub-concurrency-barrier-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  barrier:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: No-op barrier
+        run: echo 'No production action. Concurrency barrier only.'

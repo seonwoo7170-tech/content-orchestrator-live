@@ -1,0 +1,62 @@
+name: Production Image Chain Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-image-chain-diagnostic.yml'
+      - '.github/production-image-chain-diagnostic-trigger'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Read sanitized image failure chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ADMIN_API_KEY"
+          node --input-type=module - <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          const base = process.env.ORCHESTRATOR_BASE_URL;
+          const response = await fetch(`${base}/api/operations/images/diagnostics?diag=${Date.now()}`, {
+            headers: { 'x-admin-api-key': process.env.ADMIN_API_KEY },
+            cache: 'no-store'
+          });
+          if (!response.ok) throw new Error(`IMAGE_DIAGNOSTIC_READ_${response.status}`);
+          const data = await response.json();
+          const failures = (Array.isArray(data.failures) ? data.failures : []).map((row) => ({
+            jobId: Number(row.jobId),
+            mode: row.mode,
+            role: row.role,
+            position: Number(row.position || 0),
+            errorCode: row.errorCode || null,
+            errorCodes: Array.isArray(row.errorCodes) ? row.errorCodes : [],
+            updatedAt: row.updatedAt || null
+          }));
+          const report = [
+            `## Image provider chain diagnostic ${new Date().toISOString()}`,
+            '', '```json', JSON.stringify({ health: data.health, configuredProviderMode: data.configuredProviderMode, failures }, null, 2), '```', ''
+          ].join('\n');
+          writeFileSync('/tmp/image-chain.md', report);
+          console.log('IMAGE_CHAIN', JSON.stringify(failures));
+          NODE
+      - name: Publish sanitized report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [ -s /tmp/image-chain.md ]; then
+            gh issue comment 80 --repo "$GITHUB_REPOSITORY" --body-file /tmp/image-chain.md
+          fi

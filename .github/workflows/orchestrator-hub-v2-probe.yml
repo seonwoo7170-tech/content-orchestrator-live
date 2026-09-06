@@ -1,0 +1,43 @@
+name: Orchestrator to Hub v2 Probe
+
+on:
+  push:
+    paths:
+      - '.github/orchestrator-hub-v2-probe-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+      ADMIN_KEY: ${{ secrets.ADMIN_API_KEY }}
+    steps:
+      - name: Probe Orchestrator Hub calls with writes disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ADMIN_KEY" || { echo 'ADMIN_KEY missing'; exit 1; }
+          node - <<'NODE'
+          async function call(label, path, method='GET', body) {
+            const init = {method, headers:{'x-admin-api-key':process.env.ADMIN_KEY}};
+            if (body !== undefined) {
+              init.headers['content-type']='application/json';
+              init.body=JSON.stringify(body);
+            }
+            const r = await fetch(`${process.env.ORCHESTRATOR_URL}${path}`, init);
+            const data = await r.json().catch(() => ({}));
+            console.log(`${label}: HTTP ${r.status}, error=${String(data?.error || 'none')}, detailsError=${String(data?.details?.error || 'none')}`);
+            return {r,data};
+          }
+          const health = await fetch(`${process.env.ORCHESTRATOR_URL}/health`,{cache:'no-store'}).then(r=>r.json());
+          console.log(`health: writes=${health.bloggerWritesEnabled===true?'ENABLED':'disabled'}, hubConfigured=${health.apiHubConfigured===true?'yes':'no'}`);
+          if (health.bloggerWritesEnabled !== false || health.apiHubConfigured !== true) throw new Error('ORCHESTRATOR_NOT_SAFE');
+          const blogs = await call('blogs','/api/blogs');
+          const diagnostic = await call('ai-diagnostic','/api/diagnostics/cloudflare-ai','POST',{});
+          if (!blogs.r.ok || !diagnostic.r.ok) process.exitCode=1;
+          NODE

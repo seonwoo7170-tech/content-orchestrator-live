@@ -1,0 +1,142 @@
+name: Deploy API Hub v2 Managed Blogger Writes
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/deploy-api-hub-v2-managed-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      FREE_AI_API_KEY: ${{ secrets.API_HUB_V2_FREE_AI_API_KEY }}
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED: 'false'
+      BLOGGER_WRITES_ENABLED: 'true'
+      BLOGGER_WRITE_MODE: managed_allowlist
+      BLOGGER_WRITE_ALLOWED_BLOG_IDS: '2028653002689012296,3842750331568707733,5540565797560833468,7741529904469657049,6470344354760178454,359287489505251041,286230575079975521'
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify API Hub v2
+        run: npm install --no-audit --no-fund && npm run verify
+        working-directory: api-hub-v2
+      - name: Resolve deployment auth and OAuth mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then
+            echo "ORCHESTRATOR_API_KEY=$API_HUB_V2_KEY" >> "$GITHUB_ENV"
+          elif [ -n "$EXISTING_ORCHESTRATOR_KEY" ]; then
+            echo "ORCHESTRATOR_API_KEY=$EXISTING_ORCHESTRATOR_KEY" >> "$GITHUB_ENV"
+          else
+            echo 'No orchestrator authentication key is configured.'; exit 1
+          fi
+          if [ -n "$GOOGLE_CLIENT_ID" ] && [ -n "$GOOGLE_CLIENT_SECRET" ] && [ -z "$GOOGLE_REFRESH_TOKEN" ]; then
+            echo 'GOOGLE_OAUTH_SETUP_ENABLED=true' >> "$GITHUB_ENV"
+          else
+            echo 'GOOGLE_OAUTH_SETUP_ENABLED=false' >> "$GITHUB_ENV"
+          fi
+      - name: Validate managed write scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$BLOGGER_WRITES_ENABLED" = 'true'
+          test "$BLOGGER_WRITE_MODE" = 'managed_allowlist'
+          node - <<'NODE'
+          const expected=['2028653002689012296','3842750331568707733','5540565797560833468','7741529904469657049','6470344354760178454','359287489505251041','286230575079975521'].sort();
+          const actual=String(process.env.BLOGGER_WRITE_ALLOWED_BLOG_IDS||'').split(',').map(x=>x.trim()).filter(Boolean).sort();
+          if(JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('BLOGGER_ALLOWLIST_SCOPE_INVALID');
+          console.log('BLOGGER_ALLOWLIST_SCOPE_OK|count=7');
+          NODE
+      - name: Render API Hub v2 config
+        run: node scripts/render-wrangler.mjs
+        working-directory: api-hub-v2
+      - name: Validate AI failover production gates
+        shell: bash
+        working-directory: api-hub-v2
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const text=fs.readFileSync('wrangler.jsonc','utf8');
+          for(const needle of [
+            '"TEXT_PRIMARY_PROVIDER": "gemini"',
+            '"TEXT_CLOUDFLARE_FALLBACK_ENABLED": "true"',
+            '"GEMINI_REQUEST_TIMEOUT_MS": "60000"',
+            '"AI_PROVIDER_RETRY_DELAY_MS": "4000"',
+            '"FREE_AI_FALLBACK_ENABLED": "true"',
+            '"FREE_AI_MODEL": "qwen7b"',
+            '"BLOGGER_WRITES_ENABLED": "true"',
+            '"BLOGGER_WRITE_MODE": "managed_allowlist"'
+          ]) if(!text.includes(needle)) throw new Error(`API_HUB_PRODUCTION_GATE_INVALID:${needle}`);
+          NODE
+      - name: Prepare runtime secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const {writeFileSync,chmodSync}=require('node:fs');
+          const values={ORCHESTRATOR_API_KEY:process.env.ORCHESTRATOR_API_KEY,GEMINI_API_KEY:process.env.GEMINI_API_KEY,KIE_API_KEY:process.env.KIE_API_KEY,TAVILY_API_KEY:process.env.TAVILY_API_KEY};
+          for(const [k,v] of Object.entries(values)) if(!v) throw new Error(k+'_REQUIRED');
+          if(process.env.FREE_AI_API_KEY) values.FREE_AI_API_KEY=process.env.FREE_AI_API_KEY;
+          if(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET){values.GOOGLE_CLIENT_ID=process.env.GOOGLE_CLIENT_ID;values.GOOGLE_CLIENT_SECRET=process.env.GOOGLE_CLIENT_SECRET;}
+          if(process.env.GOOGLE_REFRESH_TOKEN) values.GOOGLE_REFRESH_TOKEN=process.env.GOOGLE_REFRESH_TOKEN;
+          writeFileSync('api-hub-v2/.deploy-secrets.json',JSON.stringify(values));chmodSync('api-hub-v2/.deploy-secrets.json',0o600);
+          NODE
+      - name: Deploy API Hub v2
+        run: npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
+        working-directory: api-hub-v2
+      - name: Production read-back
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 3
+          node --input-type=module - <<'NODE'
+          const base=process.env.API_HUB_V2_BASE_URL;
+          const h=await fetch(`${base}/health?managed=${Date.now()}`,{cache:'no-store'}).then(r=>r.json());
+          if(h.bloggerWritesEnabled!==true||h.bloggerWriteMode!=='managed_allowlist') throw new Error('MANAGED_WRITE_GATE_READBACK_FAILED');
+          if(h.textPrimaryProvider!=='google-gemini') throw new Error('TEXT_PRIMARY_PROVIDER_READBACK_FAILED');
+          if(h.textCloudflareFallbackEnabled!==true) throw new Error('TEXT_FALLBACK_READBACK_FAILED');
+          if(Number(h.geminiRequestTimeoutMs)!==60000) throw new Error('GEMINI_TIMEOUT_READBACK_FAILED');
+          const freeConfigured=Boolean(String(process.env.FREE_AI_API_KEY||'').trim());
+          for(const [name,order] of [['writer',h.writerProviderOrder],['critic',h.criticProviderOrder],['repair',h.repairProviderOrder]]){
+            if(!Array.isArray(order)||order[0]!=='google-gemini'||!order.includes('cloudflare-workers-ai')) throw new Error(`${name.toUpperCase()}_PROVIDER_ORDER_INVALID`);
+            if(freeConfigured && order[1]!=='free-ai') throw new Error(`${name.toUpperCase()}_FREE_AI_ORDER_INVALID`);
+            if(!freeConfigured && order.includes('free-ai')) throw new Error(`${name.toUpperCase()}_FREE_AI_SHOULD_BE_INACTIVE`);
+          }
+          if(Boolean(h.freeAiConfigured)!==freeConfigured) throw new Error('FREE_AI_CONFIG_READBACK_FAILED');
+          console.log(`API_HUB_AI_FAILOVER_GATE_OK|primary=google-gemini|freeAi=${freeConfigured?'enabled':'inactive'}|final=cloudflare-workers-ai|geminiTimeoutMs=60000|geminiRetryDelayMs=4000`);
+          console.log('API_HUB_WRITE_GATE_OK|enabled=true|mode=managed_allowlist|count=7');
+          const headers={'content-type':'application/json','x-hub-api-key':process.env.ORCHESTRATOR_API_KEY};
+          const scope=await fetch(`${base}/api/google/scopes`,{method:'POST',headers,body:'{}'}).then(r=>r.json());
+          if(scope.blogger!==true) throw new Error('GOOGLE_BLOGGER_SCOPE_MISSING');
+          console.log('GOOGLE_BLOGGER_SCOPE_OK');
+          NODE
+      - name: Cleanup
+        if: always()
+        run: rm -f api-hub-v2/.deploy-secrets.json api-hub-v2/wrangler.jsonc

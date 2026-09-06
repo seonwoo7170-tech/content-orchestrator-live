@@ -1,0 +1,94 @@
+name: normalize-ready-recovery
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/normalize-ready-recovery-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve production D1
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Could not resolve production D1'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+      - name: Normalize stale recovery metadata on ready jobs only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/normalize.sql <<'SQL'
+          SELECT 'READY_PRE' AS marker,
+                 COUNT(*) AS ready_count,
+                 SUM(CASE WHEN retry_count <> 0 OR recovery_state <> 'none' OR next_retry_at IS NOT NULL OR hold_reason IS NOT NULL OR last_error_code IS NOT NULL OR last_failure_at IS NOT NULL OR error IS NOT NULL THEN 1 ELSE 0 END) AS stale_ready
+            FROM jobs
+           WHERE status='ready' AND archived_at IS NULL;
+          SELECT 'FAILED_PRE' AS marker, COUNT(*) AS failed_count,
+                 SUM(CASE WHEN recovery_state='retry_wait' THEN 1 ELSE 0 END) AS retry_wait
+            FROM jobs
+           WHERE status='failed' AND archived_at IS NULL;
+          UPDATE jobs
+             SET error=NULL,
+                 retry_count=0,
+                 recovery_state='none',
+                 next_retry_at=NULL,
+                 hold_reason=NULL,
+                 last_error_code=NULL,
+                 last_failure_at=NULL,
+                 updated_at=datetime('now')
+           WHERE status='ready'
+             AND archived_at IS NULL
+             AND (retry_count <> 0 OR recovery_state <> 'none' OR next_retry_at IS NOT NULL OR hold_reason IS NOT NULL OR last_error_code IS NOT NULL OR last_failure_at IS NOT NULL OR error IS NOT NULL);
+          UPDATE daily_plan_slots
+             SET retry_count=0,
+                 recovery_state='none',
+                 next_retry_at=NULL,
+                 hold_reason=NULL,
+                 last_error_code=NULL,
+                 last_failure_at=NULL,
+                 updated_at=datetime('now')
+           WHERE job_id IN (SELECT id FROM jobs WHERE status='ready' AND archived_at IS NULL)
+             AND (retry_count <> 0 OR recovery_state <> 'none' OR next_retry_at IS NOT NULL OR hold_reason IS NOT NULL OR last_error_code IS NOT NULL OR last_failure_at IS NOT NULL);
+          SELECT 'READY_POST' AS marker,
+                 COUNT(*) AS ready_count,
+                 SUM(CASE WHEN retry_count <> 0 OR recovery_state <> 'none' OR next_retry_at IS NOT NULL OR hold_reason IS NOT NULL OR last_error_code IS NOT NULL OR last_failure_at IS NOT NULL OR error IS NOT NULL THEN 1 ELSE 0 END) AS stale_ready
+            FROM jobs
+           WHERE status='ready' AND archived_at IS NULL;
+          SELECT 'FAILED_POST' AS marker, COUNT(*) AS failed_count,
+                 SUM(CASE WHEN recovery_state='retry_wait' THEN 1 ELSE 0 END) AS retry_wait
+            FROM jobs
+           WHERE status='failed' AND archived_at IS NULL;
+          SQL
+          npx --yes wrangler@latest d1 execute "$D1_DATABASE_ID" --remote --file /tmp/normalize.sql --json > /tmp/normalize.json
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const text=fs.readFileSync('/tmp/normalize.json','utf8');
+          const start=text.indexOf('[');
+          const end=text.lastIndexOf(']');
+          if(start<0||end<start) throw new Error('D1_JSON_OUTPUT_NOT_FOUND');
+          const raw=JSON.parse(text.slice(start,end+1));
+          const rows=[];
+          for(const entry of Array.isArray(raw)?raw:[raw]) for(const row of entry?.results||[]) rows.push(row);
+          const byMarker=Object.fromEntries(rows.filter(r=>r.marker).map(r=>[r.marker,r]));
+          const pre=byMarker.READY_PRE||{};
+          const post=byMarker.READY_POST||{};
+          const failedPre=byMarker.FAILED_PRE||{};
+          const failedPost=byMarker.FAILED_POST||{};
+          if(Number(post.stale_ready||0)!==0) throw new Error('READY_RECOVERY_NORMALIZATION_FAILED');
+          if(Number(failedPre.failed_count||0)!==Number(failedPost.failed_count||0) || Number(failedPre.retry_wait||0)!==Number(failedPost.retry_wait||0)) throw new Error('FAILED_JOBS_CHANGED_UNEXPECTEDLY');
+          console.log(`READY_RECOVERY_NORMALIZED ready=${Number(post.ready_count||0)} staleBefore=${Number(pre.stale_ready||0)} staleAfter=${Number(post.stale_ready||0)} failedPreserved=${Number(failedPost.failed_count||0)} retryWaitPreserved=${Number(failedPost.retry_wait||0)}`);
+          NODE
+          rm -f /tmp/normalize.sql /tmp/normalize.json

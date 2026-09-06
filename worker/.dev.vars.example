@@ -1,0 +1,14 @@
+# Never commit real values.
+API_HUB_BASE_URL=https://five-minutes-api-hub.example.invalid
+HUB_API_KEY=replace-locally
+ADMIN_API_KEY=replace-locally
+BLOGGER_WRITES_ENABLED=false
+
+# API Hub route contracts. Keep provider secrets in API Hub, not here.
+HUB_BLOGGER_BLOGS_PATH=/api/blogger/blogs
+HUB_WRITER_PATH=/api/hub/ai/writer
+HUB_CRITIC_PATH=/api/hub/ai/critic
+HUB_REPAIR_PATH=/api/hub/ai/repair
+HUB_CLOUDFLARE_DIAGNOSTIC_PATH=/api/hub/ai/diagnostics/cloudflare
+HUB_BLOGGER_GET_PATH=/api/blogger/post/get
+HUB_BLOGGER_POST_PATH=/api/blogger/post

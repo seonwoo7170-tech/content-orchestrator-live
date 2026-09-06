@@ -1,0 +1,400 @@
+name: Phase 2 Homefix Single Publish
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/phase2-homefix-single-publish-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    env:
+      DEPLOY_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+      TARGET_HOST: smile-homefix.blogspot.com
+      TEST_TOPIC: 샤워기 수압이 약해졌을 때 집에서 먼저 확인할 5가지
+      BUCKET_NAME: content-orchestrator-images
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify source before any production action
+        run: |
+          npm run verify
+          (cd api-hub-v2 && npm run verify)
+
+      - name: Resolve API Hub authentication key
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then
+            echo "HUB_API_KEY=$API_HUB_V2_KEY" >> "$GITHUB_ENV"
+          elif [ -n "$EXISTING_ORCHESTRATOR_KEY" ]; then
+            echo "HUB_API_KEY=$EXISTING_ORCHESTRATOR_KEY" >> "$GITHUB_ENV"
+          else
+            echo 'No API Hub authentication key is configured.'
+            exit 1
+          fi
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_API_TOKEN R2_API_TOKEN CLOUDFLARE_ACCOUNT_ID GEMINI_API_KEY KIE_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN HUB_API_KEY; do
+            test -n "${!name}" || { echo "$name is missing"; exit 1; }
+          done
+
+      - name: Confirm safe normal state and resolve exact Homefix target read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const [hubResp, orchResp] = await Promise.all([
+            fetch(`${process.env.API_HUB_V2_BASE_URL}/health`, { cache: 'no-store' }),
+            fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health`, { cache: 'no-store' })
+          ]);
+          const [hub, orch] = await Promise.all([hubResp.json().catch(()=>({})), orchResp.json().catch(()=>({}))]);
+          if (!hubResp.ok || hub.ok !== true) throw new Error('API_HUB_HEALTH_REQUIRED');
+          if (hub.bloggerWritesEnabled !== false || hub.bloggerWriteMode !== 'disabled') throw new Error('API_HUB_SAFE_STATE_REQUIRED');
+          if (hub.bloggerConfigured !== true || hub.criticConfigured !== true || hub.kieImageConfigured !== true) throw new Error('API_HUB_PROVIDER_CONFIGURATION_REQUIRED');
+          if (!orchResp.ok || orch.ok !== true || orch.bloggerWritesEnabled !== false) throw new Error('ORCHESTRATOR_SAFE_STATE_REQUIRED');
+          if (orch.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_MUST_REMAIN_DISABLED');
+          if (orch.phase2Images?.bucketBound !== true) throw new Error('R2_BUCKET_MUST_BE_BOUND');
+
+          const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/blogger/blogs`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-hub-api-key': process.env.HUB_API_KEY },
+            body: JSON.stringify({ action: 'list' })
+          });
+          const data = await r.json().catch(()=>({}));
+          if (!r.ok || !Array.isArray(data.blogs)) throw new Error(`BLOG_LIST_FAILED:${r.status}`);
+          const matches = data.blogs.filter((blog) => {
+            try { return new URL(String(blog.url || '')).hostname.toLowerCase() === process.env.TARGET_HOST.toLowerCase(); }
+            catch { return false; }
+          });
+          if (matches.length !== 1) throw new Error(`HOMEFIX_TARGET_NOT_EXACT:${matches.length}`);
+          const target = matches[0];
+          fs.appendFileSync(process.env.GITHUB_ENV, `TARGET_BLOG_ID=${String(target.id || target.blogId)}\n`);
+          fs.appendFileSync(process.env.GITHUB_ENV, `TARGET_BLOG_NAME=${String(target.name || target.blogName || 'Homefix').replace(/[\r\n]/g,' ')}\n`);
+          console.log(`Exact Homefix target verified read-only: ${target.name || target.blogName}; connectedBlogs=${data.blogs.length}`);
+          NODE
+
+      - name: Generate one READY article and three images with all Blogger writes still disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import { writeFileSync, chmodSync } from 'node:fs';
+          import { runNewArticlePipeline } from './worker/lib/pipeline.js';
+          import { validateArticle } from './worker/lib/contracts.js';
+          import { lintNaturalWriting } from './worker/lib/natural-writing-linter.js';
+          import { buildImagePlan, attachStoredImages } from './worker/lib/image-plan.js';
+
+          const hubHeaders = { 'content-type': 'application/json', 'x-hub-api-key': process.env.HUB_API_KEY };
+          const env = { API_HUB_BASE_URL: process.env.API_HUB_V2_BASE_URL, HUB_API_KEY: process.env.HUB_API_KEY };
+          const stages = [];
+          const result = await runNewArticlePipeline(
+            env,
+            { blogId: process.env.TARGET_BLOG_ID, topic: process.env.TEST_TOPIC, language: 'ko' },
+            fetch,
+            { onStage: async (stage) => { stages.push(stage); console.log(`pipeline stage=${stage}`); } }
+          );
+          if (result.status !== 'READY') throw new Error(`PIPELINE_NOT_READY:${result.status}`);
+          if (result.finalCritic?.status !== 'PASS' || Number(result.finalCritic?.score || 0) < 95 || (result.finalCritic?.issues || []).length !== 0) throw new Error('FINAL_CRITIC_NOT_CLEAN');
+          let article = validateArticle(result.article);
+          const lint = lintNaturalWriting(article);
+          if (lint.status === 'BLOCK') throw new Error('FINAL_NATURAL_WRITING_BLOCK');
+
+          const plan = buildImagePlan(article, { bodyCount: 2 });
+          const rows = [];
+          const runId = String(process.env.GITHUB_RUN_ID || Date.now());
+          for (let index = 0; index < plan.images.length; index += 1) {
+            const image = plan.images[index];
+            const response = await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/hub/image/generate`, {
+              method: 'POST',
+              headers: hubHeaders,
+              body: JSON.stringify({
+                role: image.role,
+                providerMode: 'auto',
+                prompt: image.prompt,
+                aspectRatio: image.role === 'thumbnail' ? '16:9' : '4:3',
+                steps: 4,
+                seed: 20260829 + index
+              })
+            });
+            const generated = await response.json().catch(()=>({}));
+            if (!response.ok || generated.ok !== true) throw new Error(`IMAGE_GENERATION_FAILED_${index}:${generated.error || response.status}`);
+            const mime = String(generated.mimeType || '').split(';')[0].trim().toLowerCase();
+            const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : mime === 'image/jpeg' ? 'jpg' : '';
+            if (!ext) throw new Error(`IMAGE_MIME_INVALID_${index}:${mime}`);
+            const bytes = Buffer.from(String(generated.imageBase64 || ''), 'base64');
+            if (bytes.length < 1000) throw new Error(`IMAGE_BYTES_TOO_SMALL_${index}`);
+            const localFile = `/tmp/homefix-${index}.${ext}`;
+            const storageKey = `jobs/homefix-single-publish-${runId}/${image.role}-${image.position}.${ext}`;
+            const publicUrl = `${process.env.ORCHESTRATOR_BASE_URL}/media/${storageKey}`;
+            writeFileSync(localFile, bytes);
+            rows.push({
+              id: 910000 + index,
+              role: image.role,
+              position: image.position,
+              status: 'stored',
+              public_url: publicUrl,
+              alt_text: image.altText,
+              storage_key: storageKey,
+              mimeType: mime,
+              localFile,
+              provider: String(generated.provider || ''),
+              model: String(generated.model || '')
+            });
+            console.log(`image ${index + 1}/${plan.images.length}: provider=${generated.provider}; model=${generated.model}; mime=${mime}`);
+          }
+
+          article = validateArticle(attachStoredImages(article, rows));
+          const lintAfterImages = lintNaturalWriting(article);
+          if (lintAfterImages.status === 'BLOCK') throw new Error('ARTICLE_BLOCKED_AFTER_IMAGE_ATTACHMENT');
+          writeFileSync('.homefix-ready.json', JSON.stringify({
+            article,
+            images: rows,
+            initialCritic: result.initialCritic,
+            finalCritic: result.finalCritic,
+            repairApplied: result.repairApplied === true,
+            styleRepairApplied: result.styleRepairApplied === true,
+            stages
+          }));
+          chmodSync('.homefix-ready.json', 0o600);
+          console.log(`READY_FOR_HOMEFIX title=${article.title}; images=${rows.length}; finalCritic=${result.finalCritic.score}; Blogger writes remain disabled`);
+          NODE
+
+      - name: Upload generated images to permanent R2 paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE' > /tmp/homefix-r2.tsv
+          const fs = require('node:fs');
+          const ready = JSON.parse(fs.readFileSync('.homefix-ready.json','utf8'));
+          for (const image of ready.images) console.log([image.localFile, image.storage_key, image.mimeType].join('\t'));
+          NODE
+          while IFS=$'\t' read -r file key mime; do
+            CLOUDFLARE_API_TOKEN="$R2_API_TOKEN" npx --yes wrangler@latest r2 object put "$BUCKET_NAME/$key" --file "$file" --content-type "$mime" --remote
+          done < /tmp/homefix-r2.tsv
+
+      - name: Verify all permanent R2 media read back byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const ready = JSON.parse(fs.readFileSync('.homefix-ready.json','utf8'));
+          for (const image of ready.images) {
+            const response = await fetch(image.public_url, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`MEDIA_READBACK_HTTP_${response.status}`);
+            const mime = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+            if (mime !== image.mimeType) throw new Error(`MEDIA_MIME_MISMATCH:${mime}:${image.mimeType}`);
+            const remote = Buffer.from(await response.arrayBuffer());
+            const local = fs.readFileSync(image.localFile);
+            if (!remote.equals(local)) throw new Error(`MEDIA_BYTES_MISMATCH:${image.storage_key}`);
+          }
+          console.log(`R2/media verified for ${ready.images.length} permanent article images.`);
+          NODE
+
+      - name: Prepare exact-target guarded API Hub deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOGLE_OAUTH_SETUP_ENABLED=false node api-hub-v2/scripts/render-wrangler.mjs
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const normalPath = 'api-hub-v2/wrangler.jsonc';
+          const normal = JSON.parse(fs.readFileSync(normalPath, 'utf8'));
+          if (normal.vars?.BLOGGER_WRITES_ENABLED !== 'false' || normal.vars?.BLOGGER_WRITE_MODE !== 'disabled') throw new Error('NORMAL_WRITE_GATE_NOT_DISABLED');
+          fs.writeFileSync('api-hub-v2/wrangler.normal.jsonc', JSON.stringify(normal, null, 2));
+          const guarded = structuredClone(normal);
+          guarded.vars.BLOGGER_WRITES_ENABLED = 'true';
+          guarded.vars.BLOGGER_WRITE_MODE = 'phase2_single_publish';
+          guarded.vars.PHASE2_SINGLE_PUBLISH_BLOG_ID = process.env.TARGET_BLOG_ID;
+          fs.writeFileSync('api-hub-v2/wrangler.phase2-single.jsonc', JSON.stringify(guarded, null, 2));
+          const secrets = {
+            ORCHESTRATOR_API_KEY: process.env.HUB_API_KEY,
+            GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+            KIE_API_KEY: process.env.KIE_API_KEY,
+            GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+            GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN
+          };
+          fs.writeFileSync('api-hub-v2/.single-publish-secrets.json', JSON.stringify(secrets));
+          fs.chmodSync('api-hub-v2/.single-publish-secrets.json', 0o600);
+          NODE
+
+      - name: Temporarily enable exact Homefix single-publish gate
+        shell: bash
+        working-directory: api-hub-v2
+        run: |
+          set -euo pipefail
+          CLOUDFLARE_API_TOKEN="$DEPLOY_API_TOKEN" npx --yes wrangler@latest deploy --config wrangler.phase2-single.jsonc --secrets-file .single-publish-secrets.json
+
+      - name: Wait for guarded gate to propagate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+          for (let i = 1; i <= 20; i++) {
+            const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/health`, { cache: 'no-store' });
+            const h = await r.json().catch(()=>({}));
+            if (r.ok && h.bloggerWritesEnabled === true && h.bloggerWriteMode === 'phase2_single_publish') {
+              console.log('Exact-target single-publish gate is active.');
+              process.exit(0);
+            }
+            await sleep(1500);
+          }
+          throw new Error('SINGLE_PUBLISH_GATE_NOT_READY');
+          NODE
+
+      - name: Publish exactly one Homefix post and read it back
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const ready = JSON.parse(fs.readFileSync('.homefix-ready.json','utf8'));
+          async function post(path, body) {
+            const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}${path}`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', 'x-hub-api-key': process.env.HUB_API_KEY },
+              body: JSON.stringify(body)
+            });
+            const data = await r.json().catch(()=>({}));
+            if (!r.ok) throw new Error(`${path}:${r.status}:${data.error || 'REQUEST_FAILED'}`);
+            return data;
+          }
+          const published = await post('/api/blogger/post', {
+            phase2SinglePublish: true,
+            operation: 'create',
+            publishMode: 'published',
+            blogId: process.env.TARGET_BLOG_ID,
+            article: ready.article
+          });
+          const postId = String(published.bloggerPostId || '');
+          if (!postId) throw new Error('BLOGGER_POST_ID_MISSING');
+          const verify = await post('/api/blogger/post/get', {
+            blogId: process.env.TARGET_BLOG_ID,
+            bloggerPostId: postId,
+            language: 'ko'
+          });
+          if (String(verify.identity?.bloggerPostId || '') !== postId) throw new Error('BLOGGER_POST_ID_READBACK_MISMATCH');
+          if (String(verify.identity?.status || '').toUpperCase() !== 'LIVE') throw new Error(`BLOGGER_POST_NOT_LIVE:${verify.identity?.status || 'unknown'}`);
+          if (String(verify.article?.title || '') !== String(ready.article.title)) throw new Error('BLOGGER_TITLE_READBACK_MISMATCH');
+          for (const image of ready.images) {
+            if (!String(verify.article?.html || '').includes(image.public_url)) throw new Error(`BLOGGER_IMAGE_URL_MISSING:${image.role}:${image.position}`);
+          }
+          if (published.url) {
+            const publicResponse = await fetch(published.url, { redirect: 'follow', cache: 'no-store' });
+            if (publicResponse.status >= 400) throw new Error(`BLOGGER_PUBLIC_URL_HTTP_${publicResponse.status}`);
+          }
+          fs.writeFileSync('.homefix-published.json', JSON.stringify({
+            blogId: process.env.TARGET_BLOG_ID,
+            bloggerPostId: postId,
+            title: ready.article.title,
+            url: published.url || verify.identity?.permalink || null,
+            status: verify.identity.status,
+            imageCount: ready.images.length,
+            finalCriticScore: ready.finalCritic?.score ?? null
+          }));
+          fs.chmodSync('.homefix-published.json', 0o600);
+          console.log(`HOMEFIX_SINGLE_PUBLISH_OK postId=${postId}; status=LIVE; title=${ready.article.title}; images=${ready.images.length}; finalCritic=${ready.finalCritic?.score}`);
+          console.log(`HOMEFIX_PUBLIC_URL=${published.url || verify.identity?.permalink || 'available-in-Blogger'}`);
+          NODE
+
+      - name: Restore API Hub Blogger writes disabled
+        if: always()
+        shell: bash
+        working-directory: api-hub-v2
+        run: |
+          set -euo pipefail
+          if [ -f wrangler.normal.jsonc ] && [ -f .single-publish-secrets.json ]; then
+            CLOUDFLARE_API_TOKEN="$DEPLOY_API_TOKEN" npx --yes wrangler@latest deploy --config wrangler.normal.jsonc --secrets-file .single-publish-secrets.json
+          fi
+
+      - name: Verify final safety gates and published post
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+          let safe = false;
+          for (let i = 1; i <= 20; i++) {
+            const [hr, or] = await Promise.all([
+              fetch(`${process.env.API_HUB_V2_BASE_URL}/health`, { cache: 'no-store' }),
+              fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health`, { cache: 'no-store' })
+            ]);
+            const [h, o] = await Promise.all([hr.json().catch(()=>({})), or.json().catch(()=>({}))]);
+            safe = hr.ok && or.ok && h.bloggerWritesEnabled === false && h.bloggerWriteMode === 'disabled' && o.bloggerWritesEnabled === false && o.phase2Automation?.autoPublishExecutionEnabled === false;
+            if (safe) break;
+            await sleep(1500);
+          }
+          if (!safe) throw new Error('FINAL_WRITE_GATES_NOT_DISABLED');
+          if (fs.existsSync('.homefix-published.json')) {
+            const p = JSON.parse(fs.readFileSync('.homefix-published.json','utf8'));
+            const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/blogger/post/get`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', 'x-hub-api-key': process.env.HUB_API_KEY },
+              body: JSON.stringify({ blogId: p.blogId, bloggerPostId: p.bloggerPostId, language: 'ko' })
+            });
+            const data = await r.json().catch(()=>({}));
+            if (!r.ok || String(data.identity?.status || '').toUpperCase() !== 'LIVE') throw new Error('PUBLISHED_POST_FINAL_READBACK_FAILED');
+            console.log(`Final safety OK; published post remains LIVE: ${p.url || p.bloggerPostId}`);
+          } else {
+            console.log('Final safety OK; no published marker exists.');
+          }
+          NODE
+
+      - name: Remove orphan R2 images only if no post was published
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .homefix-published.json ]; then
+            echo 'Published marker exists; keeping permanent article images.'
+            exit 0
+          fi
+          if [ -f .homefix-ready.json ]; then
+            node - <<'NODE' > /tmp/homefix-cleanup-keys.txt
+          const fs = require('node:fs');
+          const ready = JSON.parse(fs.readFileSync('.homefix-ready.json','utf8'));
+          for (const image of ready.images || []) console.log(image.storage_key);
+          NODE
+            while IFS= read -r key; do
+              [ -n "$key" ] && CLOUDFLARE_API_TOKEN="$R2_API_TOKEN" npx --yes wrangler@latest r2 object delete "$BUCKET_NAME/$key" --remote || true
+            done < /tmp/homefix-cleanup-keys.txt
+          fi
+
+      - name: Cleanup local sensitive files
+        if: always()
+        shell: bash
+        run: rm -f .homefix-ready.json .homefix-published.json /tmp/homefix-* api-hub-v2/.single-publish-secrets.json api-hub-v2/wrangler.jsonc api-hub-v2/wrangler.normal.jsonc api-hub-v2/wrangler.phase2-single.jsonc

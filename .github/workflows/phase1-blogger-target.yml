@@ -1,0 +1,43 @@
+name: Phase 1 Blogger Target Discovery
+
+on:
+  push:
+    paths:
+      - '.github/phase1-blogger-target-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      HUB_KEY: ${{ secrets.HUB_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Read connected Blogger blogs only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_KEY" || { echo 'HUB_KEY missing'; exit 1; }
+          node - <<'NODE'
+          const base = process.env.API_HUB_V2_BASE_URL;
+          const key = process.env.HUB_KEY;
+          const r = await fetch(`${base}/api/blogger/blogs`, {
+            method: 'POST',
+            headers: {'content-type':'application/json','x-hub-api-key':key},
+            body: JSON.stringify({action:'list'})
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok || !Array.isArray(data.blogs)) throw new Error(`BLOG_LIST_FAILED:${r.status}`);
+          console.log(`Connected blogs: ${data.blogs.length}`);
+          for (const blog of data.blogs) {
+            console.log(JSON.stringify({id:String(blog.id||blog.blogId||''),name:String(blog.name||blog.blogName||''),url:blog.url||null,language:blog.language||null}));
+          }
+          NODE

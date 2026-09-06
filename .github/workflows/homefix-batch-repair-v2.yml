@@ -1,0 +1,159 @@
+name: HomeFix Batch Repair v2
+
+on:
+  push:
+    paths:
+      - '.github/homefix-batch-repair-v2-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: production
+    env:
+      DEPLOY_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+      EXPECTED_BLOG_NAME: Smile HomeFix
+      EXPECTED_BLOG_HOST: www.smileinfo.net
+      BUCKET_NAME: content-orchestrator-images
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          npm install --no-audit --no-fund
+          (cd api-hub-v2 && npm install --no-audit --no-fund)
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr
+
+      - name: Verify source before production repair
+        run: |
+          npm run verify
+          (cd api-hub-v2 && npm run verify)
+          node --check scripts/homefix-batch-repair-v2.mjs
+
+      - name: Resolve secrets without printing values
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then HUB_API_KEY="$API_HUB_V2_KEY"; else HUB_API_KEY="$EXISTING_ORCHESTRATOR_KEY"; fi
+          test -n "$HUB_API_KEY" || { echo 'Hub key missing'; exit 1; }
+          echo "HUB_API_KEY=$HUB_API_KEY" >> "$GITHUB_ENV"
+          for name in DEPLOY_API_TOKEN R2_API_TOKEN CLOUDFLARE_ACCOUNT_ID GEMINI_API_KEY KIE_API_KEY TAVILY_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN; do
+            test -n "${!name}" || { echo "$name missing"; exit 1; }
+          done
+
+      - name: Prepare disabled API Hub config and runtime secret bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOGLE_OAUTH_SETUP_ENABLED=false node api-hub-v2/scripts/render-wrangler.mjs
+          cp api-hub-v2/wrangler.jsonc api-hub-v2/wrangler.normal.jsonc
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          const normal = JSON.parse(fs.readFileSync('api-hub-v2/wrangler.normal.jsonc','utf8'));
+          if (normal.vars?.BLOGGER_WRITES_ENABLED !== 'false' || normal.vars?.BLOGGER_WRITE_MODE !== 'disabled') throw new Error('NORMAL_GATE_NOT_DISABLED');
+          const values = {
+            ORCHESTRATOR_API_KEY: process.env.HUB_API_KEY,
+            GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+            KIE_API_KEY: process.env.KIE_API_KEY,
+            TAVILY_API_KEY: process.env.TAVILY_API_KEY,
+            GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+            GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN
+          };
+          fs.writeFileSync('api-hub-v2/.homefix-batch-secrets.json', JSON.stringify(values));
+          fs.chmodSync('api-hub-v2/.homefix-batch-secrets.json', 0o600);
+          NODE
+
+      - name: Confirm all production write gates are OFF before repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const [hr, or] = await Promise.all([
+            fetch(`${process.env.API_HUB_V2_BASE_URL}/health?batch_v2_pre=${Date.now()}`, {cache:'no-store'}),
+            fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health?batch_v2_pre=${Date.now()}`, {cache:'no-store'})
+          ]);
+          const [h,o] = await Promise.all([hr.json(), or.json()]);
+          if (!hr.ok || h.bloggerWritesEnabled !== false || h.bloggerWriteMode !== 'disabled') throw new Error('API_HUB_WRITE_GATE_NOT_OFF');
+          if (!or.ok || o.bloggerWritesEnabled !== false || o.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('ORCHESTRATOR_WRITE_GATE_NOT_OFF');
+          console.log('PRE_REPAIR_GATES_CONFIRMED_OFF');
+          NODE
+
+      - name: Repair all current HomeFix posts sequentially
+        run: node scripts/homefix-batch-repair-v2.mjs
+
+      - name: Upload private repair backup and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: homefix-batch-repair-v2-${{ github.run_id }}
+          path: |
+            .homefix-batch-backup.json
+            .homefix-batch-results.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Force restore API Hub write gate OFF
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -f api-hub-v2/wrangler.normal.jsonc ] && [ -f api-hub-v2/.homefix-batch-secrets.json ]; then
+            (cd api-hub-v2 && CLOUDFLARE_API_TOKEN="$DEPLOY_API_TOKEN" npx --yes wrangler@latest deploy --config wrangler.normal.jsonc --secrets-file .homefix-batch-secrets.json)
+          fi
+          node --input-type=module - <<'NODE'
+          for (let attempt=1; attempt<=20; attempt++) {
+            try {
+              const r=await fetch(`${process.env.API_HUB_V2_BASE_URL}/health?batch_v2_restore=${Date.now()}_${attempt}`,{cache:'no-store'});
+              const h=await r.json();
+              if(r.ok && h.bloggerWritesEnabled===false && h.bloggerWriteMode==='disabled') {
+                console.log(`POST_REPAIR_API_HUB_GATE_OFF attempt=${attempt}`);
+                process.exit(0);
+              }
+            } catch {}
+            await new Promise(resolve=>setTimeout(resolve,1200));
+          }
+          throw new Error('API_HUB_GATE_RESTORE_VERIFY_FAILED');
+          NODE
+
+      - name: Confirm final orchestrator safety state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const r=await fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health?batch_v2_final=${Date.now()}`,{cache:'no-store'});
+          const o=await r.json().catch(()=>({}));
+          if(!r.ok || o.bloggerWritesEnabled!==false || o.phase2Automation?.autoPublishExecutionEnabled!==false) throw new Error('ORCHESTRATOR_FINAL_GATE_NOT_OFF');
+          console.log('FINAL_ORCHESTRATOR_GATES_OFF');
+          NODE
+
+      - name: Cleanup generated secret/config files
+        if: always()
+        run: rm -f api-hub-v2/.homefix-batch-secrets.json api-hub-v2/wrangler.jsonc api-hub-v2/wrangler.normal.jsonc api-hub-v2/wrangler.batch-repair.jsonc

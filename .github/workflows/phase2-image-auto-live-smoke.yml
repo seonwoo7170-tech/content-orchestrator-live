@@ -1,0 +1,130 @@
+name: Phase 2 Image Auto Live Smoke
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/phase2-image-auto-live-smoke-trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase2-image-auto-live-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      DEPLOY_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+      BUCKET_NAME: content-orchestrator-images
+      OBJECT_KEY_BASE: jobs/phase2-image-auto-live-smoke/thumbnail-0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Select R2-capable token without printing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$R2_API_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN=$R2_API_TOKEN" >> "$GITHUB_ENV"
+          elif [ -n "$DEPLOY_API_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN=$DEPLOY_API_TOKEN" >> "$GITHUB_ENV"
+          else
+            echo 'Cloudflare API token missing'; exit 1
+          fi
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Cloudflare account id missing'; exit 1; }
+          test -n "$HUB_API_KEY" || { echo 'Hub API key missing'; exit 1; }
+
+      - name: Confirm production write gates and provider readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          HUB_HEALTH="$(curl -fsS "$HUB_URL/health")"
+          ORCH_HEALTH="$(curl -fsS "$ORCHESTRATOR_URL/health")"
+          HUB_HEALTH="$HUB_HEALTH" ORCH_HEALTH="$ORCH_HEALTH" node - <<'NODE'
+          const hub = JSON.parse(process.env.HUB_HEALTH);
+          const orch = JSON.parse(process.env.ORCH_HEALTH);
+          if (hub.bloggerWritesEnabled !== false) throw new Error('API_HUB_BLOGGER_WRITES_MUST_BE_DISABLED');
+          if (orch.bloggerWritesEnabled !== false) throw new Error('ORCHESTRATOR_BLOGGER_WRITES_MUST_BE_DISABLED');
+          if (orch.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_MUST_BE_DISABLED');
+          if (orch.phase2Images?.bucketBound !== true) throw new Error('R2_BUCKET_NOT_BOUND');
+          if (hub.kieImageConfigured !== true || hub.kieImageModel !== 'z-image') throw new Error('KIE_Z_IMAGE_NOT_READY');
+          console.log('Write gates disabled; FLUX primary and KIE fallback configuration present.');
+          NODE
+
+      - name: Generate one image through automatic provider routing
+        shell: bash
+        run: |
+          set -euo pipefail
+          HTTP="$(curl -sS -o /tmp/image-response.json -w '%{http_code}' -X POST "$HUB_URL/api/hub/image/generate" \
+            -H "x-hub-api-key: $HUB_API_KEY" \
+            -H 'content-type: application/json' \
+            --data '{"role":"thumbnail","providerMode":"auto","steps":4,"seed":20260829,"aspectRatio":"16:9","prompt":"Clean realistic editorial image of a tidy home repair workbench with simple hand tools, soft natural light, one clear focal point, no people"}')"
+          HTTP="$HTTP" node - <<'NODE'
+          const fs = require('node:fs');
+          const status = Number(process.env.HTTP);
+          const data = JSON.parse(fs.readFileSync('/tmp/image-response.json', 'utf8'));
+          if (status !== 200 || !data.ok) throw new Error(`IMAGE_AUTO_HTTP_${status}:${String(data.error || 'UNKNOWN')}`);
+          if (!['cloudflare-workers-ai','kie-ai'].includes(data.provider)) throw new Error(`IMAGE_AUTO_PROVIDER_INVALID:${data.provider}`);
+          if (data.provider === 'kie-ai') {
+            if (data.model !== 'z-image') throw new Error('KIE_MODEL_RESULT_INVALID');
+            if (data.fallbackFrom !== 'cloudflare-workers-ai') throw new Error('KIE_FALLBACK_SOURCE_MISSING');
+            if (!String(data.fallbackReason || '').startsWith('CLOUDFLARE_AI_')) throw new Error('KIE_FALLBACK_REASON_INVALID');
+            console.log(`Automatic fallback verified: Cloudflare -> KIE (${data.fallbackReason})`);
+          } else {
+            if (!String(data.model || '').includes('flux-1-schnell')) throw new Error('FLUX_MODEL_RESULT_INVALID');
+            console.log('FLUX primary recovered and generated successfully; fallback was not needed.');
+          }
+          const mime = String(data.mimeType || '').toLowerCase();
+          const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : mime === 'image/jpeg' ? 'jpg' : '';
+          if (!ext) throw new Error(`IMAGE_MIME_INVALID:${mime}`);
+          const bytes = Buffer.from(String(data.imageBase64 || ''), 'base64');
+          if (bytes.length < 1000) throw new Error('IMAGE_BYTES_TOO_SMALL');
+          fs.writeFileSync('/tmp/phase2-auto.img', bytes);
+          fs.writeFileSync('/tmp/mime.txt', mime);
+          fs.writeFileSync('/tmp/ext.txt', ext);
+          fs.writeFileSync('/tmp/provider.txt', data.provider);
+          NODE
+
+      - name: Put generated image into remote R2
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIME="$(cat /tmp/mime.txt)"
+          EXT="$(cat /tmp/ext.txt)"
+          OBJECT_KEY="$OBJECT_KEY_BASE.$EXT"
+          echo "OBJECT_KEY=$OBJECT_KEY" >> "$GITHUB_ENV"
+          npx --yes wrangler@latest r2 object put "$BUCKET_NAME/$OBJECT_KEY" --file /tmp/phase2-auto.img --content-type "$MIME" --remote
+
+      - name: Verify Orchestrator public media read-back byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIME="$(cat /tmp/mime.txt)"
+          curl -fsS -D /tmp/media-headers.txt "$ORCHESTRATOR_URL/media/$OBJECT_KEY" -o /tmp/media-readback.img
+          test -s /tmp/media-readback.img
+          cmp -s /tmp/phase2-auto.img /tmp/media-readback.img || { echo 'MEDIA_BYTES_MISMATCH'; exit 1; }
+          grep -qi "^content-type: $MIME" /tmp/media-headers.txt || { echo 'MEDIA_CONTENT_TYPE_INVALID'; exit 1; }
+          echo "Auto-routed image R2/media read-back verified byte-for-byte via $(cat /tmp/provider.txt)."
+
+      - name: Remove automatic-routing smoke image from remote R2
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${OBJECT_KEY:-}" ]; then
+            npx --yes wrangler@latest r2 object delete "$BUCKET_NAME/$OBJECT_KEY" --remote || true
+          fi
+          rm -f /tmp/image-response.json /tmp/phase2-auto.img /tmp/media-readback.img /tmp/media-headers.txt /tmp/mime.txt /tmp/ext.txt /tmp/provider.txt

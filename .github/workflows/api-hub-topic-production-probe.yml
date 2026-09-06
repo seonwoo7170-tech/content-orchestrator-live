@@ -1,0 +1,67 @@
+name: api-hub-topic-production-probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/api-hub-topic-production-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-topic-production-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+      HUB_KEY: ${{ secrets.HUB_API_KEY }}
+      BLOG_ID: '7741529904469657049'
+    steps:
+      - name: Probe health and topic route without writes
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const hub=process.env.HUB_URL;
+          const key=process.env.HUB_KEY;
+          const blogId=process.env.BLOG_ID;
+          if(!key) throw new Error('HUB_KEY_MISSING');
+          const headers={'content-type':'application/json','x-hub-api-key':key};
+          async function call(path,body){
+            const r=await fetch(`${hub}${path}`,{method:'POST',headers,body:JSON.stringify(body||{}),cache:'no-store',signal:AbortSignal.timeout(90000)});
+            const data=await r.json().catch(()=>({}));
+            return {r,data};
+          }
+          const healthResp=await fetch(`${hub}/health`,{cache:'no-store'});
+          const health=await healthResp.json().catch(()=>({}));
+          console.log(`HUB_HEALTH status=${healthResp.status} ok=${health.ok===true?'yes':'no'} writer=${String(health.writerModel||'unknown')} geminiFallback=${health.geminiFallbackConfigured===true?'yes':'no'} geminiWriter=${String(health.geminiWriterModel||'unknown')} writes=${health.bloggerWritesEnabled===true?'enabled':'disabled'}`);
+          if(!healthResp.ok) throw new Error(`HEALTH_FAILED:${healthResp.status}`);
+
+          const blogs=await call('/api/blogger/blogs',{action:'list'});
+          if(!blogs.r.ok) throw new Error(`BLOGS_FAILED:${blogs.r.status}:${String(blogs.data.error||'unknown').slice(0,80)}`);
+          const list=Array.isArray(blogs.data)?blogs.data:(Array.isArray(blogs.data.blogs)?blogs.data.blogs:[]);
+          const blog=list.find(b=>String(b.blogId||b.id||'')===String(blogId))||{};
+
+          const posts=await call('/api/blogger/posts',{blogId,limit:40});
+          if(!posts.r.ok) throw new Error(`POSTS_FAILED:${posts.r.status}:${String(posts.data.error||'unknown').slice(0,80)}`);
+          const recent=(Array.isArray(posts.data.posts)?posts.data.posts:[]).slice(-40).reverse();
+          console.log(`TOPIC_PAYLOAD recentPosts=${recent.length} titleChars=${recent.reduce((n,p)=>n+String(p.title||'').length,0)} labels=${recent.reduce((n,p)=>n+(Array.isArray(p.labels)?p.labels.length:0),0)}`);
+
+          const started=Date.now();
+          const topic=await call('/api/hub/ai/topic',{
+            blogId,
+            blogName:String(blog.name||'5Minutes Info(5분 정보)'),
+            blogUrl:blog.url||null,
+            language:'ko',
+            operationMode:'validation',
+            recentPosts:recent
+          });
+          const data=topic.data;
+          console.log(`TOPIC_PROBE status=${topic.r.status} elapsedMs=${Date.now()-started} ok=${topic.r.ok?'yes':'no'} error=${String(data.error||'none').slice(0,120)} provider=${String(data.provider||'none')} model=${String(data.model||'none')} fallbackUsed=${data.fallbackUsed===true?'yes':'no'} primaryError=${String(data.primaryError||'none')} providerCode=${Number.isInteger(data.providerCode)?data.providerCode:'none'} providerHttpStatus=${Number.isInteger(data.providerHttpStatus)?data.providerHttpStatus:'none'}`);
+          if(topic.r.ok) console.log(`TOPIC_PROBE_OK topicChars=${String(data.topic||'').length}`);
+          NODE

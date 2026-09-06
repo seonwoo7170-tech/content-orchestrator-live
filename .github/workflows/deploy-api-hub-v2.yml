@@ -1,0 +1,267 @@
+name: Deploy API Hub v2
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/deploy-api-hub-v2-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      FREE_AI_API_KEY: ${{ secrets.API_HUB_V2_FREE_AI_API_KEY }}
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED: 'false'
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      BLOGGER_WRITES_ENABLED: 'true'
+      BLOGGER_WRITE_MODE: managed_allowlist
+      BLOGGER_WRITE_ALLOWED_BLOG_IDS: 2028653002689012296,3842750331568707733,5540565797560833468,7741529904469657049,6470344354760178454,359287489505251041,286230575079975521
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Content Orchestrator dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify Content Orchestrator
+        run: npm run verify
+
+      - name: Verify API Hub v2
+        run: npm run verify
+        working-directory: api-hub-v2
+
+      - name: Resolve deployment authentication key
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then
+            echo "ORCHESTRATOR_API_KEY=$API_HUB_V2_KEY" >> "$GITHUB_ENV"
+            echo 'Using dedicated API Hub v2 orchestrator key.'
+          elif [ -n "$EXISTING_ORCHESTRATOR_KEY" ]; then
+            echo "ORCHESTRATOR_API_KEY=$EXISTING_ORCHESTRATOR_KEY" >> "$GITHUB_ENV"
+            echo 'Using existing Content Orchestrator hub key for v2 bootstrap.'
+          else
+            echo 'No orchestrator authentication key is configured.'
+            exit 1
+          fi
+
+      - name: Validate Google OAuth bootstrap state
+        shell: bash
+        run: |
+          set -euo pipefail
+          client_count=0
+          [ -n "$GOOGLE_CLIENT_ID" ] && client_count=$((client_count + 1))
+          [ -n "$GOOGLE_CLIENT_SECRET" ] && client_count=$((client_count + 1))
+          if [ "$client_count" -eq 1 ]; then
+            echo 'Google OAuth client ID and client secret must be configured together.'
+            exit 1
+          fi
+          if [ -n "$GOOGLE_REFRESH_TOKEN" ] && [ "$client_count" -ne 2 ]; then
+            echo 'Google refresh token requires both client ID and client secret.'
+            exit 1
+          fi
+          if [ "$client_count" -eq 2 ] && [ -z "$GOOGLE_REFRESH_TOKEN" ]; then
+            echo 'GOOGLE_OAUTH_SETUP_ENABLED=true' >> "$GITHUB_ENV"
+            echo 'Google OAuth bootstrap mode will be enabled for this deployment.'
+          else
+            echo 'GOOGLE_OAUTH_SETUP_ENABLED=false' >> "$GITHUB_ENV"
+            if [ "$client_count" -eq 2 ]; then
+              echo 'Google OAuth is fully configured; bootstrap mode will be disabled.'
+            else
+              echo 'Google OAuth is not configured; bootstrap mode will remain disabled.'
+            fi
+          fi
+
+      - name: Validate required deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+          test -n "$ORCHESTRATOR_API_KEY" || { echo 'Resolved ORCHESTRATOR_API_KEY is missing'; exit 1; }
+          test -n "$GEMINI_API_KEY" || { echo 'API_HUB_V2_GEMINI_API_KEY is missing; dedicated Critic requires Gemini'; exit 1; }
+          test -n "$KIE_API_KEY" || { echo 'KIE_API_KEY is missing; image fallback requires KIE'; exit 1; }
+          test -n "$TAVILY_API_KEY" || { echo 'TAVILY_API_KEY is missing; current-information research requires Tavily'; exit 1; }
+          test -n "$GOOGLE_OAUTH_SETUP_ENABLED" || { echo 'GOOGLE_OAUTH_SETUP_ENABLED was not resolved'; exit 1; }
+          test "$GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED" = 'false' || { echo 'Scope upgrade must remain disabled during normal deployment'; exit 1; }
+          test "$BLOGGER_WRITES_ENABLED" = 'true' || { echo 'Managed Blogger writes must remain enabled'; exit 1; }
+          test "$BLOGGER_WRITE_MODE" = 'managed_allowlist' || { echo 'Blogger write mode must remain managed_allowlist'; exit 1; }
+          test -n "$BLOGGER_WRITE_ALLOWED_BLOG_IDS" || { echo 'Blogger managed allowlist is missing'; exit 1; }
+
+      - name: Render API Hub v2 Wrangler config
+        run: node scripts/render-wrangler.mjs
+        working-directory: api-hub-v2
+
+      - name: Prepare runtime secret bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const { writeFileSync, chmodSync } = require('node:fs');
+          const values = {
+            ORCHESTRATOR_API_KEY: process.env.ORCHESTRATOR_API_KEY,
+            GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+            KIE_API_KEY: process.env.KIE_API_KEY,
+            TAVILY_API_KEY: process.env.TAVILY_API_KEY
+          };
+          if (!values.ORCHESTRATOR_API_KEY) throw new Error('ORCHESTRATOR_API_KEY_REQUIRED');
+          if (!values.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY_REQUIRED');
+          if (!values.KIE_API_KEY) throw new Error('KIE_API_KEY_REQUIRED');
+          if (!values.TAVILY_API_KEY) throw new Error('TAVILY_API_KEY_REQUIRED');
+          if (process.env.FREE_AI_API_KEY) values.FREE_AI_API_KEY = process.env.FREE_AI_API_KEY;
+          if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+            values.GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+            values.GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+          }
+          if (process.env.GOOGLE_REFRESH_TOKEN) {
+            values.GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
+          }
+          writeFileSync('api-hub-v2/.deploy-secrets.json', JSON.stringify(values));
+          chmodSync('api-hub-v2/.deploy-secrets.json', 0o600);
+          NODE
+
+      - name: Deploy API Hub v2
+        run: npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
+        working-directory: api-hub-v2
+
+      - name: Smoke test API Hub v2 Cloudflare AI and Blogger OAuth state
+        run: node scripts/postdeploy-smoke.mjs
+        working-directory: api-hub-v2
+
+      - name: Probe Phase 4 Google scopes without exposing tokens
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_V2_BASE_URL;
+          const headers = {'content-type':'application/json','x-hub-api-key':process.env.ORCHESTRATOR_API_KEY};
+          const healthResp = await fetch(`${base}/health?phase4_scope=${Date.now()}`, {cache:'no-store'});
+          const health = await healthResp.json().catch(() => ({}));
+          if (!healthResp.ok || health.bloggerWritesEnabled !== true || health.bloggerWriteMode !== 'managed_allowlist') {
+            throw new Error('PHASE4_SCOPE_PROBE_WRITE_GATE_NOT_MANAGED');
+          }
+          if (health.googleOAuthScopeUpgradeEnabled !== false) throw new Error('PHASE4_SCOPE_UPGRADE_MUST_REMAIN_DISABLED');
+          if (!health.phase4GoogleData?.scopeProbe || !health.phase4GoogleData?.searchConsoleSites) {
+            throw new Error('PHASE4_GOOGLE_DATA_HEALTH_METADATA_MISSING');
+          }
+          const scopeResp = await fetch(`${base}/api/google/scopes`, {method:'POST', headers, body:'{}'});
+          const scope = await scopeResp.json().catch(() => ({}));
+          if (!scopeResp.ok) throw new Error(`PHASE4_SCOPE_PROBE_FAILED:${scopeResp.status}:${String(scope?.error || 'UNKNOWN')}`);
+          for (const key of ['blogger','searchConsole','analytics','adsense','phase4Ready']) {
+            if (typeof scope[key] !== 'boolean') throw new Error(`PHASE4_SCOPE_BOOLEAN_INVALID:${key}`);
+          }
+          console.log(`PHASE4_GOOGLE_SCOPE_STATUS blogger=${scope.blogger} searchConsole=${scope.searchConsole} analytics=${scope.analytics} adsense=${scope.adsense} phase4Ready=${scope.phase4Ready} writes=managed`);
+          if (scope.searchConsole) {
+            const sitesResp = await fetch(`${base}/api/gsc/sites`, {method:'POST', headers, body:'{}'});
+            const sites = await sitesResp.json().catch(() => ({}));
+            if (!sitesResp.ok || !Array.isArray(sites.sites) || Number(sites.count) !== sites.sites.length) {
+              throw new Error(`PHASE4_GSC_SITES_READBACK_FAILED:${sitesResp.status}:${String(sites?.error || 'INVALID')}`);
+            }
+            console.log(`PHASE4_GSC_SITES_READBACK_OK count=${sites.sites.length}`);
+          } else {
+            console.log('PHASE4_GSC_LIVE_READBACK_SKIPPED scope=missing');
+          }
+          const healthAfterResp = await fetch(`${base}/health?phase4_scope_after=${Date.now()}`, {cache:'no-store'});
+          const healthAfter = await healthAfterResp.json().catch(() => ({}));
+          if (!healthAfterResp.ok || healthAfter.bloggerWritesEnabled !== true || healthAfter.bloggerWriteMode !== 'managed_allowlist') {
+            throw new Error('PHASE4_SCOPE_PROBE_WRITE_GATE_CHANGED_FROM_MANAGED');
+          }
+          NODE
+
+      - name: Confirm Tavily is configured without exposing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+          let last = null;
+          for (let attempt = 1; attempt <= 20; attempt += 1) {
+            const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/health?deploy_check=${Date.now()}_${attempt}`, { cache: 'no-store' });
+            const h = await r.json().catch(() => ({}));
+            last = {
+              httpOk: r.ok,
+              tavilyConfigured: h.tavilyConfigured === true,
+              researchProvider: h.writerResearchProvider || null,
+              writesManaged: h.bloggerWritesEnabled === true && h.bloggerWriteMode === 'managed_allowlist'
+            };
+            if (last.httpOk && last.tavilyConfigured && last.researchProvider === 'tavily' && last.writesManaged) {
+              console.log(`TAVILY_CONFIGURED=true; Blogger writes are managed and enabled; attempt=${attempt}`);
+              process.exit(0);
+            }
+            await sleep(1500);
+          }
+          console.log(`TAVILY_HEALTH_FINAL httpOk=${Boolean(last?.httpOk)} tavilyConfigured=${Boolean(last?.tavilyConfigured)} provider=${String(last?.researchProvider || 'missing')} writesManaged=${Boolean(last?.writesManaged)}`);
+          throw new Error('TAVILY_HEALTH_CHECK_FAILED');
+          NODE
+
+      - name: Verify Phase 3 selector primitives without Blogger writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_V2_BASE_URL;
+          const headers = {'content-type':'application/json','x-hub-api-key':process.env.ORCHESTRATOR_API_KEY};
+          async function call(path, body) {
+            const response = await fetch(`${base}${path}`, {method:'POST', headers, body:JSON.stringify(body)});
+            const data = await response.json().catch(() => ({}));
+            console.log(`${path}: HTTP ${response.status}, error=${String(data?.error || 'none')}`);
+            if (!response.ok) throw new Error(`${path}:${response.status}:${data?.error || 'FAILED'}`);
+            return data;
+          }
+          const healthResponse = await fetch(`${base}/health?phase3_selector=${Date.now()}`, {cache:'no-store'});
+          const health = await healthResponse.json().catch(() => ({}));
+          if (!healthResponse.ok || health.bloggerWritesEnabled !== true || health.bloggerWriteMode !== 'managed_allowlist') {
+            throw new Error('BLOGGER_WRITE_GATE_NOT_MANAGED_BEFORE_SELECTOR_CHECK');
+          }
+          if (health.topicPlanner !== 'conservative-evergreen' || health.bloggerPostInventory !== 'read-only-metadata') {
+            throw new Error('PHASE3_SELECTOR_HEALTH_METADATA_MISSING');
+          }
+          const blogs = await call('/api/blogger/blogs', {action:'list'});
+          const blog = Array.isArray(blogs.blogs) ? blogs.blogs.find((item) => Number(item?.postsTotal || 0) > 0) || blogs.blogs[0] : null;
+          if (!blog?.blogId) throw new Error('PHASE3_SELECTOR_BLOG_MISSING');
+          const inventory = await call('/api/blogger/posts', {blogId:String(blog.blogId),limit:20});
+          if (!Array.isArray(inventory.posts)) throw new Error('PHASE3_POST_INVENTORY_INVALID');
+          if (inventory.posts.some((post) => Object.hasOwn(post, 'content') || Object.hasOwn(post, 'html'))) throw new Error('PHASE3_POST_INVENTORY_BODY_LEAK');
+          const recentPosts = inventory.posts.slice(-20).reverse();
+          const topic = await call('/api/hub/ai/topic', {
+            blogId:String(blog.blogId),
+            blogName:String(blog.name || blog.blogName || 'Blog'),
+            blogUrl:blog.url || null,
+            language:['ko','en'].includes(String(blog.language || '').toLowerCase()) ? String(blog.language).toLowerCase() : 'ko',
+            operationMode:'validation',
+            recentPosts
+          });
+          if (typeof topic.topic !== 'string' || topic.topic.trim().length < 12) throw new Error('PHASE3_TOPIC_PLANNER_INVALID');
+          const healthAfterResponse = await fetch(`${base}/health?phase3_selector_after=${Date.now()}`, {cache:'no-store'});
+          const healthAfter = await healthAfterResponse.json().catch(() => ({}));
+          if (!healthAfterResponse.ok || healthAfter.bloggerWritesEnabled !== true || healthAfter.bloggerWriteMode !== 'managed_allowlist') {
+            throw new Error('BLOGGER_WRITE_GATE_NOT_MANAGED_AFTER_SELECTOR_CHECK');
+          }
+          console.log(`PHASE3_SELECTOR_PRIMITIVES_OK blog=${blog.blogId} inventory=${inventory.posts.length} topicLength=${topic.topic.length} writes=managed`);
+          NODE
+
+      - name: Cleanup generated deployment files
+        if: always()
+        shell: bash
+        run: rm -f api-hub-v2/.deploy-secrets.json api-hub-v2/wrangler.jsonc

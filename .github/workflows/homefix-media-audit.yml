@@ -1,0 +1,71 @@
+name: HomeFix Media Audit
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/homefix-media-audit-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    environment: production
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      EXPECTED_BLOG_NAME: Smile HomeFix
+      EXPECTED_BLOG_HOST: www.smileinfo.net
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Audit live post image links without writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          async function google(path, token) {
+            const r = await fetch(`https://www.googleapis.com/blogger/v3${path}`, { headers: { authorization: `Bearer ${token}` } });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(`BLOGGER_READ_${r.status}`);
+            return data;
+          }
+          const tr = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, refresh_token: process.env.GOOGLE_REFRESH_TOKEN, grant_type: 'refresh_token' })
+          });
+          const td = await tr.json().catch(() => ({}));
+          if (!tr.ok || !td.access_token) throw new Error('GOOGLE_TOKEN_EXCHANGE_FAILED');
+          const blogs = await google('/users/self/blogs?fetchUserInfo=false', td.access_token);
+          const blog = (blogs.items || []).find(b => {
+            let host=''; try { host = new URL(String(b.url || '')).hostname.toLowerCase(); } catch {}
+            return String(b.name || '') === process.env.EXPECTED_BLOG_NAME && host === process.env.EXPECTED_BLOG_HOST;
+          });
+          if (!blog?.id) throw new Error('HOMEFIX_NOT_FOUND');
+          const posts=[]; let pageToken='';
+          do {
+            const qs=new URLSearchParams({fetchBodies:'true',maxResults:'50',status:'live',view:'ADMIN',orderBy:'published'});
+            if(pageToken) qs.set('pageToken',pageToken);
+            const page=await google(`/blogs/${encodeURIComponent(blog.id)}/posts?${qs}`,td.access_token);
+            posts.push(...(page.items||[])); pageToken=String(page.nextPageToken||'');
+          } while(pageToken);
+          let totalImages=0, orchestratorImages=0, broken=0;
+          for (const post of posts) {
+            const srcs=[...String(post.content||'').matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)].map(m=>m[1]);
+            totalImages += srcs.length;
+            for (const src of srcs) {
+              if (!src.startsWith(`${process.env.ORCHESTRATOR_BASE_URL}/media/`)) continue;
+              orchestratorImages += 1;
+              const r=await fetch(src,{cache:'no-store'}).catch(()=>null);
+              if (!r || !r.ok) {
+                broken += 1;
+                console.log(`BROKEN_MEDIA title=${String(post.title||'').replace(/\s+/g,' ').trim()}; url=${post.url}; status=${r?.status||'network'}`);
+              }
+            }
+          }
+          console.log(`HOMEFIX_MEDIA_AUDIT posts=${posts.length}; images=${totalImages}; orchestratorImages=${orchestratorImages}; broken=${broken}`);
+          NODE

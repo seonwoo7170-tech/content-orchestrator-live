@@ -1,0 +1,52 @@
+name: production-seo-diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/production-seo-diagnostics.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Read production SEO engine state
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${String(j.error||'unknown').slice(0,80)}`);
+            return j;
+          }
+          const blogId='3842750331568707733';
+          const topic='윈도우 11 안전 모드 진입 방법';
+          const briefPath='/api/strategy/seo-brief?'+new URLSearchParams({blogId,topic,language:'ko'}).toString();
+          const decayPath='/api/strategy/decay?'+new URLSearchParams({blogId,limit:'5'}).toString();
+          const [health,briefResponse,decay]=await Promise.all([
+            get('/health'), get(briefPath), get(decayPath)
+          ]);
+          const brief=briefResponse?.brief||{};
+          if(brief.version!=='smileseon-seo-brief.v1') throw new Error(`SEO_BRIEF_VERSION_INVALID:${String(brief.version||'missing')}`);
+          if(!brief.searchIntent || brief.answerFirst!==true) throw new Error('SEO_BRIEF_CONTRACT_INVALID');
+          if(decay.policyVersion!=='smileseon-content-decay.v1') throw new Error(`CONTENT_DECAY_VERSION_INVALID:${String(decay.policyVersion||'missing')}`);
+          if(!Array.isArray(decay.rows)) throw new Error('CONTENT_DECAY_ROWS_INVALID');
+          console.log('PRODUCTION_SEO_ENGINE_OK',JSON.stringify({
+            workerHealthy:health?.ok!==false,
+            brief:{version:brief.version,searchIntent:brief.searchIntent,clusterRole:brief.cluster?.role||null,evidenceSource:brief.evidence?.source||null},
+            decay:{policyVersion:decay.policyVersion,evidenceAvailable:decay.evidenceAvailable===true,repairCandidates:Number(decay.repairCandidates||0),rowCount:decay.rows.length}
+          }));
+          NODE

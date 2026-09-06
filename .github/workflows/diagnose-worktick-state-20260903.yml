@@ -1,0 +1,61 @@
+name: diagnose-worktick-state-20260903
+
+on:
+  push:
+    paths:
+      - '.github/workflows/diagnose-worktick-state-20260903.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Read work tick aftermath
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${String(j.error||'unknown').slice(0,80)}`);
+            return j;
+          }
+          const [today,recovery,jobs]=await Promise.all([
+            get('/api/operations/today'),
+            get('/api/operations/recovery'),
+            get('/api/jobs?limit=100')
+          ]);
+          const slots=Array.isArray(today.slots)?today.slots:[];
+          const allJobs=Array.isArray(jobs.jobs)?jobs.jobs:[];
+          const jobIds=new Set(slots.map(s=>Number(s.job_id||0)).filter(Boolean));
+          const todayJobs=allJobs.filter(j=>jobIds.has(Number(j.id)));
+          const cleanSlot=s=>({
+            id:Number(s.id||0),blogId:String(s.blog_id||''),blogName:s.blog_name||null,
+            kind:s.kind||null,slotNo:Number(s.slot_no||0),status:s.status||null,
+            jobId:s.job_id?Number(s.job_id):null,recoveryState:s.recovery_state||'none',
+            retryCount:Number(s.retry_count||0),nextRetryAt:s.next_retry_at||null,
+            lastErrorCode:s.last_error_code||null,holdReason:s.hold_reason||null,updatedAt:s.updated_at||null
+          });
+          const cleanJob=j=>({
+            id:Number(j.id||0),blogId:String(j.blog_id||''),mode:j.mode||null,status:j.status||null,
+            topic:j.topic?String(j.topic).slice(0,120):null,hasResult:Boolean(j.has_result),
+            recoveryState:j.recovery_state||'none',retryCount:Number(j.retry_count||0),
+            nextRetryAt:j.next_retry_at||null,lastErrorCode:j.last_error_code||j.error_code||null,
+            holdReason:j.hold_reason||null,lastFailureAt:j.last_failure_at||null,updatedAt:j.updated_at||null
+          });
+          console.log('WORKTICK_AFTER_SLOTS',JSON.stringify(slots.map(cleanSlot)));
+          console.log('WORKTICK_AFTER_JOBS',JSON.stringify(todayJobs.map(cleanJob)));
+          console.log('WORKTICK_RECOVERY_SUMMARY',JSON.stringify({summary:recovery.summary||null,dueRetries:Array.isArray(recovery.dueRetries)?recovery.dueRetries.map(cleanJob):[]}));
+          NODE

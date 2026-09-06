@@ -1,0 +1,83 @@
+name: Phase 3 Configurable Daily Time
+
+on:
+  push:
+    paths:
+      - '.github/phase3-configurable-daily-time-trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: phase3-configurable-daily-time
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Apply targeted Phase 3 schedule patch
+        run: node scripts/phase3-configurable-daily-time.mjs
+
+      - name: Verify source
+        run: npm run verify
+
+      - name: Verify diff is clean and bounded
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f package-lock.json
+          git diff --check
+          git status --short
+          node - <<'NODE'
+          const { execFileSync } = require('node:child_process');
+          const allowed = new Set([
+            '.github/workflows/deploy-orchestrator-service-binding.yml',
+            'tests/automation-settings.test.mjs',
+            'tests/build-stage.test.mjs',
+            'tests/daily-operation-schedule.test.mjs',
+            'web/automation.js',
+            'web/build-stage.js',
+            'worker/entry.js',
+            'worker/lib/automation-settings.js',
+            'worker/lib/daily-operation-schedule.js',
+            'wrangler.example.jsonc'
+          ]);
+          const raw = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
+          const status = raw.replace(/\s+$/, '').split(/\r?\n/).filter(Boolean);
+          const changed = status.map((line) => line.slice(3).trim()).map((path) => path.includes(' -> ') ? path.split(' -> ').at(-1) : path);
+          for (const path of changed) if (!allowed.has(path)) throw new Error(`UNEXPECTED_CHANGED_FILE:${path}`);
+          for (const path of allowed) if (!changed.includes(path)) throw new Error(`EXPECTED_CHANGED_FILE_MISSING:${path}`);
+          NODE
+
+      - name: Commit verified source changes to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git restore .github/workflows/deploy-orchestrator-service-binding.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/automation-settings.test.mjs \
+            tests/build-stage.test.mjs \
+            tests/daily-operation-schedule.test.mjs \
+            web/automation.js \
+            web/build-stage.js \
+            worker/entry.js \
+            worker/lib/automation-settings.js \
+            worker/lib/daily-operation-schedule.js \
+            wrangler.example.jsonc
+          git commit -m 'feat: make Phase 3 daily operation time configurable'
+          git pull --rebase origin main
+          git push origin HEAD:main

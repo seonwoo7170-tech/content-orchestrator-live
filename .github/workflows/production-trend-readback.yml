@@ -1,0 +1,88 @@
+name: production-trend-readback
+
+on:
+  push:
+    paths:
+      - '.github/workflows/production-trend-readback.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Collect GSC and verify aggregate trend and ranking state
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          async function req(path, options={}) {
+            const r=await fetch(base+path,{...options,headers:{...headers,...(options.headers||{})},cache:'no-store',signal:AbortSignal.timeout(180000)});
+            const j=await r.json().catch(()=>({}));
+            return {r,j};
+          }
+
+          const gscCollect=await req('/api/performance/gsc/collect',{method:'POST',body:'{}'});
+          if(gscCollect.r.status>=500||gscCollect.r.status===401||gscCollect.r.status===403) throw new Error(`GSC_COLLECT_FAILED:${gscCollect.r.status}:${String(gscCollect.j?.error||'unknown')}`);
+          const gscItems=Array.isArray(gscCollect.j?.items)?gscCollect.j.items:[];
+          const mapped=gscItems.filter(x=>x?.mapped===true).length;
+          const statuses=gscItems.reduce((a,x)=>{const k=String(x?.status||'unknown');a[k]=(a[k]||0)+1;return a;},{});
+          let detailRows=0, totalImpressions=0;
+          const windowErrors={};
+          for(const item of gscItems){
+            for(const w of Array.isArray(item?.windows)?item.windows:[]){
+              if(Number(w?.windowDays||0)===28){
+                detailRows+=Number(w?.detailRowCount||0);
+                totalImpressions+=Number(w?.impressions||0);
+              }
+              if(w?.errorCode){const k=String(w.errorCode);windowErrors[k]=(windowErrors[k]||0)+1;}
+            }
+          }
+          console.log(`GSC_COLLECT http=${gscCollect.r.status} blogs=${gscItems.length} mapped=${mapped} ok=${Number(statuses.ok||0)} partial=${Number(statuses.partial||0)} failed=${Number(statuses.failed||0)} unmapped=${Number(statuses.unmapped||0)} detailRows28=${detailRows} impressions28=${Math.round(totalImpressions)}`);
+          console.log('GSC_WINDOW_ERRORS',JSON.stringify(windowErrors));
+
+          const refresh=await req('/api/strategy/trends/refresh',{method:'POST',body:'{}'});
+          const fetchErrors=Array.isArray(refresh.j?.fetchErrors)?refresh.j.fetchErrors:[];
+          console.log(`TREND_REFRESH http=${refresh.r.status} ok=${refresh.j?.ok===true} created=${Number(refresh.j?.created||0)} matches=${Number(refresh.j?.matches||0)} repairCandidates=${Number(refresh.j?.repairCandidates||0)} watched=${Number(refresh.j?.watched||0)} fetchErrors=${fetchErrors.length}`);
+          if(refresh.r.status>=500||refresh.r.status===401||refresh.r.status===403) throw new Error(`TREND_REFRESH_FAILED:${refresh.r.status}:${String(refresh.j?.error||'unknown')}`);
+
+          const [gscToday,trends,rankings,candidates]=await Promise.all([
+            req('/api/performance/gsc/today'),
+            req('/api/strategy/trends?limit=80'),
+            req('/api/strategy/rankings?limit=160'),
+            req('/api/strategy/topic-candidates?limit=200')
+          ]);
+          for(const [name,value] of [['gscToday',gscToday],['trends',trends],['rankings',rankings],['candidates',candidates]]) {
+            if(!value.r.ok) throw new Error(`${name.toUpperCase()}_READ_FAILED:${value.r.status}:${String(value.j?.error||'unknown')}`);
+          }
+
+          const snapshots=Array.isArray(gscToday.j?.snapshots)?gscToday.j.snapshots:[];
+          const snap28=snapshots.filter(s=>Number(s?.window_days||0)===28);
+          const snapStatus=snap28.reduce((a,s)=>{const k=String(s?.status||'unknown');a[k]=(a[k]||0)+1;return a;},{});
+          console.log(`GSC_TODAY properties=${Array.isArray(gscToday.j?.properties)?gscToday.j.properties.length:0} snapshots28=${snap28.length} ok=${Number(snapStatus.ok||0)} partial=${Number(snapStatus.partial||0)} failed=${Number(snapStatus.failed||0)} unmapped=${Number(snapStatus.unmapped||0)} detailRows=${snap28.reduce((n,s)=>n+Number(s?.detail_row_count||0),0)}`);
+
+          const trendRows=Array.isArray(trends.j?.rows)?trends.j.rows:[];
+          const decisions=trendRows.reduce((a,row)=>{const k=String(row?.decision||'unknown');a[k]=(a[k]||0)+1;return a;},{});
+          const competition=trendRows.reduce((a,row)=>{const k=String(row?.competition_label||'unknown');a[k]=(a[k]||0)+1;return a;},{});
+          console.log(`TREND_READBACK rows=${trendRows.length} new=${Number(decisions.new_article||0)} repair=${Number(decisions.repair_existing||0)} existing=${Number(decisions.existing_candidate||0)} watch=${Number(decisions.watch||0)} low=${Number(competition.low||0)} medium=${Number(competition.medium||0)} high=${Number(competition.high||0)} source=${String(trends.j?.source||'missing')}`);
+
+          const rankRows=Array.isArray(rankings.j?.rows)?rankings.j.rows:[];
+          console.log(`RANK_READBACK rows=${rankRows.length} validPositions=${rankRows.filter(r=>Number(r?.position||0)>0).length} top3=${Number(rankings.j?.summary?.top3||0)} top10=${Number(rankings.j?.summary?.top10||0)} top20=${Number(rankings.j?.summary?.top20||0)} source=${String(rankings.j?.source||'missing')}`);
+
+          const candidateRows=Array.isArray(candidates.j?.candidates)?candidates.j.candidates:Array.isArray(candidates.j?.rows)?candidates.j.rows:[];
+          console.log(`TREND_CANDIDATES totalRead=${candidateRows.length} trend=${candidateRows.filter(r=>String(r?.source||'')==='trend').length}`);
+
+          const health=await req('/health');
+          if(!health.r.ok||health.j?.bloggerWritesEnabled!==true||health.j?.phase2Automation?.autoPublishExecutionEnabled!==true) throw new Error('CORE_AUTOMATION_GATE_REGRESSION');
+          console.log(`CORE_GATES bloggerWrites=${health.j.bloggerWritesEnabled===true} autoPublish=${health.j.phase2Automation?.autoPublishExecutionEnabled===true}`);
+          NODE

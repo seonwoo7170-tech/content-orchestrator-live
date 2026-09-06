@@ -1,0 +1,85 @@
+name: recover-ready-images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/recover-ready-images-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-ready-image-recovery
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Recover ready-job images and publish eligible work
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const base=process.env.ORCHESTRATOR_URL;
+          const headers={'x-admin-api-key':process.env.ADMIN_API_KEY};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store',signal:AbortSignal.timeout(30000)});
+            const d=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`${path}:${r.status}:${d.error||'FAILED'}`);
+            return d;
+          }
+          async function post(path, timeoutMs=165000){
+            const r=await fetch(base+path,{method:'POST',headers,cache:'no-store',signal:AbortSignal.timeout(timeoutMs)});
+            const d=await r.json().catch(()=>({}));
+            if(!r.ok && r.status!==207) throw new Error(`${path}:${r.status}:${d.error||'FAILED'}`);
+            return {status:r.status,data:d};
+          }
+          function logPublish(label, out){
+            const p=out.data?.publications||{};
+            console.log(`${label} http=${out.status} attempted=${Number(p.attempted||0)} scheduled=${Number(p.scheduled||0)} blocked=${Number(p.blocked||0)} imageAttempted=${Number(out.data?.images?.attempted||0)}`);
+            if(Array.isArray(out.data?.links)&&out.data.links.length) console.log(`${label}_LINKS `+JSON.stringify(out.data.links));
+          }
+          async function logJob(jobId){
+            try {
+              const [detail,imageData]=await Promise.all([get(`/api/jobs/${jobId}`),get(`/api/jobs/${jobId}/images`)]);
+              const j=detail.job||{};
+              const images=(imageData.images||[]).map(i=>({id:i.id,role:i.role,position:i.position,status:i.status,provider:i.provider||null,error:i.error||null,hasUrl:Boolean(i.public_url)}));
+              console.log(`JOB_SAFE job=${jobId} `+JSON.stringify({status:j.status,bloggerPostId:j.blogger_post_id||null,retryCount:Number(j.retry_count||0),recoveryState:j.recovery_state||'none',images}));
+            } catch (error) {
+              console.log(`JOB_SAFE job=${jobId} unavailable=${String(error.message||error).slice(0,180)}`);
+            }
+          }
+
+          const before=await get('/api/operations/recovery');
+          console.log(`RECOVERY_BEFORE ready=${Number(before.summary?.jobs?.ready||0)} retryWait=${Number(before.summary?.jobs?.retryWait||0)}`);
+          await logJob(78);
+          await logJob(81);
+
+          // First release work whose images are already complete. This path explicitly
+          // skips image generation, so it remains fast even with a slow image provider.
+          const prePublish=await post('/api/operations/publish-tick?images=0',45000);
+          logPublish('PRE_PUBLISH',prePublish);
+
+          // One provider-bound job per request. Repeated passes advance the backlog
+          // without ever batching multiple two-minute KIE tasks into a single request.
+          for(let round=1; round<=6; round++){
+            const out=await post('/api/operations/images/resume?maxJobs=1');
+            console.log(`IMAGE_RECOVERY round=${round} http=${out.status} attempted=${Number(out.data?.attempted||0)} completed=${Number(out.data?.completed||0)}`);
+            if(Array.isArray(out.data?.items)) console.log('IMAGE_ITEMS '+JSON.stringify(out.data.items.map(i=>({jobId:i.jobId,blogId:i.blogId,complete:i.complete,errorCode:i.errorCode||null,generated:i.generated,failed:i.failed,attached:i.attached,expected:i.expected}))));
+            const release=await post('/api/operations/publish-tick?images=0',45000);
+            logPublish(`PUBLISH_AFTER_${round}`,release);
+            if(Number(out.data?.attempted||0)===0) break;
+          }
+
+          await logJob(78);
+          await logJob(81);
+          const after=await get('/api/operations/recovery');
+          console.log(`RECOVERY_AFTER ready=${Number(after.summary?.jobs?.ready||0)} retryWait=${Number(after.summary?.jobs?.retryWait||0)} held=${Number(after.summary?.jobs?.held||0)}`);
+          NODE

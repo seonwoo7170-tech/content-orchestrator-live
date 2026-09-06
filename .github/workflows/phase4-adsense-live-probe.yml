@@ -1,0 +1,91 @@
+name: Phase 4 AdSense Live Probe
+
+on:
+  push:
+    paths:
+      - '.github/phase4-adsense-live-probe-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Probe AdSense accounts, sites and domain report safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_API_KEY" || { echo 'HUB_API_KEY is missing'; exit 1; }
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_URL;
+          const headers = {'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY};
+          const post = async (path, body={}) => {
+            const response = await fetch(`${base}${path}`, {method:'POST',headers,body:JSON.stringify(body)});
+            const data = await response.json().catch(()=>({}));
+            if (!response.ok) throw new Error(`${path}:HTTP_${response.status}:${String(data?.error||'FAILED').split(':')[0]}`);
+            return data;
+          };
+          const host = value => {
+            try { return new URL(String(value||'')).hostname.toLowerCase().replace(/^www\./,''); }
+            catch { return String(value||'').trim().toLowerCase().replace(/^www\./,''); }
+          };
+          const blogsPayload = await post('/api/blogger/blogs', {});
+          const blogs = (Array.isArray(blogsPayload.blogs)?blogsPayload.blogs:[]).map(blog=>({name:String(blog.name||'Blog'),host:host(blog.url)})).filter(blog=>blog.host);
+          if (blogs.length!==7) throw new Error(`BLOG_COUNT_INVALID:${blogs.length}`);
+          const accountsPayload = await post('/api/adsense/accounts', {});
+          const accounts = Array.isArray(accountsPayload.accounts)?accountsPayload.accounts:[];
+          console.log(`ADSENSE_ACCOUNTS_OK count=${accounts.length}`);
+          if (!accounts.length) throw new Error('ADSENSE_ACCOUNT_NOT_FOUND');
+
+          const end = new Date();
+          end.setUTCDate(end.getUTCDate()-1);
+          const start = new Date(end);
+          start.setUTCDate(start.getUTCDate()-27);
+          const iso = date=>date.toISOString().slice(0,10);
+          const startDate=iso(start), endDate=iso(end);
+          const totals = new Map(blogs.map(blog=>[blog.host,{pageViews:0,impressions:0,clicks:0,earnings:0,rpmWeighted:0,rpmWeight:0,currencies:new Set()}]));
+          let siteCount=0, readySites=0, reportRows=0, reportsOk=0;
+
+          for (const account of accounts) {
+            const sitesPayload = await post('/api/adsense/sites',{account:account.name});
+            const sites = Array.isArray(sitesPayload.sites)?sitesPayload.sites:[];
+            siteCount += sites.length;
+            readySites += sites.filter(site=>site.state==='READY').length;
+            const report = await post('/api/adsense/report',{
+              account:account.name,startDate,endDate,dimensions:['DOMAIN_CODE'],
+              metrics:['PAGE_VIEWS','IMPRESSIONS','CLICKS','ESTIMATED_EARNINGS','PAGE_VIEWS_RPM'],limit:10000
+            });
+            reportsOk += 1;
+            reportRows += Number(report.count||0);
+            for (const row of Array.isArray(report.rows)?report.rows:[]) {
+              const domain=host(row?.dimensions?.DOMAIN_CODE);
+              if (!totals.has(domain)) continue;
+              const target=totals.get(domain);
+              const m=row.metrics||{};
+              target.pageViews += Number(m.PAGE_VIEWS||0);
+              target.impressions += Number(m.IMPRESSIONS||0);
+              target.clicks += Number(m.CLICKS||0);
+              target.earnings += Number(m.ESTIMATED_EARNINGS||0);
+              const rpm=Number(m.PAGE_VIEWS_RPM||0), weight=Number(m.PAGE_VIEWS||0);
+              target.rpmWeighted += rpm*weight;
+              target.rpmWeight += weight;
+              for (const code of Object.values(row.currencyCodes||{})) if (code) target.currencies.add(String(code));
+            }
+          }
+
+          let matched=0;
+          for (const blog of blogs) {
+            const data=totals.get(blog.host);
+            const active=data.pageViews>0||data.impressions>0||data.clicks>0||data.earnings!==0;
+            if (active) matched += 1;
+            const rpm=data.rpmWeight>0?data.rpmWeighted/data.rpmWeight:0;
+            console.log(`ADSENSE_BLOG blog=${JSON.stringify(blog.name)} host=${blog.host} active=${active?'yes':'no'} pageViews=${data.pageViews} impressions=${data.impressions} clicks=${data.clicks} earnings=${data.earnings.toFixed(4)} rpm=${rpm.toFixed(4)} currencyCount=${data.currencies.size}`);
+          }
+          console.log(`PHASE4_3_ADSENSE_PROBE_OK accounts=${accounts.length} sites=${siteCount} readySites=${readySites} reports=${reportsOk} reportRows=${reportRows} blogs=7 activeBlogs=${matched} start=${startDate} end=${endDate}`);
+          NODE

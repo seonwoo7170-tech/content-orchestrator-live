@@ -1,0 +1,149 @@
+name: finish-stuck-current-work
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/finish-stuck-current-work-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-finish-stuck-current-work
+  cancel-in-progress: false
+
+jobs:
+  finish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Resume current repair jobs and deliver safe existing-post updates
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ADMIN_API_KEY"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          node - <<'NODE'
+          const base=process.env.ORCHESTRATOR_URL;
+          const admin={'x-admin-api-key':process.env.ADMIN_API_KEY,'content-type':'application/json'};
+          const cfHeaders={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
+          const repairIds=[82,83,84,85,86,93,95];
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const retryableCodes=new Set([
+            'REPAIR_JSON_INVALID',
+            'CLOUDFLARE_AI_ACCOUNT_LIMITED',
+            'CLOUDFLARE_AI_OUT_OF_CAPACITY',
+            'CLOUDFLARE_AI_TIMEOUT',
+            'GEMINI_TIMEOUT',
+            'GEMINI_RATE_LIMITED',
+            'GEMINI_UNAVAILABLE',
+            'GEMINI_REQUEST_FAILED',
+            'STALE_PIPELINE_EXECUTION',
+            'CRITIC_REVIEW_CONTINUE'
+          ]);
+
+          async function api(path, init={}, timeout=175000) {
+            const r=await fetch(base+path,{...init,headers:{...admin,...(init.headers||{})},cache:'no-store',signal:AbortSignal.timeout(timeout)});
+            const data=await r.json().catch(()=>({}));
+            if(!r.ok && r.status!==207) throw new Error(`ORCH:${path}:${r.status}:${String(data.error||'FAILED').slice(0,160)}`);
+            return {status:r.status,data};
+          }
+          const post=(path,timeout=175000)=>api(path,{method:'POST',body:'{}'},timeout);
+
+          async function cf(url,init={}) {
+            const r=await fetch(url,{...init,headers:{...cfHeaders,...(init.headers||{})},signal:AbortSignal.timeout(60000)});
+            const data=await r.json().catch(()=>({}));
+            if(!r.ok||data.success===false) throw new Error(`CF:${r.status}:${JSON.stringify(data.errors||data).slice(0,500)}`);
+            return data;
+          }
+          const dbs=await cf(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/d1/database`);
+          const db=(dbs.result||[]).find(x=>x.name==='content-orchestrator');
+          if(!db?.uuid) throw new Error('D1_DATABASE_NOT_FOUND');
+          const queryUrl=`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/d1/database/${db.uuid}/query`;
+          async function query(sql,params=[]) {
+            const data=await cf(queryUrl,{method:'POST',body:JSON.stringify({sql,params})});
+            return (Array.isArray(data.result)?data.result[0]:data.result)||{};
+          }
+          async function row(id){
+            const q=await query(`SELECT id,mode,blog_id,blogger_post_id,status,error,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,last_failure_at,result_json,updated_at,archived_at FROM jobs WHERE id=?`,[id]);
+            return q.results?.[0]||null;
+          }
+          function savedResult(r){try{return r?.result_json?JSON.parse(r.result_json):null}catch{return null}}
+          function codeOf(r){return String(r?.last_error_code||r?.error||'').split(/[:\s]/)[0]}
+          function hasContinuation(r){const x=savedResult(r);return x?.status==='NEEDS_REVIEW'&&Boolean(x?.article)&&typeof x.article==='object'}
+          function continuationAttempt(r){return Math.max(0,Number(savedResult(r)?.continuationAttempt||0))}
+          function view(r){const x=savedResult(r);return r?{id:Number(r.id),mode:r.mode,status:r.status,retry:Number(r.retry_count||0),recovery:r.recovery_state||'none',code:r.last_error_code||null,continuationAttempt:Number(x?.continuationAttempt||0),resultStatus:x?.status||null,finalCritic:x?.finalCritic?{status:x.finalCritic.status,score:Number(x.finalCritic.score||0),issues:Array.isArray(x.finalCritic.issues)?x.finalCritic.issues.length:null}:null,postId:r.blogger_post_id||x?.repairUpdate?.postId||null,updatedAt:r.updated_at}:null}
+          function updatedMs(r){const raw=String(r?.updated_at||'');const value=Date.parse(raw.includes('T')?raw:raw.replace(' ','T')+'Z');return Number.isFinite(value)?value:0}
+
+          async function makeRunnable(r){
+            if(!r||r.archived_at||['completed','ready'].includes(String(r.status))) return false;
+            const status=String(r.status||'');
+            const continuation=hasContinuation(r);
+            if(continuation && continuationAttempt(r)>=4) return false;
+            const code=codeOf(r);
+            const staleActive=['writing','critic_review','repairing','final_critic','running'].includes(status) && updatedMs(r)<Date.now()-10*60_000;
+            const legacyGenericFailure=status==='failed' && !String(r.last_error_code||'').trim();
+            const runnable=status==='needs_review'||continuation||retryableCodes.has(code)||staleActive||legacyGenericFailure;
+            if(!runnable) return false;
+            const preserveContinuation=continuation||code==='CRITIC_REVIEW_CONTINUE';
+            await query(`UPDATE jobs
+              SET status='queued', error=NULL, retry_count=0, recovery_state='none', next_retry_at=NULL,
+                  hold_reason=NULL, last_error_code=?, last_failure_at=NULL, updated_at=datetime('now')
+              WHERE id=? AND archived_at IS NULL`,[preserveContinuation?'CRITIC_REVIEW_CONTINUE':null,Number(r.id)]);
+            await query(`UPDATE daily_plan_slots
+              SET retry_count=0,recovery_state='none',next_retry_at=NULL,hold_reason=NULL,last_error_code=NULL,last_failure_at=NULL,updated_at=datetime('now')
+              WHERE job_id=?`,[Number(r.id)]);
+            return true;
+          }
+
+          console.log('REPAIRS_BEFORE '+JSON.stringify((await Promise.all(repairIds.map(row))).map(view)));
+
+          for(let pass=1;pass<=2;pass++){
+            for(const id of repairIds){
+              let r=await row(id);
+              if(!r||r.archived_at||['completed','ready'].includes(String(r.status))) continue;
+              if(['writing','critic_review','repairing','final_critic','running'].includes(String(r.status)) && updatedMs(r)>=Date.now()-10*60_000){
+                console.log(`REPAIR_SKIP_ACTIVE id=${id} pass=${pass} status=${r.status}`);
+                continue;
+              }
+              const made=await makeRunnable(r);
+              r=await row(id);
+              if(String(r?.status)!=='queued'){
+                console.log('REPAIR_NOT_RUNNABLE '+JSON.stringify({...view(r),pass,made}));
+                continue;
+              }
+              try{
+                const out=await post(`/api/jobs/${id}/run`,175000);
+                console.log(`REPAIR_RUN id=${id} pass=${pass} http=${out.status}`);
+              }catch(e){
+                console.log(`REPAIR_RUN_ERROR id=${id} pass=${pass} ${String(e.message||e)}`);
+              }
+              await sleep(4000);
+              r=await row(id);
+              console.log('REPAIR_AFTER '+JSON.stringify({...view(r),pass}));
+            }
+          }
+
+          for(let round=1;round<=8;round++){
+            try{
+              const out=await post('/api/operations/repair-publish-tick',120000);
+              const r=out.data?.repairs||out.data||{};
+              console.log(`REPAIR_DELIVER round=${round} http=${out.status} `+JSON.stringify({attempted:Number(r.attempted||0),updated:Number(r.updated||r.completed||0),failed:Number(r.failed||0),blocked:Number(r.blocked||0),outcomes:r.outcomes||[]}));
+              if(Number(r.attempted||0)===0) break;
+            }catch(e){console.log(`REPAIR_DELIVER_ERROR round=${round} ${String(e.message||e)}`)}
+            await sleep(4000);
+          }
+
+          const finalRows=await Promise.all(repairIds.map(row));
+          console.log('REPAIRS_AFTER '+JSON.stringify(finalRows.map(view)));
+          const oldFailures=finalRows.filter(r=>['REPAIR_JSON_INVALID','CLOUDFLARE_AI_ACCOUNT_LIMITED'].includes(codeOf(r)));
+          if(oldFailures.length) throw new Error('OLD_ROOT_CAUSE_REMAINS:'+oldFailures.map(x=>`${x.id}:${codeOf(x)}`).join(','));
+          NODE

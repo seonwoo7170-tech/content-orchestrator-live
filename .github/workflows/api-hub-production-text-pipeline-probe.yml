@@ -1,0 +1,124 @@
+name: API Hub Production Text Pipeline Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/api-hub-production-text-pipeline-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_HUB_KEY: ${{ secrets.HUB_API_KEY }}
+      TARGET_BLOG_ID: '7741529904469657049'
+    steps:
+      - name: Verify Writer Critic Repair without DB or Blogger writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const key = process.env.API_HUB_V2_KEY || process.env.EXISTING_HUB_KEY;
+          if (!key) throw new Error('HUB_KEY_MISSING');
+          const base = process.env.HUB_URL;
+          const headers = {'content-type':'application/json','x-hub-api-key':key};
+
+          async function call(path, body) {
+            const response = await fetch(`${base}${path}`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(180000)
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(`${path}:${response.status}:${String(data?.error || 'REQUEST_FAILED').slice(0,96)}`);
+            return data;
+          }
+
+          function providerCheck(label, data) {
+            const provider = String(data?.provider || 'unknown');
+            const fallback = data?.fallbackUsed === true;
+            const model = String(data?.model || 'unknown');
+            if (!['google-gemini','cloudflare-workers-ai'].includes(provider)) {
+              throw new Error(`${label}_PROVIDER_INVALID:${provider}`);
+            }
+            if (provider === 'cloudflare-workers-ai' && !fallback) {
+              throw new Error(`${label}_WORKERS_FALLBACK_FLAG_MISSING`);
+            }
+            console.log(`${label}_OK provider=${provider} fallback=${fallback} model=${model}`);
+          }
+
+          const healthResp = await fetch(`${base}/health`, {cache:'no-store', signal:AbortSignal.timeout(30000)});
+          const health = await healthResp.json().catch(() => ({}));
+          if (!healthResp.ok || health?.ok !== true) throw new Error('HEALTH_FAILED');
+          console.log(`HEALTH_OK writes=${health.bloggerWritesEnabled === true} mode=${String(health.bloggerWriteMode || 'unknown')}`);
+
+          const writer = await call('/api/hub/ai/writer', {
+            blogId: process.env.TARGET_BLOG_ID,
+            topic: '스마트폰 저장공간 부족 경고가 뜰 때 안전하게 정리하는 순서',
+            language: 'ko',
+            candidateAttempt: 1
+          });
+          if (!writer?.article?.title || !writer?.article?.html) throw new Error('WRITER_ARTICLE_MISSING');
+          providerCheck('WRITER', writer);
+          console.log(`WRITER_ARTICLE_OK titleChars=${writer.article.title.length} htmlChars=${writer.article.html.length}`);
+
+          const critic = await call('/api/hub/ai/critic', {
+            article: writer.article,
+            stage: 'production-no-write-probe'
+          });
+          if (!['PASS','FAIL'].includes(critic?.status) || !Array.isArray(critic?.issues)) {
+            throw new Error('CRITIC_SCHEMA_INVALID');
+          }
+          providerCheck('CRITIC', critic);
+          console.log(`CRITIC_RESULT status=${critic.status} score=${Number(critic.score)} issues=${critic.issues.length}`);
+
+          const repairInput = {
+            title: '저장공간 정리 테스트',
+            html: '<p>저장공간을 확인하고 필요 없는 파일을 검토한 다음 중요한 자료는 백업 여부를 확인하고 정리하면 됩니다.</p>',
+            searchDescription: '스마트폰 저장공간을 안전하게 정리하는 기본 순서입니다.',
+            labels: ['스마트폰'],
+            sources: [],
+            language: 'ko',
+            topic: '스마트폰 저장공간 정리'
+          };
+          const repair = await call('/api/hub/ai/repair', {
+            article: repairInput,
+            issues: [{
+              code: 'READABILITY',
+              severity: 'MEDIUM',
+              location: 'html p 1',
+              reason: '한 문장에 여러 단계가 이어져 읽기 어렵다.',
+              repairInstruction: '의미를 유지하면서 두세 개의 짧은 문장으로 나눈다.'
+            }],
+            strategy: 'targeted_sections_only'
+          });
+          if (!repair?.article?.title || !repair?.article?.html) throw new Error('REPAIR_ARTICLE_MISSING');
+          providerCheck('REPAIR', repair);
+          console.log(`REPAIR_ARTICLE_OK htmlChars=${repair.article.html.length}`);
+
+          const finalCritic = await call('/api/hub/ai/critic', {
+            article: repair.article,
+            stage: 'production-no-write-probe-final'
+          });
+          if (!['PASS','FAIL'].includes(finalCritic?.status) || !Array.isArray(finalCritic?.issues)) {
+            throw new Error('FINAL_CRITIC_SCHEMA_INVALID');
+          }
+          providerCheck('FINAL_CRITIC', finalCritic);
+          console.log(`FINAL_CRITIC_RESULT status=${finalCritic.status} score=${Number(finalCritic.score)} issues=${finalCritic.issues.length}`);
+
+          const finalHealthResp = await fetch(`${base}/health`, {cache:'no-store', signal:AbortSignal.timeout(30000)});
+          const finalHealth = await finalHealthResp.json().catch(() => ({}));
+          if (!finalHealthResp.ok || finalHealth?.ok !== true) throw new Error('FINAL_HEALTH_FAILED');
+          if (finalHealth?.bloggerWritesEnabled !== health?.bloggerWritesEnabled || finalHealth?.bloggerWriteMode !== health?.bloggerWriteMode) {
+            throw new Error('BLOGGER_WRITE_GATE_CHANGED_DURING_PROBE');
+          }
+          console.log('PRODUCTION_TEXT_PIPELINE_PROBE_OK no DB/job/Blogger write endpoint called');
+          NODE

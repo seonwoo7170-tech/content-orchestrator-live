@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-08-30T15:54:07.857Z",
+  "total": 1,
+  "requestedLimit": 1,
+  "requestedIndex": 3,
+  "rejected": 0,
+  "bloggerWrites": "OFF_CONFIRMED_BEFORE_AFTER",
+  "beforeGateConfirmed": true,
+  "afterGateConfirmed": true,
+  "healthBefore": {
+    "imageQaRequired": true,
+    "imageQaConfigured": true,
+    "imageQaProvider": "google-gemini",
+    "imageQaModel": "gemini-3.1-flash-lite",
+    "imageQaMaxAttempts": 3,
+    "bloggerWritesEnabled": false,
+    "bloggerWriteMode": "disabled"
+  },
+  "healthAfter": {
+    "imageQaRequired": true,
+    "imageQaConfigured": true,
+    "imageQaProvider": "google-gemini",
+    "imageQaModel": "gemini-3.1-flash-lite",
+    "imageQaMaxAttempts": 3,
+    "bloggerWritesEnabled": false,
+    "bloggerWriteMode": "disabled"
+  },
+  "fatalError": null,
+  "results": [
+    {
+      "index": 3,
+      "title": "Using AI Assistants Safely for Home Maintenance: A Practical Guide",
+      "generated": true,
+      "provider": "kie-ai",
+      "mime": "image/png",
+      "internalImageQa": {
+        "enabled": true,
+        "pass": true,
+        "attempts": 1,
+        "inspectionAttempts": 1,
+        "model": "gemini-3.1-flash-lite"
+      },
+      "ocrAlnum": 2,
+      "textFree": true,
+      "ocrText": "‘sy, :",
+      "highConfidenceWords": [],
+      "meaningfulWords": []
+    }
+  ]
+}

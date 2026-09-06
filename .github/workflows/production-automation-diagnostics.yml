@@ -1,0 +1,101 @@
+name: production-automation-diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/production-automation-diagnostics.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Read production automation state
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${String(j.error||'unknown').slice(0,80)}`);
+            return j;
+          }
+          const [health,today,recovery,publications,jobs,readyJobsResponse,automation]=await Promise.all([
+            get('/health'), get('/api/operations/today'), get('/api/operations/recovery'),
+            get('/api/operations/publications/today'), get('/api/jobs?limit=100'), get('/api/jobs?status=ready&limit=100'), get('/api/automation/settings')
+          ]);
+          const slots=Array.isArray(today.slots)?today.slots:[];
+          const decisions=Array.isArray(today.workload?.decisions)?today.workload.decisions:[];
+          const countBy=(rows,key)=>rows.reduce((a,row)=>{const v=String(row?.[key]??'unknown');a[v]=(a[v]||0)+1;return a;},{});
+          const slotIds=new Set(slots.map(s=>Number(s.job_id||0)).filter(Boolean));
+          const allJobs=Array.isArray(jobs.jobs)?jobs.jobs:[];
+          const planJobs=allJobs.filter(j=>slotIds.has(Number(j.id)));
+          const readyJobs=Array.isArray(readyJobsResponse.jobs)?readyJobsResponse.jobs:[];
+          const attentionJobs=allJobs.filter(j=>['failed','needs_review'].includes(String(j.status||''))).map(j=>({
+            id:Number(j.id),blogId:String(j.blog_id||''),mode:String(j.mode||''),status:String(j.status||''),
+            recoveryState:String(j.recovery_state||'none'),retryCount:Number(j.retry_count||0),nextRetryAt:j.next_retry_at||null,
+            lastErrorCode:j.last_error_code||j.error_code||null,holdReason:j.hold_reason||null,lastFailureAt:j.last_failure_at||null,updatedAt:j.updated_at||null
+          }));
+          const heldItems=Array.isArray(recovery.heldItems)?recovery.heldItems.map(item=>({
+            type:item.type||null,id:Number(item.id||0),blogId:String(item.blog_id||item.blogId||''),kind:item.kind||null,
+            mode:item.mode||null,retryCount:Number(item.retry_count||item.retryCount||0),holdReason:item.hold_reason||item.holdReason||null,
+            lastErrorCode:item.last_error_code||item.lastErrorCode||null,lastFailureAt:item.last_failure_at||item.lastFailureAt||null
+          })):[];
+          const blogSettings=Array.isArray(automation.blogs)?automation.blogs:[];
+          const settingsByBlog=new Map(blogSettings.map(b=>[String(b.blogId),b.effective||{}]));
+          const readyDetails=[];
+          for(const j of readyJobs){
+            const [detail,images]=await Promise.all([get(`/api/jobs/${Number(j.id)}`),get(`/api/jobs/${Number(j.id)}/images`)]);
+            const row=detail.job||{};
+            let result=null;
+            try{result=row.result_json?JSON.parse(row.result_json):null;}catch{}
+            const imageRows=Array.isArray(images.images)?images.images:[];
+            const imageStatus=countBy(imageRows,'status');
+            const settings=settingsByBlog.get(String(j.blog_id))||{};
+            readyDetails.push({
+              id:Number(j.id),blogId:String(j.blog_id||''),mode:String(j.mode||''),dailySlotId:row.daily_slot_id?Number(row.daily_slot_id):null,
+              updatedAt:j.updated_at||null,hasResult:Boolean(j.has_result),finalCriticStatus:result?.finalCritic?.status||null,
+              finalCriticScore:Number(result?.finalCritic?.score||0),articlePresent:Boolean(result?.article),
+              imageCount:imageRows.length,imageStatus,
+              automation:{enabled:settings.enabled!==false,autoPublishEnabled:settings.autoPublishEnabled===true,approvalMode:settings.approvalMode||null,maxPublishesPerDay:Number(settings.maxPublishesPerDay||0),imagesEnabled:settings.imagesEnabled===true,bodyImageCount:Number(settings.bodyImageCount||0)}
+            });
+          }
+          console.log('AUTOMATION_STATE',JSON.stringify({
+            health:{bloggerWritesEnabled:health.bloggerWritesEnabled===true,autoPublishExecutionEnabled:health.phase2Automation?.autoPublishExecutionEnabled===true,dailyPolicy:health.dailyPolicy||null},
+            plan:{planDate:today.planDate||null,slots:slots.length,slotStatus:countBy(slots,'status'),slotKind:countBy(slots,'kind'),plannedWork:decisions.reduce((sum,d)=>sum+Number(d.newArticles||0)+Number(d.repairs||0),0),workloadDecisions:decisions.length},
+            jobs:{linkedToTodayPlan:planJobs.length,status:countBy(planJobs,'status'),mode:countBy(planJobs,'mode')},
+            recovery:{executionEnabled:recovery.executionEnabled===true,dailyWorkExecutionEnabled:recovery.dailyWorkExecutionEnabled===true,summary:recovery.summary||null,dueRetries:Array.isArray(recovery.dueRetries)?recovery.dueRetries.length:0,heldItems:heldItems.length},
+            publications:{count:Number(publications.count||0),summary:publications.summary||null,items:Array.isArray(publications.items)?publications.items.map(p=>({jobId:Number(p.job_id||p.jobId||0),blogId:String(p.blog_id||p.blogId||''),status:p.status||null,slotNo:Number(p.slot_no||p.slotNo||0),scheduledTime:p.scheduled_time||p.scheduledTime||null,bloggerPostId:p.blogger_post_id||p.bloggerPostId||null})):[]},
+            automation:{blogSettings:blogSettings.length,enabledBlogs:blogSettings.filter(b=>b?.effective?.enabled!==false).length,autoBlogs:blogSettings.filter(b=>b?.effective?.enabled!==false&&b?.effective?.autoPublishEnabled===true&&String(b?.effective?.approvalMode||'auto')==='auto').length,globalEnabled:automation.global?.enabled!==false,dailyOperationStartTime:automation.global?.dailyOperationStartTime||null,timezone:automation.global?.timezone||null},
+            effectiveSettings:blogSettings.map(b=>({blogId:String(b.blogId||''),name:b.name||null,inheritGlobal:b.inheritGlobal!==false,enabled:b?.effective?.enabled!==false,newArticlesEnabled:b?.effective?.newArticlesEnabled===true,newArticlesPerDay:Number(b?.effective?.newArticlesPerDay||0),repairsEnabled:b?.effective?.repairsEnabled===true,repairsPerDay:Number(b?.effective?.repairsPerDay||0),operationMode:b?.effective?.operationMode||null,autoPublishEnabled:b?.effective?.autoPublishEnabled===true,approvalMode:b?.effective?.approvalMode||null}))
+          }));
+          console.log('WORKLOAD_DECISIONS',JSON.stringify(decisions.map(d=>({blogId:String(d.blogId||''),blogName:d.blogName||null,priorityLabel:d.priorityLabel||null,newArticles:Number(d.newArticles||0),repairs:Number(d.repairs||0),signals:d.signals||null,reasons:d.reasons||null}))));
+          console.log('ATTENTION_JOB_STATE',JSON.stringify(attentionJobs));
+          console.log('HELD_RECOVERY_STATE',JSON.stringify(heldItems));
+          console.log('TODAY_SLOT_STATE',JSON.stringify(slots.map(s=>({id:Number(s.id),blogId:s.blog_id,blogName:s.blog_name,kind:s.kind,slotNo:Number(s.slot_no||0),status:s.status,jobId:s.job_id?Number(s.job_id):null,recoveryState:s.recovery_state||'none',retryCount:Number(s.retry_count||0),nextRetryAt:s.next_retry_at||null,lastErrorCode:s.last_error_code||null,updatedAt:s.updated_at||null}))));
+          console.log('TODAY_JOB_STATE',JSON.stringify(planJobs.map(j=>({
+            id:Number(j.id),blogId:j.blog_id,mode:j.mode,status:j.status,
+            recoveryState:j.recovery_state||'none',retryCount:Number(j.retry_count||0),
+            nextRetryAt:j.next_retry_at||null,lastErrorCode:j.last_error_code||j.error_code||null,
+            holdReason:j.hold_reason||null,lastFailureAt:j.last_failure_at||null,updatedAt:j.updated_at||null
+          }))));
+          console.log('READY_JOB_STATE',JSON.stringify(readyDetails));
+          if(!health.bloggerWritesEnabled) throw new Error('BLOGGER_WRITES_NOT_ENABLED');
+          if(!health.phase2Automation?.autoPublishExecutionEnabled) throw new Error('AUTO_PUBLISH_NOT_ENABLED');
+          if(!recovery.dailyWorkExecutionEnabled) throw new Error('DAILY_WORK_NOT_ENABLED');
+          if(!recovery.executionEnabled) throw new Error('RECOVERY_NOT_ENABLED');
+          NODE
+
+# probe: auto-rescue-live-progress-v18-2026-09-04

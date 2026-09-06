@@ -1,0 +1,182 @@
+name: Phase 2 Orchestrator Deploy
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/phase2-orchestrator-deploy-trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BUCKET_NAME: content-orchestrator-images
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Content Orchestrator dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify source
+        run: npm run verify
+
+      - name: Validate deployment inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_R2_API_TOKEN missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID missing'; exit 1; }
+          test -n "$HUB_API_KEY" || { echo 'HUB_API_KEY missing'; exit 1; }
+          test -n "$ADMIN_API_KEY" || { echo 'ADMIN_API_KEY missing'; exit 1; }
+
+      - name: Resolve existing D1 database
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Existing content-orchestrator D1 database not found'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render Wrangler config
+        run: node scripts/render-wrangler.mjs
+
+      - name: Verify R2 bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@latest r2 bucket list | grep -F "$BUCKET_NAME" >/dev/null
+          echo 'R2 bucket preflight passed.'
+
+      - name: Snapshot existing jobs and daily slots
+        shell: bash
+        run: |
+          set -euo pipefail
+          snapshot_table() {
+            local table="$1"
+            local out="$2"
+            npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --json --command "SELECT * FROM ${table} ORDER BY id;" > "${out}.raw"
+            node - "${out}.raw" "$out" <<'NODE'
+          const fs = require('node:fs');
+          const input = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const blocks = Array.isArray(input) ? input : [input];
+          const rows = blocks.flatMap((block) => Array.isArray(block?.results) ? block.results : []);
+          const canonical = (value) => {
+            if (Array.isArray(value)) return value.map(canonical);
+            if (value && typeof value === 'object') {
+              return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+            }
+            return value;
+          };
+          fs.writeFileSync(process.argv[3], JSON.stringify(canonical(rows)));
+          console.log(`Snapshot rows: ${rows.length}`);
+          NODE
+            rm -f "${out}.raw"
+          }
+          snapshot_table jobs /tmp/jobs.before.json
+          snapshot_table daily_plan_slots /tmp/slots.before.json
+          sha256sum /tmp/jobs.before.json /tmp/slots.before.json | sed 's#/tmp/##'
+
+      - name: Apply additive Phase 2 D1 migrations
+        run: npx --yes wrangler@latest d1 migrations apply content-orchestrator --remote --config wrangler.jsonc
+
+      - name: Verify existing rows were preserved byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          snapshot_table() {
+            local table="$1"
+            local out="$2"
+            npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --json --command "SELECT * FROM ${table} ORDER BY id;" > "${out}.raw"
+            node - "${out}.raw" "$out" <<'NODE'
+          const fs = require('node:fs');
+          const input = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const blocks = Array.isArray(input) ? input : [input];
+          const rows = blocks.flatMap((block) => Array.isArray(block?.results) ? block.results : []);
+          const canonical = (value) => {
+            if (Array.isArray(value)) return value.map(canonical);
+            if (value && typeof value === 'object') {
+              return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+            }
+            return value;
+          };
+          fs.writeFileSync(process.argv[3], JSON.stringify(canonical(rows)));
+          console.log(`Read-back rows: ${rows.length}`);
+          NODE
+            rm -f "${out}.raw"
+          }
+          snapshot_table jobs /tmp/jobs.after.json
+          snapshot_table daily_plan_slots /tmp/slots.after.json
+          cmp -s /tmp/jobs.before.json /tmp/jobs.after.json || { echo 'Existing jobs changed during migration'; exit 1; }
+          cmp -s /tmp/slots.before.json /tmp/slots.after.json || { echo 'Existing daily slots changed during migration'; exit 1; }
+          echo 'Existing jobs and daily slots preserved exactly.'
+
+      - name: Verify Phase 2 tables exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --json --command "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('job_images','automation_settings','job_publications') ORDER BY name;" > /tmp/phase2-tables.json
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const input = JSON.parse(fs.readFileSync('/tmp/phase2-tables.json','utf8'));
+          const rows = (Array.isArray(input) ? input : [input]).flatMap(x => x.results || []);
+          const names = rows.map(x => x.name).sort();
+          const expected = ['automation_settings','job_images','job_publications'];
+          if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error(`PHASE2_TABLES_INVALID:${names.join(',')}`);
+          console.log('Phase 2 additive tables verified.');
+          NODE
+
+      - name: Prepare runtime secrets
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const { writeFileSync, chmodSync } = require('node:fs');
+          const values = { HUB_API_KEY: process.env.HUB_API_KEY, ADMIN_API_KEY: process.env.ADMIN_API_KEY };
+          if (!values.HUB_API_KEY || !values.ADMIN_API_KEY) throw new Error('RUNTIME_SECRETS_REQUIRED');
+          writeFileSync('.deploy-secrets.json', JSON.stringify(values));
+          chmodSync('.deploy-secrets.json', 0o600);
+          NODE
+
+      - name: Deploy Orchestrator with R2 binding and publish gates disabled
+        run: npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
+
+      - name: Post-deploy provider smoke
+        run: node scripts/postdeploy-smoke.mjs
+
+      - name: Verify Phase 2 health and safety gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEALTH="$(curl -fsS "$ORCHESTRATOR_URL/health")"
+          HEALTH="$HEALTH" node - <<'NODE'
+          const health = JSON.parse(process.env.HEALTH);
+          if (health.ok !== true) throw new Error('ORCHESTRATOR_HEALTH_FAILED');
+          if (health.bloggerWritesEnabled !== false) throw new Error('BLOGGER_WRITES_MUST_REMAIN_DISABLED');
+          if (health.phase2Images?.bucketBound !== true) throw new Error('R2_BUCKET_NOT_BOUND');
+          if (health.phase2Images?.publicBaseUrlConfigured !== true) throw new Error('IMAGE_PUBLIC_BASE_URL_NOT_CONFIGURED');
+          if (health.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_MUST_REMAIN_DISABLED');
+          console.log('Phase 2 health verified; publish gates remain disabled.');
+          NODE
+
+      - name: Cleanup deployment files
+        if: always()
+        shell: bash
+        run: rm -f .deploy-secrets.json wrangler.jsonc /tmp/jobs.before.json /tmp/jobs.after.json /tmp/slots.before.json /tmp/slots.after.json /tmp/phase2-tables.json

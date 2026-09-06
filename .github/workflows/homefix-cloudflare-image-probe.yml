@@ -1,0 +1,30 @@
+name: HomeFix Cloudflare Image Probe
+
+on:
+  push:
+    paths:
+      - '.github/homefix-cloudflare-image-probe-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve API Hub key without printing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then HUB_API_KEY="$API_HUB_V2_KEY"; else HUB_API_KEY="$EXISTING_ORCHESTRATOR_KEY"; fi
+          test -n "$HUB_API_KEY" || { echo 'Hub key missing'; exit 1; }
+          echo "HUB_API_KEY=$HUB_API_KEY" >> "$GITHUB_ENV"
+      - name: Probe Cloudflare image provider only
+        run: node scripts/homefix-cloudflare-image-probe.mjs

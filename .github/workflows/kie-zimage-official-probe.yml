@@ -1,0 +1,80 @@
+name: KIE Z-Image Official Contract Probe
+
+on:
+  push:
+    paths:
+      - '.github/kie-zimage-official-probe-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: production
+    env:
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+    steps:
+      - name: Probe official Z-Image request contract without exposing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const key = String(process.env.KIE_API_KEY || '').trim();
+          if (!key) throw new Error('KIE_API_KEY_REQUIRED');
+          const headers = { authorization: `Bearer ${key}`, 'content-type': 'application/json' };
+          const prompt = 'Generate a photorealistic image of a cafe terrace in the Marais district of Paris on a Wednesday morning in March 2025. It is a crisp, cool spring morning with clear skies. Locals are drinking coffee. In sharp focus should be a young woman with a pixie cut wearing a scarf, stirring a cappuccino and looking thoughtfully to the side; the waiter and street traffic behind her are blurred. The photo should have the candid, natural morning light feel of an iPhone image.';
+          const create = await fetch('https://api.kie.ai/api/v1/jobs/createTask', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model: 'z-image',
+              input: { prompt, aspect_ratio: '1:1', nsfw_checker: true }
+            })
+          });
+          const created = await create.json().catch(() => ({}));
+          const taskId = String(created?.data?.taskId || '').trim();
+          if (!create.ok || !taskId) {
+            const code = Number.isInteger(Number(created?.code)) ? Number(created.code) : null;
+            console.log(`OFFICIAL_ZIMAGE_PROBE createAccepted=false http=${create.status} providerCode=${code ?? 'none'}`);
+            process.exit(2);
+          }
+          console.log('OFFICIAL_ZIMAGE_PROBE createAccepted=true');
+
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const safeFailMessage = (value) => String(value || '')
+            .replace(/task_[A-Za-z0-9_-]+/g, '[task]')
+            .replace(/https?:\/\/\S+/g, '[url]')
+            .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+            .slice(0, 320);
+          for (let attempt = 1; attempt <= 6; attempt += 1) {
+            await sleep(2000);
+            const detailResponse = await fetch(`https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`, {
+              headers: { authorization: `Bearer ${key}` }
+            });
+            const detail = await detailResponse.json().catch(() => ({}));
+            const task = detail?.data || {};
+            const state = String(task?.state || '').toLowerCase();
+            const failCode = Number.isInteger(Number(task?.failCode)) ? Number(task.failCode) : null;
+            if (state === 'fail') {
+              const failMsg = safeFailMessage(task?.failMsg);
+              console.log(`OFFICIAL_ZIMAGE_PROBE state=fail failCode=${failCode ?? 'none'} attempt=${attempt} failMsg=${JSON.stringify(failMsg)}`);
+              process.exit(2);
+            }
+            if (state === 'success') {
+              console.log(`OFFICIAL_ZIMAGE_PROBE state=success attempt=${attempt}`);
+              process.exit(0);
+            }
+            if (['waiting', 'wait', 'queuing', 'queueing', 'generating'].includes(state)) {
+              console.log(`OFFICIAL_ZIMAGE_PROBE state=${state} attempt=${attempt}`);
+              if (attempt >= 3) {
+                console.log('OFFICIAL_ZIMAGE_PROBE validationAccepted=true generationStillInProgress=true');
+                process.exit(0);
+              }
+              continue;
+            }
+            console.log(`OFFICIAL_ZIMAGE_PROBE state=unknown http=${detailResponse.status} attempt=${attempt}`);
+          }
+          process.exit(2);
+          NODE

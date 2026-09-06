@@ -1,0 +1,58 @@
+name: Production Writer Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-writer-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Probe real Writer path without Blogger writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_API_KEY"
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_BASE_URL;
+          const response = await fetch(`${base}/api/hub/ai/writer`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-hub-api-key': process.env.HUB_API_KEY
+            },
+            body: JSON.stringify({
+              blogId: '7741529904469657049',
+              topic: '2026 추석 명절 지원금',
+              language: 'ko',
+              candidateAttempt: 1
+            }),
+            signal: AbortSignal.timeout(180000)
+          });
+          const text = await response.text();
+          let data = null;
+          try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+          console.log('WRITER_PROBE', JSON.stringify({
+            httpStatus: response.status,
+            ok: response.ok,
+            error: typeof data?.error === 'string' ? data.error : null,
+            providerCode: Number.isInteger(data?.providerCode) ? data.providerCode : null,
+            providerHttpStatus: Number.isInteger(data?.providerHttpStatus) ? data.providerHttpStatus : null,
+            provider: typeof data?.provider === 'string' ? data.provider : null,
+            model: typeof data?.model === 'string' ? data.model : null,
+            fallbackUsed: typeof data?.fallbackUsed === 'boolean' ? data.fallbackUsed : null,
+            hasArticle: Boolean(data?.article),
+            title: typeof data?.article?.title === 'string' ? data.article.title.slice(0, 120) : null
+          }));
+          if (!response.ok) process.exit(2);
+          NODE

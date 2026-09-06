@@ -1,0 +1,35 @@
+name: Phase 1 Blogger Read-only Inventory
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    env:
+      HUB_KEY: ${{ secrets.HUB_API_KEY }}
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: List connected Blogger blogs safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_KEY" || { echo 'HUB_API_KEY missing'; exit 1; }
+          node - <<'NODE'
+          const hub = process.env.HUB_URL;
+          const key = process.env.HUB_KEY;
+          const r = await fetch(`${hub}/api/blogger/blogs`, {
+            method: 'POST',
+            headers: {'content-type':'application/json','x-hub-api-key':key},
+            body: JSON.stringify({action:'list'})
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok || !Array.isArray(j.blogs)) throw new Error(`BLOG_LIST_FAILED:${r.status}`);
+          const safe = j.blogs.map(({id,name,url,language}) => ({id,name,url,language}));
+          console.log(JSON.stringify({count:safe.length,blogs:safe}, null, 2));
+          NODE

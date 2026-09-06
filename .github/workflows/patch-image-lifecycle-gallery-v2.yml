@@ -1,0 +1,40 @@
+name: patch-image-lifecycle-gallery-v2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-image-lifecycle-gallery-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout patch script
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Preserve patch script
+        run: cp .github/scripts/patch_image_lifecycle.py /tmp/patch_image_lifecycle.py
+      - name: Checkout repair branch
+        run: git checkout fix/image-lifecycle-gallery-20260907
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm install --no-package-lock
+      - name: Apply repair
+        run: python /tmp/patch_image_lifecycle.py
+      - name: Verify
+        run: npm run verify
+      - name: Commit and push repair
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api-hub-v2/src/lib/kie-image.js api-hub-v2/src/lib/image-routes.js api-hub-v2/src/index.js worker/lib/image-executor.js worker/lib/image-completion.js worker/lib/job-store.js worker/mcp-entry.js web/work-cards.js web/work-cards.css web/sw.js wrangler.example.jsonc tests/image-lifecycle-gallery.test.mjs tests/image-production-config.test.mjs tests/image-repair-ui-integration.test.mjs
+          git commit -m 'Fix image lifecycle attachment and gallery'
+          git push origin HEAD:fix/image-lifecycle-gallery-20260907

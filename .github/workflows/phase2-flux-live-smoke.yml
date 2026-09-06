@@ -1,0 +1,177 @@
+name: Phase 2 FLUX Live Smoke
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/phase2-flux-live-smoke-trigger'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase2-flux-live-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    env:
+      R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      DEPLOY_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+      BUCKET_NAME: content-orchestrator-images
+      OBJECT_KEY: jobs/phase2-flux-live-smoke/thumbnail-0.png
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install thumbnail renderer dependency
+        run: npm install --no-audit --no-fund
+
+      - name: Select R2-capable token without printing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$R2_API_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN=$R2_API_TOKEN" >> "$GITHUB_ENV"
+          elif [ -n "$DEPLOY_API_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN=$DEPLOY_API_TOKEN" >> "$GITHUB_ENV"
+          else
+            echo 'Cloudflare API token missing'; exit 1
+          fi
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'Cloudflare account id missing'; exit 1; }
+          test -n "$HUB_API_KEY" || { echo 'Hub API key missing'; exit 1; }
+
+      - name: Confirm all production write gates remain disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          HUB_HEALTH="$(curl -fsS "$HUB_URL/health")"
+          ORCH_HEALTH="$(curl -fsS "$ORCHESTRATOR_URL/health")"
+          HUB_HEALTH="$HUB_HEALTH" ORCH_HEALTH="$ORCH_HEALTH" node - <<'NODE'
+          const hub = JSON.parse(process.env.HUB_HEALTH);
+          const orch = JSON.parse(process.env.ORCH_HEALTH);
+          if (hub.bloggerWritesEnabled !== false) throw new Error('API_HUB_BLOGGER_WRITES_MUST_BE_DISABLED');
+          if (orch.bloggerWritesEnabled !== false) throw new Error('ORCHESTRATOR_BLOGGER_WRITES_MUST_BE_DISABLED');
+          if (orch.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_MUST_BE_DISABLED');
+          if (orch.phase2Images?.bucketBound !== true) throw new Error('R2_BUCKET_NOT_BOUND');
+          console.log('Write gates disabled and R2 binding present.');
+          NODE
+
+      - name: Generate one text-free FLUX source image through API Hub
+        shell: bash
+        run: |
+          set -euo pipefail
+          HTTP="$(curl -sS -o /tmp/image-response.json -w '%{http_code}' -X POST "$HUB_URL/api/hub/image/generate" \
+            -H "x-hub-api-key: $HUB_API_KEY" \
+            -H 'content-type: application/json' \
+            --data '{"role":"thumbnail","providerMode":"cloudflare","steps":4,"prompt":"A realistic editorial photograph of a plain chrome household pipe elbow mounted against a clean light-colored ceramic tile wall, soft natural daylight, simple close-up composition, smooth uniform surfaces, one clear focal point"}')"
+          HTTP="$HTTP" node - <<'NODE'
+          const fs = require('node:fs');
+          const status = Number(process.env.HTTP);
+          const data = JSON.parse(fs.readFileSync('/tmp/image-response.json', 'utf8'));
+          if (status !== 200) {
+            const code = Number.isInteger(data.providerCode) ? `:providerCode=${data.providerCode}` : '';
+            const hint = typeof data.providerValidationHint === 'string' ? `:validationHint=${data.providerValidationHint}` : '';
+            const qa = [
+              Number.isInteger(data.qaAttempts) ? `attempts=${data.qaAttempts}` : '',
+              Number.isInteger(data.qaDetectedTextCount) ? `detectedText=${data.qaDetectedTextCount}` : '',
+              Number.isInteger(data.qaViolationCount) ? `violations=${data.qaViolationCount}` : ''
+            ].filter(Boolean).join(',');
+            const qaMeta = qa ? `:qa=${qa}` : '';
+            throw new Error(`FLUX_IMAGE_HTTP_${status}:${String(data.error || 'UNKNOWN')}${code}${hint}${qaMeta}`);
+          }
+          if (!data.ok || data.provider !== 'cloudflare-workers-ai') throw new Error('FLUX_PROVIDER_RESULT_INVALID');
+          if (!String(data.model || '').includes('flux-1-schnell')) throw new Error('FLUX_MODEL_RESULT_INVALID');
+          const mime = String(data.mimeType || '').toLowerCase();
+          if (!['image/jpeg','image/png','image/webp'].includes(mime)) throw new Error(`FLUX_MIME_INVALID:${mime}`);
+          const bytes = Buffer.from(String(data.imageBase64 || ''), 'base64');
+          if (bytes.length < 1000) throw new Error('FLUX_IMAGE_BYTES_TOO_SMALL');
+          fs.writeFileSync('/tmp/phase2-flux-source.img', bytes);
+          console.log(`FLUX text-free source generated: ${bytes.length} bytes (${mime})`);
+          NODE
+
+      - name: Apply deterministic Korean hook and rasterize thumbnail PNG
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { postprocessThumbnail, splitThumbnailHook } from './worker/lib/thumbnail-postprocess.js';
+
+          const generated = JSON.parse(fs.readFileSync('/tmp/image-response.json', 'utf8'));
+          const processed = await postprocessThumbnail(
+            {
+              role: 'thumbnail',
+              position: 0,
+              alt_text: '가정용 배수구 막힘 해결 방법 대표 이미지'
+            },
+            generated
+          );
+          if (processed.mimeType !== 'image/png') throw new Error('THUMBNAIL_POSTPROCESS_MIME_INVALID');
+          if (!processed.hookText || Array.from(processed.hookText).length > 18) throw new Error('THUMBNAIL_HOOK_INVALID');
+          const hookLines = splitThumbnailHook(processed.hookText);
+          if (!hookLines.length || !hookLines.every((line) => processed.html.includes(line))) {
+            throw new Error('THUMBNAIL_HOOK_HTML_MISSING');
+          }
+          if (!processed.html.includes(`data:${generated.mimeType};base64,`)) throw new Error('THUMBNAIL_SOURCE_EMBED_MISSING');
+          const bytes = Buffer.from(processed.bytes);
+          if (bytes.length < 1000) throw new Error('THUMBNAIL_PNG_BYTES_TOO_SMALL');
+          if (bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw new Error('THUMBNAIL_PNG_SIGNATURE_INVALID');
+          fs.writeFileSync('/tmp/phase2-flux-thumbnail.png', bytes);
+          fs.writeFileSync('/tmp/hook.txt', processed.hookText, 'utf8');
+          console.log(`Thumbnail PNG rasterized with hook: ${processed.hookText}`);
+          NODE
+
+      - name: Put final thumbnail PNG into remote R2
+        run: npx --yes wrangler@latest r2 object put "$BUCKET_NAME/$OBJECT_KEY" --file /tmp/phase2-flux-thumbnail.png --content-type 'image/png' --remote
+
+      - name: Verify final thumbnail public media read-back byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS -D /tmp/media-headers.txt "$ORCHESTRATOR_URL/media/$OBJECT_KEY" -o /tmp/media-readback.png
+          test -s /tmp/media-readback.png
+          cmp -s /tmp/phase2-flux-thumbnail.png /tmp/media-readback.png || { echo 'MEDIA_BYTES_MISMATCH'; exit 1; }
+          grep -qi '^content-type: image/png' /tmp/media-headers.txt || { echo 'MEDIA_CONTENT_TYPE_INVALID'; exit 1; }
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const bytes = fs.readFileSync('/tmp/media-readback.png');
+          if (bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw new Error('MEDIA_PNG_SIGNATURE_INVALID');
+          console.log(`PNG read-back verified: ${bytes.length} bytes`);
+          NODE
+          echo "Hook used: $(cat /tmp/hook.txt)"
+          echo 'FLUX source + Korean hook rasterization + R2/media read-back verified.'
+
+      - name: Reconfirm production write gates remain disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          HUB_HEALTH="$(curl -fsS "$HUB_URL/health")"
+          ORCH_HEALTH="$(curl -fsS "$ORCHESTRATOR_URL/health")"
+          HUB_HEALTH="$HUB_HEALTH" ORCH_HEALTH="$ORCH_HEALTH" node - <<'NODE'
+          const hub = JSON.parse(process.env.HUB_HEALTH);
+          const orch = JSON.parse(process.env.ORCH_HEALTH);
+          if (hub.bloggerWritesEnabled !== false) throw new Error('API_HUB_BLOGGER_WRITES_CHANGED');
+          if (orch.bloggerWritesEnabled !== false) throw new Error('ORCHESTRATOR_BLOGGER_WRITES_CHANGED');
+          if (orch.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_CHANGED');
+          console.log('Production write gates still disabled after smoke.');
+          NODE
+
+      - name: Remove FLUX smoke thumbnail from remote R2
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            npx --yes wrangler@latest r2 object delete "$BUCKET_NAME/$OBJECT_KEY" --remote || true
+          fi
+          rm -f /tmp/image-response.json /tmp/phase2-flux-source.img /tmp/phase2-flux-thumbnail.png /tmp/media-readback.png /tmp/media-headers.txt /tmp/hook.txt

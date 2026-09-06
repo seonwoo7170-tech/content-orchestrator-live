@@ -1,0 +1,95 @@
+name: clear-current-work-v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/clear-current-work-v2-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-cleanup-v2
+  cancel-in-progress: false
+
+jobs:
+  clear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Clear active D1 work and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          node - <<'NODE'
+          const token = process.env.CLOUDFLARE_API_TOKEN;
+          const account = process.env.CLOUDFLARE_ACCOUNT_ID;
+          const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+
+          async function cf(url, init = {}) {
+            const r = await fetch(url, { ...init, headers: { ...headers, ...(init.headers || {}) } });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok || data.success === false) {
+              throw new Error(`CF_API_FAILED:${r.status}:${JSON.stringify(data.errors || data).slice(0,500)}`);
+            }
+            return data;
+          }
+
+          const list = await cf(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database`);
+          const db = (list.result || []).find(x => x.name === 'content-orchestrator');
+          if (!db?.uuid) throw new Error('D1_DATABASE_NOT_FOUND');
+          const queryUrl = `https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db.uuid}/query`;
+
+          async function query(sql) {
+            const data = await cf(queryUrl, { method: 'POST', body: JSON.stringify({ sql }) });
+            const result = Array.isArray(data.result) ? data.result[0] : data.result;
+            return result || {};
+          }
+          const qi = name => `"${String(name).replaceAll('"','""')}"`;
+
+          const pre = await query(`SELECT
+            (SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL AND status <> 'completed') AS active_jobs,
+            (SELECT COUNT(*) FROM daily_plan_slots WHERE status = 'pending') AS pending_slots,
+            (SELECT COUNT(*) FROM jobs WHERE recovery_state = 'retry_wait') AS retry_wait,
+            (SELECT COUNT(*) FROM jobs WHERE recovery_state = 'held') AS held_jobs`);
+          const preRow = pre.results?.[0] || {};
+          console.log(`CLEAR_PRE active_jobs=${Number(preRow.active_jobs||0)} pending_slots=${Number(preRow.pending_slots||0)} retry_wait=${Number(preRow.retry_wait||0)} held_jobs=${Number(preRow.held_jobs||0)}`);
+
+          const tablesResult = await query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`);
+          const tables = (tablesResult.results || []).map(r => r.name).filter(Boolean);
+          for (const table of tables) {
+            if (table === 'jobs' || table === 'daily_plan_slots') continue;
+            const fk = await query(`PRAGMA foreign_key_list(${qi(table)})`);
+            const refs = (fk.results || []).filter(r => String(r.table) === 'jobs' && r.from);
+            for (const ref of refs) {
+              const sql = `DELETE FROM ${qi(table)} WHERE ${qi(ref.from)} IN (SELECT id FROM jobs WHERE archived_at IS NULL AND status <> 'completed')`;
+              const out = await query(sql);
+              console.log(`CLEAR_REF table=${table} column=${ref.from} changes=${Number(out.meta?.changes||0)}`);
+            }
+          }
+
+          await query(`UPDATE daily_plan_slots
+            SET status='skipped', job_id=NULL, retry_count=0, recovery_state='none', next_retry_at=NULL,
+                hold_reason=NULL, last_error_code=NULL, last_failure_at=NULL, updated_at=datetime('now')
+            WHERE status='pending'`);
+
+          const deleted = await query(`DELETE FROM jobs WHERE archived_at IS NULL AND status <> 'completed'`);
+          console.log(`CLEAR_JOBS changes=${Number(deleted.meta?.changes||0)}`);
+
+          const post = await query(`SELECT
+            (SELECT COUNT(*) FROM jobs WHERE archived_at IS NULL AND status <> 'completed') AS active_jobs,
+            (SELECT COUNT(*) FROM daily_plan_slots WHERE status = 'pending') AS pending_slots,
+            (SELECT COUNT(*) FROM jobs WHERE recovery_state = 'retry_wait') AS retry_wait,
+            (SELECT COUNT(*) FROM jobs WHERE recovery_state = 'held') AS held_jobs`);
+          const row = post.results?.[0] || {};
+          const values = [Number(row.active_jobs||0), Number(row.pending_slots||0), Number(row.retry_wait||0), Number(row.held_jobs||0)];
+          console.log(`CLEAR_CURRENT_WORK_VERIFY active_jobs=${values[0]} pending_slots=${values[1]} retry_wait=${values[2]} held_jobs=${values[3]}`);
+          if (values.some(v => v !== 0)) throw new Error('CLEAR_CURRENT_WORK_VERIFY_FAILED');
+          NODE

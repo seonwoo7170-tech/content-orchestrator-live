@@ -1,0 +1,88 @@
+name: API Hub v2 Critic Fault Injection
+
+on:
+  push:
+    paths:
+      - '.github/api-hub-v2-critic-fault-injection-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-critic-fault-injection
+  cancel-in-progress: false
+
+jobs:
+  fault-injection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+      HUB_KEY: ${{ secrets.HUB_API_KEY }}
+    steps:
+      - name: Require full Master v4.5 critic to reject deliberately defective article
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_KEY" || { echo 'HUB_KEY missing'; exit 1; }
+          node - <<'NODE'
+          async function health() {
+            const r = await fetch(`${process.env.HUB_URL}/health`, { cache: 'no-store' });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok || data?.ok !== true) throw new Error('HEALTH_FAILED');
+            if (data?.bloggerWritesEnabled !== false || data?.bloggerWriteMode !== 'disabled') {
+              throw new Error('BLOGGER_WRITES_MUST_REMAIN_DISABLED');
+            }
+            return data;
+          }
+
+          async function critic(article) {
+            const r = await fetch(`${process.env.HUB_URL}/api/hub/ai/critic`, {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'x-hub-api-key': process.env.HUB_KEY
+              },
+              body: JSON.stringify({ article, stage: 'fault-injection' })
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(`CRITIC_HTTP_${r.status}:${data?.error || 'REQUEST_FAILED'}`);
+            return data;
+          }
+
+          const before = await health();
+          console.log(`health ok; writes=disabled; critic=${before.criticModel}`);
+
+          const deliberatelyBadArticle = {
+            title: '스마트폰 저장공간 100% 해결! 무조건 성공하는 비법',
+            html: '<p>이 방법만 따르면 누구나 무조건 저장공간 문제를 100% 해결할 수 있습니다.</p>' +
+              '<h2>가장 빠른 해결법</h2>' +
+              '<p>설정에서 용량이 큰 앱과 파일은 중요 여부를 확인하지 말고 바로 삭제하세요. 백업도 필요 없습니다.</p>' +
+              '<p>전문가 연구에 따르면 이 방법은 사용자 99.9%에게 효과가 있습니다.</p>' +
+              '<p>이 방법은 최고입니다. 반드시 하세요.</p>' +
+              '<p>이 방법은 최고입니다. 반드시 하세요.</p>' +
+              '<p>이 방법은 최고입니다. 반드시 하세요.</p>' +
+              '<h2>출처</h2><p>가짜연구소 2026 보고서</p><div><p>닫히지 않은 HTML',
+            searchDescription: '누구에게나 100% 확실하게 통하는 저장공간 정리 비법입니다.',
+            labels: ['스마트폰'],
+            sources: [{ name: '가짜연구소', url: 'https://example.invalid/fabricated-study' }],
+            language: 'ko',
+            topic: '스마트폰 저장공간 정리'
+          };
+
+          const result = await critic(deliberatelyBadArticle);
+          const issues = Array.isArray(result?.issues) ? result.issues : [];
+          console.log(`critic result=${result?.status}:${result?.score ?? 'n/a'}; issues=${issues.length}; auditMode=${result?.auditMode || 'n/a'}`);
+          console.log(`issue summary=${issues.map(i => `${i.code}:${i.severity}`).join(',')}`);
+
+          if (result?.auditMode !== 'master-v4.5-full') throw new Error('MASTER_V45_AUDIT_MODE_MISSING');
+          if (result?.status !== 'FAIL') throw new Error('FAULT_INJECTION_NOT_REJECTED');
+          if (issues.length < 2) throw new Error('FAULT_INJECTION_TOO_FEW_ISSUES');
+          if (!issues.every(i => i?.location && i?.reason && i?.repairInstruction)) {
+            throw new Error('FAULT_INJECTION_ISSUE_DETAIL_MISSING');
+          }
+
+          await health();
+          console.log('CRITIC_FAULT_INJECTION_OK; deliberate defects rejected; no DB/job/Blogger write endpoint called; write gate remained disabled');
+          NODE

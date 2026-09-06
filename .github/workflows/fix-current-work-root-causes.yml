@@ -1,0 +1,142 @@
+name: fix-current-work-root-causes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/fix-current-work-root-causes-trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: content-orchestrator-root-cause-fix
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Patch JSON-mode repair and logical Critic continuation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('api-hub-v2/src/lib/gemini-ai.js')
+          s = p.read_text()
+          old = """  if (schema) {\n    generationConfig.responseMimeType = 'application/json';\n    generationConfig.responseSchema = schema;\n  }\n"""
+          new = """  const jsonOnly = /\\breturn\\s+json\\s+only\\b/i.test(system);\n  if (schema || jsonOnly) generationConfig.responseMimeType = 'application/json';\n  if (schema) generationConfig.responseSchema = schema;\n"""
+          if old not in s:
+              raise SystemExit('GEMINI_JSON_MODE_PATCH_TARGET_NOT_FOUND')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('worker/lib/job-auto-rescue.js')
+          s = p.read_text()
+          old_const = "const REVIEW_RETRY_MINUTES = Object.freeze([15, 60, 360]);\n"
+          if old_const not in s:
+              raise SystemExit('REVIEW_RETRY_CONSTANT_PATCH_TARGET_NOT_FOUND')
+          s = s.replace(old_const, "const MAX_REVIEW_CONTINUATIONS = 4;\n", 1)
+          old = """function reviewRetryAt(now, retryCount) {\n  const index = Math.min(Math.max(0, Number(retryCount || 0)), REVIEW_RETRY_MINUTES.length - 1);\n  return new Date(now.getTime() + REVIEW_RETRY_MINUTES[index] * 60_000).toISOString();\n}\n\n"""
+          if old not in s:
+              raise SystemExit('REVIEW_DELAY_HELPER_PATCH_TARGET_NOT_FOUND')
+          s = s.replace(old, '', 1)
+
+          marker = """function hasSavedReviewContinuation(row) {\n  const result = parseSavedResult(row);\n  return result?.status === 'NEEDS_REVIEW'\n    && Boolean(result?.article)\n    && typeof result.article === 'object';\n}\n\n"""
+          insert = marker + """function reviewContinuationAttempt(row) {\n  const result = parseSavedResult(row);\n  const value = Number(result?.continuationAttempt || 0);\n  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;\n}\n\nfunction isReviewContinuationRetry(row) {\n  return String(row?.status || '') === 'failed'\n    && ['retry_wait', 'held', 'none'].includes(String(row?.recovery_state || 'none'))\n    && String(row?.last_error_code || '') === REVIEW_CONTINUE_CODE\n    && hasSavedReviewContinuation(row);\n}\n\n"""
+          if marker not in s:
+              raise SystemExit('REVIEW_HELPER_INSERT_TARGET_NOT_FOUND')
+          s = s.replace(marker, insert, 1)
+
+          old = """async function rescueNeedsReview(db, row, now) {\n  const code = normalizedCode(row, REVIEW_CONTINUE_CODE);\n  if (neverAutoRetry(code) || await hasUnsafePublication(db, row.id)) {\n    const reason = neverAutoRetry(code) ? code : 'MANUAL_RETRY_REQUIRES_PUBLICATION_REVIEW';\n    const held = await holdJob(db, row, reason, now);\n    return { jobId: Number(row.id), action: held ? 'held' : 'skipped', reason };\n  }\n  return makeDueRetry(db, row, REVIEW_CONTINUE_CODE, now, {\n    nextRetryAt: reviewRetryAt(now, row.retry_count)\n  });\n}\n"""
+          new = """async function rescueNeedsReview(db, row, now) {\n  const code = normalizedCode(row, REVIEW_CONTINUE_CODE);\n  if (!hasSavedReviewContinuation(row)) {\n    const held = await holdJob(db, row, 'QUALITY_REVIEW_RESULT_MISSING', now);\n    return { jobId: Number(row.id), action: held ? 'held' : 'skipped', reason: 'QUALITY_REVIEW_RESULT_MISSING' };\n  }\n  if (reviewContinuationAttempt(row) >= MAX_REVIEW_CONTINUATIONS) {\n    const held = await holdJob(db, row, 'QUALITY_REVIEW_LIMIT_REACHED', now);\n    return { jobId: Number(row.id), action: held ? 'held' : 'skipped', reason: 'QUALITY_REVIEW_LIMIT_REACHED' };\n  }\n  if (neverAutoRetry(code) || await hasUnsafePublication(db, row.id)) {\n    const reason = neverAutoRetry(code) ? code : 'MANUAL_RETRY_REQUIRES_PUBLICATION_REVIEW';\n    const held = await holdJob(db, row, reason, now);\n    return { jobId: Number(row.id), action: held ? 'held' : 'skipped', reason };\n  }\n\n  const jobId = Number(row.id);\n  const status = String(row.status || '');\n  const nextRetryAt = now.toISOString();\n  const result = await db.prepare(\n    `UPDATE jobs\n        SET status = 'failed',\n            error = ?,\n            retry_count = 0,\n            recovery_state = 'retry_wait',\n            next_retry_at = ?,\n            hold_reason = NULL,\n            last_error_code = ?,\n            last_failure_at = ?,\n            updated_at = datetime('now')\n      WHERE id = ? AND archived_at IS NULL AND status = ?`\n  ).bind(REVIEW_CONTINUE_CODE, nextRetryAt, REVIEW_CONTINUE_CODE, now.toISOString(), jobId, status).run();\n  return {\n    jobId,\n    action: Number(result?.meta?.changes || 0) === 1 ? 'retry_due' : 'skipped',\n    reason: REVIEW_CONTINUE_CODE,\n    nextRetryAt\n  };\n}\n"""
+          if old not in s:
+              raise SystemExit('REVIEW_RESCUE_PATCH_TARGET_NOT_FOUND')
+          s = s.replace(old, new, 1)
+
+          old = """          (status = 'needs_review' AND recovery_state <> 'held')\n          OR (\n            recovery_state = 'held'\n"""
+          new = """          (status = 'needs_review' AND recovery_state <> 'held')\n          OR (\n            status = 'failed'\n            AND recovery_state IN ('retry_wait','held','none')\n            AND last_error_code = ?\n            AND result_json IS NOT NULL\n          )\n          OR (\n            recovery_state = 'held'\n"""
+          if old not in s:
+              raise SystemExit('REVIEW_QUERY_PATCH_TARGET_NOT_FOUND')
+          s = s.replace(old, new, 1)
+          old_bind = ").bind(LEGACY_REVIEW_RETRY_CODE, STALE_PIPELINE_CODE, staleCutoff, limit).all();"
+          new_bind = ").bind(REVIEW_CONTINUE_CODE, LEGACY_REVIEW_RETRY_CODE, STALE_PIPELINE_CODE, staleCutoff, limit).all();"
+          if old_bind not in s:
+              raise SystemExit('REVIEW_QUERY_BIND_PATCH_TARGET_NOT_FOUND')
+          s = s.replace(old_bind, new_bind, 1)
+
+          old = """    if (isLegacyRouteFailure(row)) {\n      items.push(await reviveLegacyRouteFailure(db, row, now));\n      continue;\n    }\n    if (status === 'needs_review') {\n"""
+          new = """    if (isLegacyRouteFailure(row)) {\n      items.push(await reviveLegacyRouteFailure(db, row, now));\n      continue;\n    }\n    if (isReviewContinuationRetry(row)) {\n      items.push(await rescueNeedsReview(db, row, now));\n      continue;\n    }\n    if (status === 'needs_review') {\n"""
+          if old not in s:
+              raise SystemExit('REVIEW_DISPATCH_PATCH_TARGET_NOT_FOUND')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('tests/review-continuation.test.mjs')
+          s = p.read_text()
+          s = s.replace("test('auto rescue revives only legacy review-loop holds and schedules future review continuations', () => {", "test('auto rescue keeps Critic continuation immediate, bounded, and separate from infra retries', () => {", 1)
+          s = s.replace("  assert.match(source, /REVIEW_RETRY_MINUTES/);\n", "  assert.match(source, /MAX_REVIEW_CONTINUATIONS/);\n", 1)
+          s = s.replace("  assert.match(source, /nextRetryAt: reviewRetryAt\\(now, row\\.retry_count\\)/);\n", "  assert.match(source, /retry_count = 0/);\n  assert.match(source, /isReviewContinuationRetry/);\n", 1)
+          p.write_text(s)
+          PY
+
+          cat > api-hub-v2/tests/gemini-json-only-mode.test.mjs <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { runGeminiAi } from '../src/lib/gemini-ai.js';
+
+          test('Gemini uses application/json when role contract says Return JSON only', async () => {
+            let sent;
+            const fetchImpl = async (_url, init) => {
+              sent = JSON.parse(init.body);
+              return new Response(JSON.stringify({
+                candidates: [{ content: { parts: [{ text: '{"article":{"title":"x"}}' }] } }],
+                usageMetadata: { totalTokenCount: 1 }
+              }), { status: 200, headers: { 'content-type': 'application/json' } });
+            };
+            await runGeminiAi({ GEMINI_API_KEY: 'test-key' }, {
+              model: 'gemini-3.5-flash-lite',
+              systemInstruction: 'You are a targeted repair editor. Return JSON only.',
+              userContent: '{"article":{}}',
+              maxOutputTokens: 1024,
+              thinking: 'minimal'
+            }, fetchImpl);
+            assert.equal(sent.generationConfig.responseMimeType, 'application/json');
+            assert.equal('responseSchema' in sent.generationConfig, false);
+          });
+          EOF
+
+      - name: Install Content Orchestrator dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify orchestrator
+        run: npm run verify
+
+      - name: Verify API Hub
+        working-directory: api-hub-v2
+        run: npm run check && npm test
+
+      - name: Commit verified fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No source changes needed.'
+            exit 0
+          fi
+          git config user.name 'smileseon-automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add api-hub-v2/src/lib/gemini-ai.js api-hub-v2/tests/gemini-json-only-mode.test.mjs worker/lib/job-auto-rescue.js tests/review-continuation.test.mjs
+          git commit -m 'Fix repair JSON and Critic continuation recovery'
+          git pull --rebase origin main
+          git push origin HEAD:main

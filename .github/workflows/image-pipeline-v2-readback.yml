@@ -1,0 +1,79 @@
+name: image-pipeline-v2-readback
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/image-pipeline-v2-readback-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Read image diagnostics and run one bounded resume
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const base = process.env.ORCHESTRATOR_URL;
+          const headers = {'x-admin-api-key': process.env.ADMIN_API_KEY};
+          async function api(path, init={}) {
+            const r = await fetch(base + path, { ...init, headers: { ...headers, ...(init.headers||{}) }, cache: 'no-store' });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok && r.status !== 207) throw new Error(`${path}:${r.status}:${d.error||'FAILED'}`);
+            return d;
+          }
+          function safeDiag(d) {
+            return {
+              health: d.health || null,
+              pipelineVersion: d.pipelineVersion || null,
+              configuredProviderMode: d.configuredProviderMode || null,
+              kieFallbackRequested: d.kieFallbackRequested === true,
+              kieConfigurationOwner: d.kieConfigurationOwner || null,
+              totals: d.totals || {},
+              statusCounts: d.statusCounts || {},
+              providerCounts: d.providerCounts || {},
+              missing: (d.missing || []).slice(0, 12).map(x => ({
+                jobId: x.jobId, blogId: x.blogId, mode: x.mode,
+                current: x.current, target: x.target, missing: x.missing,
+                pipelineVersion: x.pipelineVersion || null,
+                providers: x.providers || []
+              })),
+              failures: (d.failures || []).slice(0, 12).map(x => ({
+                jobId: x.jobId, blogId: x.blogId, mode: x.mode,
+                role: x.role, position: x.position, errorCode: x.errorCode
+              }))
+            };
+          }
+          const before = await api('/api/operations/images/diagnostics');
+          console.log('IMAGE_PIPELINE_BEFORE ' + JSON.stringify(safeDiag(before)));
+          let resume = { skipped: true, reason: 'NO_READY_MISSING_IMAGE_JOB' };
+          if (Number(before?.totals?.readyMissingImages || 0) > 0) {
+            const r = await api('/api/operations/images/resume?maxJobs=1', { method: 'POST', headers: {'content-type':'application/json'}, body: '{}' });
+            resume = {
+              ok: r.ok !== false,
+              attempted: Number(r.attempted || 0),
+              completed: Number(r.completed || 0),
+              repairAttempted: Number(r.repairAttempted || 0),
+              newAttempted: Number(r.newAttempted || 0),
+              items: (r.items || []).slice(0, 3).map(x => ({
+                jobId: x.jobId, blogId: x.blogId, mode: x.mode,
+                complete: x.complete === true, generated: Number(x.generated || 0),
+                failed: Number(x.failed || 0), targetTotal: Number(x.targetTotal || 0),
+                existingCount: Number(x.existingCount || 0), currentCount: Number(x.currentCount || 0),
+                errorCode: x.errorCode || null, reason: x.reason || null
+              }))
+            };
+          }
+          console.log('IMAGE_PIPELINE_RESUME ' + JSON.stringify(resume));
+          const after = await api('/api/operations/images/diagnostics');
+          console.log('IMAGE_PIPELINE_AFTER ' + JSON.stringify(safeDiag(after)));
+          NODE

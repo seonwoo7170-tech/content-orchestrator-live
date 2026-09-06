@@ -1,0 +1,74 @@
+name: Inspect Targeted Production State
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-targeted-production.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Inspect job 95 and HomeFix thumbnail target
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          node --input-type=module - <<'NODE'
+          const CF=`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}`;
+          const headers={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
+          async function cf(url,init={}){
+            const r=await fetch(url,{...init,headers:{...headers,...(init.headers||{})},signal:AbortSignal.timeout(45000)});
+            const d=await r.json().catch(()=>({}));
+            if(!r.ok||d.success===false) throw new Error(`CF_API_FAILED:${r.status}`);
+            return d;
+          }
+          const list=await cf(`${CF}/d1/database`);
+          const db=(list.result||[]).find(x=>x.name==='content-orchestrator');
+          if(!db?.uuid) throw new Error('D1_DATABASE_NOT_FOUND');
+          const queryUrl=`${CF}/d1/database/${db.uuid}/query`;
+          async function query(sql,params=[]){
+            const d=await cf(queryUrl,{method:'POST',body:JSON.stringify({sql,params})});
+            return ((Array.isArray(d.result)?d.result[0]:d.result)||{}).results||[];
+          }
+          const job95=await query(`SELECT id,mode,blog_id,blogger_post_id,target_url,status,recovery_state,retry_count,last_error_code,hold_reason,updated_at,
+            json_extract(result_json,'$.status') AS result_status,
+            json_extract(result_json,'$.reviewReason') AS review_reason,
+            json_extract(result_json,'$.continuationAttempt') AS continuation_attempt,
+            json_extract(result_json,'$.totalRepairAttempts') AS total_repair_attempts,
+            json_extract(result_json,'$.repairStrategy') AS repair_strategy,
+            json_extract(result_json,'$.finalCritic.status') AS critic_status,
+            json_extract(result_json,'$.finalCritic.score') AS critic_score,
+            json_extract(result_json,'$.finalCritic.issues') AS critic_issues,
+            json_extract(result_json,'$.styleLint.final.status') AS lint_status,
+            json_extract(result_json,'$.styleLint.final.blockingIssues') AS lint_blocking_issues,
+            json_extract(result_json,'$.styleLint.beforeCritic.blockingIssues') AS initial_lint_blocking_issues,
+            (SELECT status FROM job_publications p WHERE p.job_id=jobs.id ORDER BY p.rowid DESC LIMIT 1) AS pub_status,
+            (SELECT blogger_post_id FROM job_publications p WHERE p.job_id=jobs.id ORDER BY p.rowid DESC LIMIT 1) AS pub_post_id
+            FROM jobs WHERE id=95 LIMIT 1`);
+          console.log('JOB95',JSON.stringify(job95));
+
+          const title='How to Prioritize Home Repairs When Money Is Tight: A Shelter-First Framework';
+          const homefix=await query(`SELECT j.id,j.mode,j.blog_id,j.blogger_post_id,j.target_url,j.status,j.archived_at,j.updated_at,
+            json_extract(j.result_json,'$.article.title') AS title,
+            json_extract(j.result_json,'$.article.language') AS language,
+            substr(json_extract(j.result_json,'$.article.html'),1,3500) AS html_head,
+            i.id AS image_id,i.role,i.position,i.status AS image_status,i.alt_text,i.hook_text,i.storage_key,i.public_url,i.mime_type
+            FROM jobs j LEFT JOIN job_images i ON i.job_id=j.id
+            WHERE json_extract(j.result_json,'$.article.title')=?
+               OR j.topic=?
+            ORDER BY j.id DESC,i.position,i.id`,[title,title]);
+          console.log('HOMEFIX_TARGET',JSON.stringify(homefix));
+          NODE
+# inspection-trigger: 2026-09-05T23:55+09:00

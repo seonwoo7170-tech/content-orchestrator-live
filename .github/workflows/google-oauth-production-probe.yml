@@ -1,0 +1,79 @@
+name: Google OAuth Production Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/google-oauth-production-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    environment: production
+    env:
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Probe Google OAuth refresh without Blogger writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const allowlistedProviderErrors = new Set(['invalid_grant','invalid_client','unauthorized_client','invalid_request']);
+          for (const name of ['GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REFRESH_TOKEN']) {
+            if (!String(process.env[name] || '').trim()) throw new Error(`${name}_SECRET_MISSING`);
+          }
+
+          const direct = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: {'content-type':'application/x-www-form-urlencoded'},
+            body: new URLSearchParams({
+              client_id: process.env.GOOGLE_CLIENT_ID,
+              client_secret: process.env.GOOGLE_CLIENT_SECRET,
+              refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
+              grant_type: 'refresh_token'
+            }).toString()
+          });
+          const directBody = await direct.json().catch(()=>({}));
+          const providerError = allowlistedProviderErrors.has(String(directBody?.error || '')) ? String(directBody.error) : (direct.ok ? null : 'unclassified_oauth_error');
+          console.log(`GOOGLE_OAUTH_DIRECT_REFRESH status=${direct.status} ok=${direct.ok} providerError=${providerError || 'none'}`);
+
+          const base = process.env.API_HUB_V2_BASE_URL;
+          const key = process.env.API_HUB_V2_KEY || process.env.EXISTING_ORCHESTRATOR_KEY;
+          if (!key) throw new Error('API_HUB_KEY_REQUIRED');
+          const healthResp = await fetch(`${base}/health?oauthProbe=${Date.now()}`, {cache:'no-store'});
+          const health = await healthResp.json().catch(()=>({}));
+          console.log(`GOOGLE_OAUTH_HEALTH status=${healthResp.status} bloggerConfigured=${health?.bloggerConfigured===true}`);
+          if (!healthResp.ok) throw new Error(`API_HUB_HEALTH_${healthResp.status}`);
+          const response = await fetch(`${base}/api/google/scopes`, {
+            method: 'POST',
+            headers: {'content-type':'application/json','x-hub-api-key':key},
+            body: '{}',
+            cache: 'no-store'
+          });
+          const body = await response.json().catch(()=>({}));
+          const safe = {
+            status: response.status,
+            ok: body?.ok === true,
+            error: typeof body?.error === 'string' ? body.error : null,
+            providerStatus: Number.isInteger(body?.providerStatus) ? body.providerStatus : null,
+            blogger: body?.blogger === true,
+            searchConsole: body?.searchConsole === true,
+            analytics: body?.analytics === true,
+            adsense: body?.adsense === true,
+            phase4Ready: body?.phase4Ready === true
+          };
+          console.log(`GOOGLE_OAUTH_SCOPE_PROBE ${JSON.stringify(safe)}`);
+          if (!direct.ok || !response.ok || body?.ok !== true || body?.blogger !== true) {
+            throw new Error(`GOOGLE_OAUTH_REFRESH_INVALID:${providerError || safe.error || response.status}`);
+          }
+          NODE

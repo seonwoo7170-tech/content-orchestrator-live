@@ -1,0 +1,228 @@
+name: Deploy Orchestrator Service Binding
+
+on:
+  push:
+    paths:
+      - '.github/deploy-orchestrator-service-binding-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify source
+        run: npm run verify
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID HUB_API_KEY ADMIN_API_KEY; do
+            test -n "${!name}" || { echo "$name is missing"; exit 1; }
+          done
+
+      - name: Resolve existing D1 database
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Existing content-orchestrator D1 database not found'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render and validate safe config
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/render-wrangler.mjs
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const text = fs.readFileSync('wrangler.jsonc','utf8');
+          const required = [
+            '"binding": "API_HUB_SERVICE"',
+            '"service": "api-hub-v2"',
+            '"BLOGGER_WRITES_ENABLED": "false"',
+            '"AUTO_PUBLISH_EXECUTION_ENABLED": "false"',
+            '"DAILY_WORK_EXECUTION_ENABLED": "false"',
+            '"JOB_RECOVERY_EXECUTION_ENABLED": "false"',
+            '"GSC_COLLECTION_ENABLED": "true"',
+            '"GSC_COLLECTION_TIME": "03:15"',
+            '"HUB_GSC_SITES_PATH": "/api/gsc/sites"',
+            '"HUB_GSC_PERFORMANCE_PATH": "/api/gsc/performance"',
+            '"DAILY_WORK_MAX_ITEMS": "1"',
+            '"JOB_RECOVERY_MAX_ITEMS": "1"',
+            '"migrations_dir": "worker/migrations"',
+            '"crons": ["*/5 * * * *"]'
+          ];
+          for (const needle of required) if (!text.includes(needle)) throw new Error(`SAFE_CONFIG_MISSING:${needle}`);
+          NODE
+
+      - name: Apply D1 migrations
+        run: npx --yes wrangler@latest d1 migrations apply content-orchestrator --remote --config wrangler.jsonc
+
+      - name: Prepare runtime secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          fs.writeFileSync('.deploy-secrets.json', JSON.stringify({HUB_API_KEY:process.env.HUB_API_KEY,ADMIN_API_KEY:process.env.ADMIN_API_KEY}));
+          fs.chmodSync('.deploy-secrets.json',0o600);
+          NODE
+
+      - name: Deploy Content Orchestrator
+        run: npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
+
+      - name: Verify Phase 4 roadmap and GSC dashboard UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const base = process.env.ORCHESTRATOR_URL;
+          const sleep = ms => new Promise(r=>setTimeout(r,ms));
+          for (let attempt=1; attempt<=15; attempt++) {
+            const stamp = `${Date.now()}_${attempt}`;
+            try {
+              const [htmlResp, stageResp, perfResp, swResp] = await Promise.all([
+                fetch(`${base}/?ui_verify=${stamp}`, {cache:'no-store'}),
+                fetch(`${base}/build-stage.js?ui_verify=${stamp}`, {cache:'no-store'}),
+                fetch(`${base}/performance.js?ui_verify=${stamp}`, {cache:'no-store'}),
+                fetch(`${base}/sw.js?ui_verify=${stamp}`, {cache:'no-store'})
+              ]);
+              const [html, stage, perf, sw] = await Promise.all([htmlResp.text(), stageResp.text(), perfResp.text(), swResp.text()]);
+              const ok = htmlResp.ok && stageResp.ok && perfResp.ok && swResp.ok
+                && html.includes('구축 단계')
+                && html.includes('gsc-performance-panel')
+                && html.includes('./performance.js')
+                && stage.includes('CURRENT_BUILD_PHASE = 4')
+                && stage.includes("설정 시간 블로그 상태 자동 진단', status: 'done'")
+                && stage.includes("블로그별 우선순위와 일일 작업량 자동 조정', status: 'done'")
+                && stage.includes("Google Search Console 검색 성과 수집', status: 'done'")
+                && stage.includes("GA4 유입 · 참여도 데이터 수집', status: 'active'")
+                && perf.includes('/api/performance/gsc/today')
+                && perf.includes('28일 클릭')
+                && sw.includes('content-orchestrator-v5')
+                && sw.includes('./performance.js');
+              if (ok) {
+                console.log(`PHASE4_GSC_DASHBOARD_READBACK_OK attempt=${attempt}`);
+                process.exit(0);
+              }
+            } catch {}
+            await sleep(1000);
+          }
+          throw new Error('PHASE4_GSC_DASHBOARD_READBACK_FAILED');
+          NODE
+
+      - name: Verify Phase 4-1 GSC automatic collection and D1 readback with write gates disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const base = process.env.ORCHESTRATOR_URL;
+          const sleep = ms => new Promise(r=>setTimeout(r,ms));
+          async function call(path, method='GET', body, allow207=false) {
+            const init={method,headers:{'x-admin-api-key':process.env.ADMIN_API_KEY}};
+            if (body !== undefined) { init.headers['content-type']='application/json'; init.body=JSON.stringify(body); }
+            const r=await fetch(`${base}${path}`,init);
+            const data=await r.json().catch(()=>({}));
+            console.log(`${path}: HTTP ${r.status}, error=${String(data?.error||'none')}`);
+            if (!r.ok && !(allow207 && r.status===207)) throw new Error(`${path}:${r.status}:${data?.error||'FAILED'}`);
+            return {status:r.status,data};
+          }
+
+          let health;
+          for (let i=1;i<=12;i++) {
+            const r=await fetch(`${base}/health?phase4=${Date.now()}_${i}`,{cache:'no-store'});
+            health=await r.json().catch(()=>({}));
+            if (r.ok && health.bloggerWritesEnabled===false && health.phase2Automation?.autoPublishExecutionEnabled===false) break;
+            if (i===12) throw new Error('ORCHESTRATOR_HEALTH_NOT_SAFE');
+            await sleep(1000);
+          }
+
+          const blogs=(await call('/api/blogs')).data;
+          if (!Array.isArray(blogs.blogs) || blogs.blogs.length!==7) throw new Error(`BLOG_COUNT_INVALID:${blogs.blogs?.length||0}`);
+
+          const before=(await call('/api/performance/gsc/today')).data;
+          if (before.collectionEnabled!==true) throw new Error('GSC_AUTOMATIC_COLLECTION_MUST_BE_ENABLED');
+          if (before.collectionTime!=='03:15') throw new Error(`GSC_COLLECTION_TIME_INVALID:${before.collectionTime}`);
+
+          const collected=(await call('/api/performance/gsc/collect','POST',{},true)).data;
+          if (Number(collected.blogCount)!==7) throw new Error(`GSC_COLLECT_BLOG_COUNT_INVALID:${collected.blogCount}`);
+          if (Number(collected.mappedCount)!==7) throw new Error(`GSC_MAPPED_COUNT_INVALID:${collected.mappedCount}`);
+          if (Number(collected.failedCount)!==0) throw new Error(`GSC_FAILED_COUNT_INVALID:${collected.failedCount}`);
+          if (Number(collected.partialCount)!==0) throw new Error(`GSC_PARTIAL_COUNT_INVALID:${collected.partialCount}`);
+          if (!Array.isArray(collected.items) || collected.items.length!==7) throw new Error('GSC_ITEMS_INVALID');
+          for (const item of collected.items) {
+            if (!item.mapped || item.status!=='ok' || !item.siteUrl) throw new Error(`GSC_ITEM_NOT_READY:${item.blogId}:${item.status}`);
+            if (!Array.isArray(item.windows) || item.windows.length!==2) throw new Error(`GSC_WINDOWS_INVALID:${item.blogId}`);
+            for (const window of item.windows) {
+              if (![7,28].includes(Number(window.windowDays)) || window.status!=='ok') throw new Error(`GSC_WINDOW_NOT_READY:${item.blogId}:${window.windowDays}:${window.status}`);
+            }
+          }
+
+          const after=(await call('/api/performance/gsc/today')).data;
+          if (after.collectionEnabled!==true) throw new Error('GSC_COLLECTION_DISABLED_AFTER_COLLECT');
+          if (!Array.isArray(after.properties) || after.properties.length!==7) throw new Error(`GSC_PROPERTY_READBACK_INVALID:${after.properties?.length||0}`);
+          if (!Array.isArray(after.snapshots) || after.snapshots.length!==14) throw new Error(`GSC_SNAPSHOT_READBACK_INVALID:${after.snapshots?.length||0}`);
+          if (after.snapshots.some(s=>s.status!=='ok')) throw new Error('GSC_SNAPSHOT_STATUS_NOT_OK');
+          const distinctBlogs=new Set(after.snapshots.map(s=>String(s.blog_id)));
+          if (distinctBlogs.size!==7) throw new Error(`GSC_SNAPSHOT_BLOGS_INVALID:${distinctBlogs.size}`);
+          const windows=new Set(after.snapshots.map(s=>Number(s.window_days)));
+          if (!windows.has(7)||!windows.has(28)) throw new Error('GSC_SNAPSHOT_WINDOWS_MISSING');
+
+          const sampleBlog=String(blogs.blogs[0].blogId);
+          const top=(await call(`/api/performance/gsc/blogs/${encodeURIComponent(sampleBlog)}?limit=5`)).data;
+          if (!Array.isArray(top.rows) || top.rows.length>5) throw new Error('GSC_TOP_ROWS_INVALID');
+
+          const recovery=(await call('/api/operations/recovery')).data;
+          if (recovery.executionEnabled!==false || recovery.dailyWorkExecutionEnabled!==false) throw new Error('PHASE3_EXECUTION_GATES_CHANGED');
+
+          const healthAfterResp=await fetch(`${base}/health?phase4_after=${Date.now()}`,{cache:'no-store'});
+          const healthAfter=await healthAfterResp.json().catch(()=>({}));
+          if (!healthAfterResp.ok || healthAfter.bloggerWritesEnabled!==false || healthAfter.phase2Automation?.autoPublishExecutionEnabled!==false) {
+            throw new Error('BLOGGER_WRITE_OR_AUTOPUBLISH_GATE_CHANGED');
+          }
+          console.log(`PHASE4_1_GSC_READBACK_OK blogs=7 mapped=7 snapshots=14 windows=7,28 autoCollection=enabled writes=disabled autoPublish=disabled dailyWork=disabled recovery=disabled`);
+          NODE
+
+      - name: Verify Cloudflare AI diagnostic remains safe
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const r = await fetch(`${process.env.ORCHESTRATOR_URL}/api/diagnostics/cloudflare-ai`, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-admin-api-key':process.env.ADMIN_API_KEY},
+            body:'{}'
+          });
+          const data = await r.json().catch(()=>({}));
+          const accountLimited = r.status === 429 && data?.code === 'CLOUDFLARE_AI_ACCOUNT_LIMITED';
+          console.log(`/api/diagnostics/cloudflare-ai: HTTP ${r.status}, ok=${data?.ok===true?'yes':'no'}, code=${String(data?.code||'none')}`);
+          if (!r.ok && !accountLimited) throw new Error(`/api/diagnostics/cloudflare-ai:${r.status}:${data?.code||'FAILED'}`);
+          if (r.ok && data.ok !== true) throw new Error('AI_DIAGNOSTIC_INVALID_OK_RESPONSE');
+          NODE
+
+      - name: Cleanup
+        if: always()
+        run: rm -f wrangler.jsonc .deploy-secrets.json

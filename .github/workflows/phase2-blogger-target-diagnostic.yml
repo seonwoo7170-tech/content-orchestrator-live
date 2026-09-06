@@ -1,0 +1,44 @@
+name: Phase 2 Blogger Target Diagnostic
+
+on:
+  push:
+    branches: [feature/phase2-ops-images]
+    paths:
+      - '.github/phase2-blogger-target-diagnostic-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: production
+    env:
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: List connected Blogger identities read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then HUB_API_KEY="$API_HUB_V2_KEY"; else HUB_API_KEY="$EXISTING_ORCHESTRATOR_KEY"; fi
+          test -n "$HUB_API_KEY" || { echo 'Hub key missing'; exit 1; }
+          HUB_API_KEY="$HUB_API_KEY" node --input-type=module - <<'NODE'
+          const healthResponse = await fetch(`${process.env.API_HUB_V2_BASE_URL}/health`, { cache: 'no-store' });
+          const health = await healthResponse.json().catch(()=>({}));
+          if (!healthResponse.ok || health.bloggerWritesEnabled !== false || health.bloggerWriteMode !== 'disabled') throw new Error('READ_ONLY_SAFE_STATE_REQUIRED');
+          const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/blogger/blogs`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-hub-api-key': process.env.HUB_API_KEY },
+            body: JSON.stringify({ action: 'list' })
+          });
+          const data = await r.json().catch(()=>({}));
+          if (!r.ok || !Array.isArray(data.blogs)) throw new Error(`BLOG_LIST_FAILED:${r.status}`);
+          console.log(`CONNECTED_BLOGS=${data.blogs.length}`);
+          for (const blog of data.blogs) {
+            console.log(JSON.stringify({ id: String(blog.id || blog.blogId || ''), name: String(blog.name || blog.blogName || ''), url: String(blog.url || '') }));
+          }
+          NODE

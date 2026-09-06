@@ -1,0 +1,46 @@
+name: production-retry-selfheal-probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/production-retry-selfheal-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Read retry progression
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) return {http:r.status,error:j?.error||null};
+            return j;
+          }
+          const ids=[30,36,41,45,21,27];
+          const states=[];
+          for(const id of ids){
+            const data=await get(`/api/jobs/${id}`);
+            const j=data.job||{};
+            states.push({id,status:j.status||null,recoveryState:j.recovery_state||'none',retryCount:Number(j.retry_count||0),nextRetryAt:j.next_retry_at||null,lastErrorCode:j.last_error_code||null,jobError:j.error||null,holdReason:j.hold_reason||null,updatedAt:j.updated_at||null,http:data.http||200});
+          }
+          const recovery=await get('/api/operations/recovery');
+          console.log('RETRY_PROGRESS',JSON.stringify(states));
+          console.log('RETRY_RECOVERY',JSON.stringify({dueRetries:Array.isArray(recovery.dueRetries)?recovery.dueRetries.map(x=>({id:Number(x.id),mode:x.mode,blogId:x.blogId,retryCount:Number(x.retryCount||0),lastErrorCode:x.lastErrorCode||null})):[],summary:recovery.summary||null}));
+          NODE
+
+# probe: failure-codes-2026-09-03-0616

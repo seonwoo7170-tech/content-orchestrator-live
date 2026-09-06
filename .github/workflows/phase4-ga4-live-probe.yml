@@ -1,0 +1,106 @@
+name: Phase 4 GA4 Live Probe
+
+on:
+  push:
+    paths:
+      - '.github/phase4-ga4-live-probe-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase4-ga4-live-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Validate admin credential presence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ADMIN_API_KEY" || { echo 'ADMIN_API_KEY is missing'; exit 1; }
+
+      - name: Verify Blogger-only automatic GA4 collection
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const base = process.env.ORCHESTRATOR_URL;
+          const headers = {'x-admin-api-key': process.env.ADMIN_API_KEY};
+          async function get(path) {
+            const r = await fetch(`${base}${path}`, {headers, cache:'no-store'});
+            const data = await r.json().catch(()=>({}));
+            if (!r.ok) throw new Error(`${path}:HTTP_${r.status}:${String(data?.error||'FAILED').split(':')[0]}`);
+            return data;
+          }
+          async function post(path) {
+            const r = await fetch(`${base}${path}`, {method:'POST', headers:{...headers,'content-type':'application/json'}, body:'{}'});
+            const data = await r.json().catch(()=>({}));
+            if (!r.ok && r.status !== 207) throw new Error(`${path}:HTTP_${r.status}:${String(data?.error||'FAILED').split(':')[0]}`);
+            return {status:r.status,data};
+          }
+
+          const health = await get('/health');
+          if (health.bloggerWritesEnabled !== false) throw new Error('BLOGGER_WRITES_NOT_DISABLED');
+          if (health.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('AUTO_PUBLISH_NOT_DISABLED');
+
+          const blogs = await get('/api/blogs');
+          if (!Array.isArray(blogs.blogs) || blogs.blogs.length !== 7) throw new Error(`BLOG_COUNT_INVALID:${blogs.blogs?.length||0}`);
+          if (blogs.blogs.some(blog => /tistory\.com/i.test(String(blog.url||'')))) throw new Error('TISTORY_MUST_NOT_BE_MANAGED');
+
+          const before = await get('/api/performance/ga4/today');
+          if (before.collectionEnabled !== true) throw new Error('GA4_AUTOMATIC_COLLECTION_MUST_BE_ENABLED');
+          if (before.collectionTime !== '03:25') throw new Error(`GA4_COLLECTION_TIME_INVALID:${before.collectionTime}`);
+
+          const probe = await post('/api/performance/ga4/collect');
+          const data = probe.data || {};
+          const counts = {
+            propertyCount:Number(data.propertyCount||0),
+            ignoredPropertyCount:Number(data.ignoredPropertyCount||0),
+            webStreamCount:Number(data.webStreamCount||0),
+            blogCount:Number(data.blogCount||0),
+            mappedCount:Number(data.mappedCount||0),
+            directMappedCount:Number(data.directMappedCount||0),
+            hostnameMappedCount:Number(data.hostnameMappedCount||0),
+            okCount:Number(data.okCount||0),
+            partialCount:Number(data.partialCount||0),
+            failedCount:Number(data.failedCount||0),
+            unmappedCount:Number(data.unmappedCount||0)
+          };
+          console.log(`PHASE4_2_GA4_COUNTS properties=${counts.propertyCount} ignoredProperties=${counts.ignoredPropertyCount} webStreams=${counts.webStreamCount} blogs=${counts.blogCount} mapped=${counts.mappedCount} direct=${counts.directMappedCount} hostname=${counts.hostnameMappedCount} ok=${counts.okCount} partial=${counts.partialCount} failed=${counts.failedCount} unmapped=${counts.unmappedCount}`);
+          if (counts.blogCount !== 7) throw new Error(`GA4_BLOG_COUNT_INVALID:${counts.blogCount}`);
+          if (counts.mappedCount + counts.unmappedCount !== 7) throw new Error('GA4_COVERAGE_TOTAL_INVALID');
+          if (counts.mappedCount < 3 || counts.directMappedCount < 2 || counts.hostnameMappedCount < 1) throw new Error('GA4_SAFE_MAPPING_REGRESSED');
+          if (counts.okCount !== counts.mappedCount || counts.partialCount !== 0 || counts.failedCount !== 0) throw new Error('GA4_COLLECTION_STATUS_INVALID');
+          if (!Array.isArray(data.items) || data.items.length !== 7) throw new Error('GA4_ITEMS_INVALID');
+          for (const item of data.items) {
+            if (item.status === 'unmapped') continue;
+            if (!item.mapped || item.status !== 'ok') throw new Error(`GA4_ITEM_NOT_SAFE:${item.blogId}:${item.status}`);
+            if (!Array.isArray(item.windows) || item.windows.length !== 2 || item.windows.some(w => ![7,28].includes(Number(w.windowDays)) || w.status !== 'ok')) throw new Error(`GA4_WINDOWS_INVALID:${item.blogId}`);
+          }
+
+          const after = await get('/api/performance/ga4/today');
+          if (after.collectionEnabled !== true) throw new Error('GA4_COLLECTION_DISABLED_AFTER_COLLECT');
+          if (!Array.isArray(after.properties) || after.properties.length !== 7) throw new Error(`GA4_PROPERTY_ROWS_INVALID:${after.properties?.length||0}`);
+          if (!Array.isArray(after.snapshots) || after.snapshots.length !== 14) throw new Error(`GA4_SNAPSHOT_ROWS_INVALID:${after.snapshots?.length||0}`);
+          const distinctBlogs = new Set(after.snapshots.map(row=>String(row.blog_id)));
+          if (distinctBlogs.size !== 7) throw new Error(`GA4_SNAPSHOT_BLOG_COUNT_INVALID:${distinctBlogs.size}`);
+          const mappedProperties = after.properties.filter(row=>row.match_type && row.match_type !== 'unmapped');
+          const unmappedProperties = after.properties.filter(row=>!row.match_type || row.match_type === 'unmapped');
+          if (mappedProperties.length < 3 || mappedProperties.length + unmappedProperties.length !== 7) throw new Error('GA4_MAPPING_READBACK_INVALID');
+          if (after.snapshots.some(row => !['ok','unmapped'].includes(String(row.status)))) throw new Error('GA4_SNAPSHOT_STATUS_INVALID');
+
+          const recovery = await get('/api/operations/recovery');
+          if (recovery.executionEnabled !== false || recovery.dailyWorkExecutionEnabled !== false) throw new Error('CONTENT_EXECUTION_GATES_CHANGED');
+          const healthAfter = await get('/health');
+          if (healthAfter.bloggerWritesEnabled !== false || healthAfter.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('WRITE_GATES_CHANGED_AFTER_GA4_PROBE');
+
+          console.log(`PHASE4_2_GA4_AUTOMATION_READBACK_OK blogs=7 mapped=${mappedProperties.length} unmapped=${unmappedProperties.length} snapshots=14 autoCollection=enabled tistory=ignored writes=disabled autoPublish=disabled`);
+          NODE

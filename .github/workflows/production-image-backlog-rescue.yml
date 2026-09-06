@@ -1,0 +1,77 @@
+name: production-image-backlog-rescue
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/production-image-backlog-rescue.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Drain image backlog sequentially with transient retry
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const adminHeaders={'x-admin-api-key':admin};
+          const writeHeaders={...adminHeaders,'content-type':'application/json'};
+          const sleep=(ms)=>new Promise(resolve=>setTimeout(resolve,ms));
+          async function getDiag(){
+            const r=await fetch(`${base}/api/operations/images/diagnostics`,{headers:adminHeaders,cache:'no-store',signal:AbortSignal.timeout(30000)});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`IMAGE_DIAGNOSTICS_HTTP_${r.status}`);
+            return j;
+          }
+          let diag=await getDiag();
+          console.log('BACKLOG_BEFORE',JSON.stringify({readyJobs:diag.totals?.readyJobs||0,readyMissingImages:diag.totals?.readyMissingImages||0,statusCounts:diag.statusCounts||{},providerMode:diag.configuredProviderMode||null,kieFallbackRequested:diag.kieFallbackRequested===true}));
+          let transientFailures=0;
+          let successfulCalls=0;
+          for(let round=1;round<=24;round+=1){
+            if(Number(diag.totals?.readyMissingImages||0)===0) break;
+            const started=Date.now();
+            let response;
+            let result={};
+            try {
+              response=await fetch(`${base}/api/operations/images/resume?maxJobs=1`,{
+                method:'POST',headers:writeHeaders,body:'{}',cache:'no-store',signal:AbortSignal.timeout(90000)
+              });
+              result=await response.json().catch(()=>({}));
+            } catch (error) {
+              transientFailures += 1;
+              console.log('IMAGE_BACKLOG_TRANSIENT',JSON.stringify({round,type:'network',message:String(error?.message||error).slice(0,120),transientFailures}));
+              if(transientFailures>=4) break;
+              await sleep(3000);
+              continue;
+            }
+            console.log('IMAGE_BACKLOG_RESUME',JSON.stringify({round,elapsedMs:Date.now()-started,httpStatus:response.status,error:result.error||null,attempted:Number(result.attempted||0),completed:Number(result.completed||0),failed:Number(result.failed||0),items:(result.items||[]).map(x=>({jobId:x.jobId,complete:x.complete,generated:x.generated,failed:x.failed,currentCount:x.currentCount||x.current,unresolved:x.unresolved,errorCode:x.errorCode||null}))}));
+            if(response.status>=500){
+              transientFailures += 1;
+              if(transientFailures>=4) break;
+              await sleep(3000);
+              diag=await getDiag();
+              continue;
+            }
+            transientFailures=0;
+            successfulCalls += 1;
+            diag=await getDiag();
+            console.log('BACKLOG_PROGRESS',JSON.stringify({round,successfulCalls,readyJobs:Number(diag.totals?.readyJobs||0),readyMissingImages:Number(diag.totals?.readyMissingImages||0)}));
+            if(Number(result.attempted||0)===0) break;
+          }
+          diag=await getDiag();
+          console.log('BACKLOG_AFTER',JSON.stringify({successfulCalls,transientFailures,readyJobs:diag.totals?.readyJobs||0,readyMissingImages:diag.totals?.readyMissingImages||0,statusCounts:diag.statusCounts||{},activeFailures:diag.totals?.activeFailures||0,missing:(diag.missing||[]).map(x=>({jobId:x.jobId,blogId:x.blogId,mode:x.mode,current:x.current,target:x.target,missing:x.missing}))}));
+          if(Number(diag.totals?.readyMissingImages||0)>0) process.exitCode=2;
+          NODE
+
+# probe: sequential-drain-with-503-retry-2026-09-04-0727

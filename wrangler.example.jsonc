@@ -1,0 +1,96 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "content-orchestrator",
+  "main": "worker/mcp-entry.js",
+  "compatibility_date": "2026-08-28",
+  "workers_dev": true,
+  "triggers": {
+    "crons": ["*/3 * * * *", "*/5 * * * *"]
+  },
+  "secrets": {
+    "required": ["HUB_API_KEY", "ADMIN_API_KEY"]
+  },
+  "services": [
+    {
+      "binding": "API_HUB_SERVICE",
+      "service": "api-hub-v2"
+    }
+  ],
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/health", "/mcp", "/actions/*", "/media/*", "/go/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "ORCHESTRATOR_DB",
+      "database_name": "content-orchestrator",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "worker/migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGE_BUCKET",
+      "bucket_name": "content-orchestrator-images"
+    }
+  ],
+  "vars": {
+    "API_HUB_BASE_URL": "https://api-hub-v2.smileseon.workers.dev",
+    "HUB_REQUEST_TIMEOUT_MS": "180000",
+    "AI_STAGE_PACING_MS": "4000",
+    "IMAGE_STAGE_PACING_MS": "0",
+    "IMAGE_PROVIDER_MODE": "auto",
+    "LOCAL_IMAGE_FALLBACK_ENABLED": "false",
+    "BLOGGER_WRITES_ENABLED": "true",
+    "AUTO_PUBLISH_EXECUTION_ENABLED": "true",
+    "DAILY_WORK_EXECUTION_ENABLED": "true",
+    "JOB_RECOVERY_EXECUTION_ENABLED": "true",
+    "GSC_COLLECTION_ENABLED": "true",
+    "GSC_COLLECTION_TIME": "03:15",
+    "GA4_COLLECTION_ENABLED": "true",
+    "GA4_COLLECTION_TIME": "03:25",
+    "ADSENSE_COLLECTION_ENABLED": "true",
+    "ADSENSE_COLLECTION_TIME": "03:35",
+    "DAILY_WORK_MAX_ITEMS": "1",
+    "JOB_RECOVERY_MAX_ITEMS": "1",
+    "SERIAL_AI_COOLDOWN_MS": "30000",
+    "SERIAL_AI_CHAIN_MAX_ITEMS": "4",
+    "SERIAL_AI_CHAIN_START_CUTOFF_MS": "420000",
+    "SERIAL_IMAGE_COOLDOWN_MS": "0",
+    "SERIAL_IMAGE_POLL_INTERVAL_MS": "5000",
+    "SERIAL_ARTICLE_IMAGE_COOLDOWN_MS": "10000",
+    "SERIAL_IMAGE_JOB_BUDGET_MS": "120000",
+    "SERIAL_IMAGE_CHAIN_BUDGET_MS": "130000",
+    "SERIAL_IMAGE_CHAIN_MAX_ITEMS": "8",
+    "SERIAL_IMAGE_CHAIN_START_CUTOFF_MS": "130000",
+    "SERIAL_IMAGE_LEASE_TTL_SECONDS": "210",
+    "KIE_IMAGE_QA_RETRY_MAX": "3",
+    "IMAGE_COMPLETION_MAX_ITEMS": "1",
+    "KIE_IMAGE_FALLBACK_ENABLED": "true",
+    "OPERATIONS_TIMEZONE": "Asia/Seoul",
+    "DAILY_NEW_PER_BLOG": "2",
+    "DAILY_REPAIR_PER_BLOG": "2",
+    "TREND_KEYWORDS_ENABLED": "true",
+    "TREND_REFRESH_TIMES": "08:35,13:35",
+    "TREND_MIN_RELEVANCE": "0.28",
+    "EXTERNAL_DISTRIBUTION_ENABLED": "false",
+    "PINTEREST_REQUEST_TIMEOUT_MS": "20000",
+    "EXTERNAL_TRACKING_BASE_URL": "https://content-orchestrator.smileseon.workers.dev",
+    "IMAGE_PUBLIC_BASE_URL": "https://content-orchestrator.smileseon.workers.dev",
+    "HUB_BLOGGER_BLOGS_PATH": "/api/blogger/blogs",
+    "HUB_WRITER_PATH": "/api/hub/ai/writer",
+    "HUB_CRITIC_PATH": "/api/hub/ai/critic",
+    "HUB_REPAIR_PATH": "/api/hub/ai/repair",
+    "HUB_IMAGE_GENERATE_PATH": "/api/hub/image/generate",
+    "HUB_CLOUDFLARE_DIAGNOSTIC_PATH": "/api/hub/ai/diagnostics/cloudflare",
+    "HUB_BLOGGER_GET_PATH": "/api/blogger/post/get",
+    "HUB_BLOGGER_POST_PATH": "/api/blogger/post",
+    "HUB_GSC_SITES_PATH": "/api/gsc/sites",
+    "HUB_GSC_PERFORMANCE_PATH": "/api/gsc/performance",
+    "HUB_GA4_PROPERTIES_PATH": "/api/ga4/properties",
+    "HUB_GA4_REPORT_PATH": "/api/ga4/report",
+    "HUB_ADSENSE_ACCOUNTS_PATH": "/api/adsense/accounts",
+    "HUB_ADSENSE_REPORT_PATH": "/api/adsense/report"
+  }
+}

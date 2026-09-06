@@ -1,0 +1,261 @@
+name: Phase 1 Private Draft Verification
+
+on:
+  push:
+    paths:
+      - '.github/phase1-private-draft-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase1-private-draft-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+      TARGET_BLOG_ID: '7741529904469657049'
+      TARGET_BLOG_NAME: '5Minutes Info(5분 정보)'
+      TEST_TOPIC: '스마트폰 저장공간 부족 경고가 뜰 때 안전하게 정리하는 순서'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Verify source
+        run: |
+          npm run verify
+          (cd api-hub-v2 && npm run verify)
+
+      - name: Validate secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID HUB_API_KEY ADMIN_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN; do
+            test -n "${!name}" || { echo "$name is missing"; exit 1; }
+          done
+
+      - name: Preflight both write gates are disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function read(url) {
+            const r = await fetch(`${url}/health`, { cache: 'no-store' });
+            return r.ok ? r.json() : {};
+          }
+          for (let i = 1; i <= 20; i++) {
+            const [hub, orch] = await Promise.all([
+              read(process.env.API_HUB_V2_BASE_URL),
+              read(process.env.ORCHESTRATOR_BASE_URL)
+            ]);
+            const safe = hub.bloggerWritesEnabled === false && orch.bloggerWritesEnabled === false && hub.bloggerWriteMode === 'disabled';
+            console.log(`Preflight gates attempt ${i}: apiHub=${hub.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, orchestrator=${orch.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, hubMode=${hub.bloggerWriteMode || 'unknown'}`);
+            if (safe) process.exit(0);
+            await sleep(1500);
+          }
+          throw new Error('PREFLIGHT_WRITE_GATES_NOT_DISABLED');
+          NODE
+
+      - name: Resolve existing D1 database
+        shell: bash
+        run: |
+          set -euo pipefail
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Existing content-orchestrator D1 database not found'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render temporary guarded write configs
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/render-wrangler.mjs
+          GOOGLE_OAUTH_SETUP_ENABLED=false node api-hub-v2/scripts/render-wrangler.mjs
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const target = process.env.TARGET_BLOG_ID;
+          let hub = fs.readFileSync('api-hub-v2/wrangler.jsonc','utf8');
+          hub = hub.replace('"BLOGGER_WRITES_ENABLED": "false"','"BLOGGER_WRITES_ENABLED": "true"');
+          hub = hub.replace('"BLOGGER_WRITE_MODE": "disabled"','"BLOGGER_WRITE_MODE": "phase1_single_draft"');
+          hub = hub.replace('"PHASE1_DRAFT_BLOG_ID": ""', `"PHASE1_DRAFT_BLOG_ID": "${target}"`);
+          fs.writeFileSync('api-hub-v2/wrangler.phase1.jsonc', hub);
+
+          let orchestrator = fs.readFileSync('wrangler.jsonc','utf8');
+          orchestrator = orchestrator.replace('"BLOGGER_WRITES_ENABLED": "false"','"BLOGGER_WRITES_ENABLED": "true"');
+          fs.writeFileSync('wrangler.phase1.jsonc', orchestrator);
+          NODE
+
+      - name: Prepare secret bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('node:fs');
+          fs.writeFileSync('api-hub-v2/.phase1-secrets.json', JSON.stringify({
+            ORCHESTRATOR_API_KEY: process.env.HUB_API_KEY,
+            GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+            GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN
+          }));
+          fs.writeFileSync('.phase1-secrets.json', JSON.stringify({
+            HUB_API_KEY: process.env.HUB_API_KEY,
+            ADMIN_API_KEY: process.env.ADMIN_API_KEY
+          }));
+          fs.chmodSync('api-hub-v2/.phase1-secrets.json',0o600);
+          fs.chmodSync('.phase1-secrets.json',0o600);
+          NODE
+
+      - name: Temporarily enable guarded API Hub draft write
+        run: npx --yes wrangler@latest deploy --config wrangler.phase1.jsonc --secrets-file .phase1-secrets.json
+        working-directory: api-hub-v2
+
+      - name: Temporarily enable Orchestrator write gate
+        run: npx --yes wrangler@latest deploy --config wrangler.phase1.jsonc --secrets-file .phase1-secrets.json
+
+      - name: Wait for guarded write gates to propagate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function read(url) {
+            const r = await fetch(`${url}/health`, { cache: 'no-store' });
+            return r.ok ? r.json() : {};
+          }
+          for (let i = 1; i <= 20; i++) {
+            const [hub, orch] = await Promise.all([
+              read(process.env.API_HUB_V2_BASE_URL),
+              read(process.env.ORCHESTRATOR_BASE_URL)
+            ]);
+            const ready = hub.bloggerWritesEnabled === true && hub.bloggerWriteMode === 'phase1_single_draft' && orch.bloggerWritesEnabled === true && orch.apiHubConfigured === true;
+            console.log(`Guarded gates attempt ${i}: apiHub=${hub.bloggerWritesEnabled === true ? 'enabled' : 'disabled'}, orchestrator=${orch.bloggerWritesEnabled === true ? 'enabled' : 'disabled'}, hubMode=${hub.bloggerWriteMode || 'unknown'}, hubConfigured=${orch.apiHubConfigured === true ? 'yes' : 'no'}`);
+            if (ready) process.exit(0);
+            await sleep(1500);
+          }
+          throw new Error('GUARDED_WRITE_GATES_DID_NOT_PROPAGATE');
+          NODE
+
+      - name: Execute full Phase 1 pipeline and create exactly one private draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const orch = process.env.ORCHESTRATOR_BASE_URL;
+          const hub = process.env.API_HUB_V2_BASE_URL;
+          const admin = process.env.ADMIN_API_KEY;
+          const hubKey = process.env.HUB_API_KEY;
+          const targetId = process.env.TARGET_BLOG_ID;
+          const targetName = process.env.TARGET_BLOG_NAME;
+          const topic = process.env.TEST_TOPIC;
+
+          async function jsonFetch(url, init = {}) {
+            const r = await fetch(url, init);
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(`${new URL(url).pathname}:${r.status}:${data?.error || 'REQUEST_FAILED'}`);
+            return data;
+          }
+
+          const blogList = await jsonFetch(`${orch}/api/blogs`, { headers: {'x-admin-api-key': admin} });
+          const matches = (blogList.blogs || []).filter(b => String(b.id || b.blogId) === targetId && String(b.name || b.blogName) === targetName);
+          if (matches.length !== 1) throw new Error(`TARGET_BLOG_NOT_EXACT:${matches.length}`);
+          console.log(`Target verified: ${targetName}`);
+
+          const createdJob = await jsonFetch(`${orch}/api/jobs/new`, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-admin-api-key':admin},
+            body:JSON.stringify({blogId:targetId,topic,language:'ko'})
+          });
+          const jobId = Number(createdJob.jobId);
+          if (!jobId) throw new Error('JOB_ID_MISSING');
+          console.log(`Phase 1 job created: ${jobId}`);
+
+          const run = await jsonFetch(`${orch}/api/jobs/${jobId}/run`, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-admin-api-key':admin},
+            body:'{}'
+          });
+          const result = run.result || {};
+          console.log(`Pipeline result: state=${run.state}, status=${result.status}, initial=${result.initialCritic?.status || 'unknown'}:${result.initialCritic?.score ?? 'n/a'}, final=${result.finalCritic?.status || 'unknown'}:${result.finalCritic?.score ?? 'n/a'}, repairApplied=${result.repairApplied === true ? 'yes' : 'no'}`);
+          if (run.state !== 'ready' || result.status !== 'READY' || result.finalCritic?.status !== 'PASS') throw new Error('PIPELINE_NOT_READY_FOR_DRAFT');
+          if (!result.article?.title || !result.article?.html) throw new Error('FINAL_ARTICLE_MISSING');
+
+          const write = await jsonFetch(`${orch}/api/blogger/publish`, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-admin-api-key':admin},
+            body:JSON.stringify({phase1Test:true,operation:'create',publishMode:'draft',blogId:targetId,article:result.article})
+          });
+          const postId = String(write.bloggerPostId || '');
+          if (!postId) throw new Error('BLOGGER_POST_ID_MISSING');
+          if (String(write.status || '').toUpperCase() !== 'DRAFT') throw new Error(`BLOGGER_NOT_DRAFT:${write.status || 'unknown'}`);
+
+          const verify = await jsonFetch(`${hub}/api/blogger/post/get`, {
+            method:'POST',
+            headers:{'content-type':'application/json','x-hub-api-key':hubKey},
+            body:JSON.stringify({blogId:targetId,bloggerPostId:postId,language:'ko'})
+          });
+          if (String(verify.identity?.bloggerPostId || '') !== postId) throw new Error('VERIFY_POST_ID_MISMATCH');
+          if (String(verify.identity?.status || '').toUpperCase() !== 'DRAFT') throw new Error(`VERIFY_NOT_DRAFT:${verify.identity?.status || 'unknown'}`);
+          if (String(verify.article?.title || '') !== String(result.article.title)) throw new Error('VERIFY_TITLE_MISMATCH');
+
+          console.log(`PHASE1_PRIVATE_DRAFT_OK postId=${postId} status=${verify.identity.status} title=${JSON.stringify(verify.article.title)}`);
+          NODE
+
+      - name: Restore API Hub v2 writes disabled
+        if: always()
+        shell: bash
+        working-directory: api-hub-v2
+        run: |
+          set -euo pipefail
+          GOOGLE_OAUTH_SETUP_ENABLED=false node scripts/render-wrangler.mjs
+          npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .phase1-secrets.json
+
+      - name: Restore Content Orchestrator writes disabled on API Hub v2
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/render-wrangler.mjs
+          npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .phase1-secrets.json
+
+      - name: Verify both write gates are disabled after propagation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          async function read(url) {
+            const r = await fetch(`${url}/health`, { cache: 'no-store' });
+            return r.ok ? r.json() : {};
+          }
+          for (let i = 1; i <= 20; i++) {
+            const [hub, orch] = await Promise.all([
+              read(process.env.API_HUB_V2_BASE_URL),
+              read(process.env.ORCHESTRATOR_BASE_URL)
+            ]);
+            const safe = hub.bloggerWritesEnabled === false && orch.bloggerWritesEnabled === false && hub.bloggerWriteMode === 'disabled';
+            console.log(`Final gates attempt ${i}: apiHub=${hub.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, orchestrator=${orch.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, hubMode=${hub.bloggerWriteMode || 'unknown'}`);
+            if (safe) process.exit(0);
+            await sleep(1500);
+          }
+          throw new Error('WRITE_GATE_RESTORE_FAILED');
+          NODE
+
+      - name: Cleanup generated files
+        if: always()
+        run: rm -f wrangler.jsonc wrangler.phase1.jsonc .phase1-secrets.json api-hub-v2/wrangler.jsonc api-hub-v2/wrangler.phase1.jsonc api-hub-v2/.phase1-secrets.json

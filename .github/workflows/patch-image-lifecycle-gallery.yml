@@ -1,0 +1,198 @@
+name: patch-image-lifecycle-gallery
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-image-lifecycle-gallery.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/image-lifecycle-gallery-20260907
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Patch image lifecycle, QA, scheduler and gallery
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def rep(path, old, new, n=1):
+              p=Path(path); s=p.read_text()
+              if s.count(old) < n:
+                  raise SystemExit(f'needle missing: {path}: {old[:100]!r}')
+              p.write_text(s.replace(old,new,n))
+
+          # 1) Keep KIE's completed source URL for rejected-preview evidence.
+          rep('api-hub-v2/src/lib/kie-image.js',
+              "    state: 'success',\n    pending: false,\n    complete: true,\n    ...downloaded",
+              "    state: 'success',\n    pending: false,\n    complete: true,\n    sourceUrl: resultUrl,\n    ...downloaded")
+
+          # 2) QA is a text/logo compliance gate, not a general aesthetic veto.
+          rep('api-hub-v2/src/lib/image-routes.js',
+              "      'Return only the requested JSON structure.'",
+              "      'Only list violations related to readable or clearly intended writing, logos, watermarks, labels, captions, signs, packaging marks, interface writing, or title overlays. Do not use this field for aesthetic or composition preferences.',\n      'Return only the requested JSON structure.'")
+          rep('api-hub-v2/src/lib/image-routes.js',
+              "  return {\n    pass: parsed?.pass === true && detectedText.length === 0 && violations.length === 0,\n    detectedText,\n    violations,\n    model: result.model\n  };",
+              "  const hardViolations = violations.filter((item) => /(readable|text|letter|number|logo|watermark|caption|label|sign|packaging|interface|\\bui\\b|title|writing|문자|글자|숫자|로고|워터마크|라벨|표지|간판)/i.test(item));\n  return {\n    pass: detectedText.length === 0 && hardViolations.length === 0,\n    detectedText,\n    violations: hardViolations,\n    model: result.model\n  };")
+          rep('api-hub-v2/src/lib/image-routes.js',
+              "  let lastQa = null;\n  let providerAttempts = 0;",
+              "  let lastQa = null;\n  let lastGenerated = null;\n  let providerAttempts = 0;")
+          rep('api-hub-v2/src/lib/image-routes.js',
+              "    }, aiBinding, fetchImpl);\n    providerAttempts = attempt;",
+              "    }, aiBinding, fetchImpl);\n    lastGenerated = generated;\n    providerAttempts = attempt;")
+          rep('api-hub-v2/src/lib/image-routes.js',
+              "  error.qaDetectedTextCount = Number(lastQa?.detectedText?.length || 0);\n  throw error;",
+              "  error.qaDetectedTextCount = Number(lastQa?.detectedText?.length || 0);\n  error.qaDetectedText = Array.isArray(lastQa?.detectedText) ? lastQa.detectedText.slice(0, 8) : [];\n  error.qaViolations = Array.isArray(lastQa?.violations) ? lastQa.violations.slice(0, 8) : [];\n  if (lastGenerated?.provider === 'kie-ai' && /^https:\\/\\//i.test(String(lastGenerated?.sourceUrl || ''))) {\n    error.rejectedImageUrl = String(lastGenerated.sourceUrl);\n    error.rejectedImageMimeType = String(lastGenerated.mimeType || 'image/jpeg');\n    error.rejectedProvider = 'kie-ai';\n    error.rejectedModel = String(lastGenerated.model || 'z-image');\n    error.rejectedTaskId = String(lastGenerated.taskId || '');\n  }\n  throw error;")
+
+          rep('api-hub-v2/src/index.js',
+              "      if (Number.isInteger(error?.qaDetectedTextCount)) body.qaDetectedTextCount = error.qaDetectedTextCount;\n      if (error?.meta === MASTER_V45) body.masterV45 = MASTER_V45;",
+              "      if (Number.isInteger(error?.qaDetectedTextCount)) body.qaDetectedTextCount = error.qaDetectedTextCount;\n      const safeQaItems = (items) => Array.isArray(items)\n        ? items.map((item) => String(item || '').replace(/[^\\p{L}\\p{N} _.,:;()\\-]/gu, '').trim().slice(0, 100)).filter(Boolean).slice(0, 8)\n        : [];\n      const qaDetectedText = safeQaItems(error?.qaDetectedText);\n      const qaViolations = safeQaItems(error?.qaViolations);\n      if (qaDetectedText.length) body.qaDetectedText = qaDetectedText;\n      if (qaViolations.length) body.qaViolations = qaViolations;\n      if (String(error?.message || '') === 'IMAGE_QA_REJECTED') {\n        try {\n          const rejectedUrl = new URL(String(error?.rejectedImageUrl || ''));\n          if (rejectedUrl.protocol === 'https:') body.rejectedImageUrl = rejectedUrl.href;\n        } catch {}\n        const rejectedMime = String(error?.rejectedImageMimeType || '').split(';')[0].trim().toLowerCase();\n        if (['image/jpeg', 'image/png', 'image/webp'].includes(rejectedMime)) body.rejectedImageMimeType = rejectedMime;\n        if (String(error?.rejectedProvider || '') === 'kie-ai') body.rejectedProvider = 'kie-ai';\n        if (/^[A-Za-z0-9_.:@\\/-]{1,80}$/.test(String(error?.rejectedModel || ''))) body.rejectedModel = String(error.rejectedModel);\n        if (/^[A-Za-z0-9_-]{1,120}$/.test(String(error?.rejectedTaskId || ''))) body.rejectedTaskId = String(error.rejectedTaskId);\n      }\n      if (error?.meta === MASTER_V45) body.masterV45 = MASTER_V45;")
+
+          # 3) The worker keeps the rejected paid KIE image in R2 for visibility and prioritizes active tasks.
+          rep('worker/lib/image-executor.js',
+              "export async function generatePlannedImages(env, jobId, options = {}) {",
+              "const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);\n\nexport function imageExecutionPriority(image = {}) {\n  const status = String(image?.status || '');\n  const providerState = String(image?.provider_status || '').trim().toLowerCase();\n  const hasActiveTask = Boolean(String(image?.provider_task_id || '').trim()) && ACTIVE_PROVIDER_STATES.has(providerState);\n  if (hasActiveTask) return 0;\n  if (status === 'planned' && Number(image?.provider_attempt_count || 0) === 0) return 1;\n  if (status === 'generated') return 2;\n  if (status === 'planned') return 3;\n  if (status === 'failed') return 4;\n  return 5;\n}\n\nfunction orderedImageCandidates(rows = [], retryFailed = true) {\n  return rows\n    .filter((row) => isResumableImageStatus(row.status, retryFailed))\n    .map((row, index) => ({ row, index }))\n    .sort((a, b) => imageExecutionPriority(a.row) - imageExecutionPriority(b.row) || a.index - b.index)\n    .map((item) => item.row);\n}\n\nexport async function generatePlannedImages(env, jobId, options = {}) {")
+          rep('worker/lib/image-executor.js',
+              "  const candidates = rows.filter((row) => isResumableImageStatus(row.status, retryFailed)).slice(0, maxImages);",
+              "  const candidates = orderedImageCandidates(rows, retryFailed).slice(0, maxImages);")
+          rep('worker/lib/image-executor.js',
+              "      error.cause = lastError;\n      throw error;",
+              "      error.cause = lastError;\n      error.rejectedImageData = firstError?.data?.rejectedImageUrl ? firstError.data : (lastError?.data?.rejectedImageUrl ? lastError.data : null);\n      throw error;")
+          rep('worker/lib/image-executor.js',
+              "export function isResumableImageStatus(status, retryFailed = true) {",
+              "function rejectedPreviewEvidence(error) {\n  const data = error?.rejectedImageData || error?.data || null;\n  const url = String(data?.rejectedImageUrl || '').trim();\n  if (!/^https:\\/\\//i.test(url)) return null;\n  if (String(data?.rejectedProvider || 'kie-ai') !== 'kie-ai') return null;\n  return {\n    url,\n    mimeType: String(data?.rejectedImageMimeType || 'image/jpeg'),\n    provider: 'kie-ai',\n    model: String(data?.rejectedModel || 'z-image'),\n    taskId: String(data?.rejectedTaskId || '')\n  };\n}\n\nasync function preserveRejectedPreview(env, bucket, baseUrl, jobId, image, error) {\n  const evidence = rejectedPreviewEvidence(error);\n  if (!evidence) return null;\n  const response = await fetch(evidence.url, { redirect: 'follow' });\n  if (!response.ok) return null;\n  const bytes = new Uint8Array(await response.arrayBuffer());\n  if (!bytes.length || bytes.length > 12 * 1024 * 1024) return null;\n  const mimeType = sourceImageMimeType(response.headers.get('content-type') || evidence.mimeType);\n  const generated = { provider: evidence.provider, model: evidence.model, mimeType, taskId: evidence.taskId };\n  await markImageGenerated(env, image.id, generated);\n  const stored = await storeImageBytes(env, bucket, baseUrl, jobId, image, bytes, mimeType, generated, {\n    sourceMimeType: mimeType,\n    postprocessed: 'qa-rejected-preview'\n  });\n  return stored.url;\n}\n\nexport function isResumableImageStatus(status, retryFailed = true) {")
+          rep('worker/lib/image-executor.js',
+              "    } catch (error) {\n      await markImageFailed(env, image.id, error?.message || 'IMAGE_GENERATION_FAILED');\n      outcomes.push({ imageId: image.id, status: 'failed', error: String(error?.message || 'IMAGE_GENERATION_FAILED') });\n    }",
+              "    } catch (error) {\n      const rejectedPreviewUrl = await preserveRejectedPreview(env, bucket, baseUrl, jobId, image, error).catch(() => null);\n      const qaData = error?.rejectedImageData || error?.data || null;\n      const qaSummary = [\n        Number(qaData?.qaDetectedTextCount || 0) > 0 ? `QA_TEXT_${Number(qaData.qaDetectedTextCount)}` : '',\n        Number(qaData?.qaViolationCount || 0) > 0 ? `QA_VIOLATIONS_${Number(qaData.qaViolationCount)}` : ''\n      ].filter(Boolean).join(':');\n      const persistedError = `${String(error?.message || 'IMAGE_GENERATION_FAILED')}${qaSummary ? `:${qaSummary}` : ''}`;\n      await markImageFailed(env, image.id, persistedError);\n      outcomes.push({ imageId: image.id, status: 'failed', error: persistedError, rejectedPreviewUrl });\n    }")
+
+          # 4) Remove the arbitrary 10-second image wait. Process distinct jobs once per 3-minute watchdog tick.
+          p=Path('worker/mcp-entry.js'); s=p.read_text()
+          start=s.index('async function runSerialImageWatchdog(env, ctx) {')
+          end=s.index('\nasync function runLegacyMaintenance', start)
+          new_fn=r'''async function runSerialImageWatchdog(env, ctx) {
+  const maxItems = positiveBounded(env?.SERIAL_IMAGE_CHAIN_MAX_ITEMS, 8, 1, 8);
+  const leaseTtlSeconds = positiveBounded(env?.SERIAL_IMAGE_LEASE_TTL_SECONDS, 210, 60, 900);
+  const startedAt = Date.now();
+  const steps = [];
+  const lease = await acquireRuntimeLock(env, IMAGE_LANE_LOCK_KEY, { ttlSeconds: leaseTtlSeconds });
+  if (!lease.acquired) {
+    return {
+      ok: true,
+      watchdogCron: WATCHDOG_CRON,
+      providerPriority: 'kie->cloudflare',
+      cooldownMs: 0,
+      maxItems,
+      stopReason: 'IMAGE_LANE_BUSY',
+      durationMs: Date.now() - startedAt,
+      steps
+    };
+  }
+
+  let stopReason = 'NO_ELIGIBLE_IMAGES';
+  try {
+    if (!await renewRuntimeLock(env, lease, { ttlSeconds: leaseTtlSeconds })) {
+      stopReason = 'IMAGE_LANE_LEASE_LOST';
+    } else {
+      let imageWork = emptyImageWork();
+      let imageError = null;
+      try {
+        // KIE generation is asynchronous. There is no benefit in sleeping 10 seconds
+        // between distinct jobs. Touch each eligible job once per watchdog tick; the
+        // next */3 tick polls its taskId instead of hot-polling the same task.
+        imageWork = await runScheduledImageCompletion(env, {
+          maxJobs: maxItems,
+          maxImages: 1,
+          staleMinutes: 0,
+          executionContext: ctx
+        });
+      } catch (error) {
+        imageError = safeScheduledError(error);
+        imageWork = emptyImageWork(imageError);
+        console.error('SERIAL_IMAGE_WORK_FAILED', imageError);
+      }
+      steps.push({ sequence: 1, ...compactImageWork(imageWork, imageError) });
+      if (imageError) stopReason = 'IMAGE_WORK_ERROR';
+      else if (imageWork?.enabled === false) stopReason = String(imageWork?.reason || 'IMAGE_WORK_DISABLED');
+      else if (Number(imageWork?.attempted || 0) === 0) stopReason = 'NO_ELIGIBLE_IMAGES';
+      else if (imageProviderBackoffRequired(imageWork)) stopReason = 'IMAGE_PROVIDER_BACKOFF';
+      else stopReason = 'BATCH_DISPATCHED';
+    }
+  } finally {
+    await releaseRuntimeLock(env, lease).catch((error) => {
+      console.error('SERIAL_IMAGE_LEASE_RELEASE_FAILED', safeScheduledError(error));
+    });
+  }
+
+  return {
+    ok: !['IMAGE_WORK_ERROR', 'IMAGE_LANE_LEASE_LOST'].includes(stopReason),
+    watchdogCron: WATCHDOG_CRON,
+    providerPriority: 'kie->cloudflare',
+    cooldownMs: 0,
+    maxItems,
+    leaseTtlSeconds,
+    stopReason,
+    durationMs: Date.now() - startedAt,
+    steps
+  };
+}
+'''
+          p.write_text(s[:start]+new_fn+s[end:])
+
+          # 5) Show stored/attached and QA-rejected generated images directly in job result details.
+          rep('web/work-cards.js',
+              "  const image = imageSummary(row, result);\n\n  return `",
+              "  const image = imageSummary(row, result);\n  const generatedImages = (Array.isArray(row?._images) ? row._images : []).filter((item) => /^https:\\/\\//i.test(String(item.public_url || '')));\n  const imageGallery = generatedImages.length ? `<div class=\"result-image-gallery\">${generatedImages.map((item) => `<a class=\"result-image-item\" href=\"${escapeHtml(item.public_url)}\" target=\"_blank\" rel=\"noopener noreferrer\"><img src=\"${escapeHtml(item.public_url)}\" alt=\"${escapeHtml(item.alt_text || `${item.role || 'image'} ${item.position ?? ''}`)}\" loading=\"lazy\"><span>${escapeHtml(item.role === 'thumbnail' ? '썸네일' : `본문 ${item.position || ''}`)} · ${escapeHtml(item.provider || '생성 이미지')}${item.status === 'failed' ? ' · QA 확인 필요' : ''}</span></a>`).join('')}</div>` : '';\n\n  return `")
+          rep('web/work-cards.js',
+              "        ${image.errorCodes.length ? `<div class=\"result-error\"><dt>이미지 오류</dt><dd>${escapeHtml(image.errorCodes.join(', '))}</dd></div>` : ''}\n        ${scheduled ?",
+              "        ${image.errorCodes.length ? `<div class=\"result-error\"><dt>이미지 오류</dt><dd>${escapeHtml(image.errorCodes.join(', '))}</dd></div>` : ''}\n        ${generatedImages.length ? `<div class=\"result-images-row\"><dt>생성 이미지</dt><dd>${imageGallery}</dd></div>` : ''}\n        ${scheduled ?")
+
+          css=Path('web/work-cards.css')
+          css.write_text(css.read_text()+"\n.result-images-row dd{min-width:0}.result-image-gallery{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:2px}.result-image-item{display:block;text-decoration:none;color:#cbd5e1;border:1px solid #26364f;border-radius:12px;overflow:hidden;background:#0b1422}.result-image-item img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#020617}.result-image-item span{display:block;padding:7px 8px;font-size:10px;line-height:1.35;color:#94a3b8}@media(max-width:420px){.result-image-gallery{grid-template-columns:1fr}}\n")
+
+          rep('web/sw.js', "const CACHE = 'content-orchestrator-v29';", "const CACHE = 'content-orchestrator-v30';")
+          rep('wrangler.example.jsonc', '"SERIAL_IMAGE_COOLDOWN_MS": "10000",', '"SERIAL_IMAGE_COOLDOWN_MS": "0",')
+
+          # Static regression checks for the exact failures seen in production.
+          Path('tests/image-lifecycle-gallery.test.mjs').write_text(r'''import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const imageRoutes = fs.readFileSync('api-hub-v2/src/lib/image-routes.js','utf8');
+const kie = fs.readFileSync('api-hub-v2/src/lib/kie-image.js','utf8');
+const executor = fs.readFileSync('worker/lib/image-executor.js','utf8');
+const entry = fs.readFileSync('worker/mcp-entry.js','utf8');
+const cards = fs.readFileSync('web/work-cards.js','utf8');
+
+test('KIE completion keeps source evidence for rejected preview archival', () => {
+  assert.match(kie, /sourceUrl: resultUrl/);
+  assert.match(imageRoutes, /rejectedImageUrl/);
+  assert.match(executor, /preserveRejectedPreview/);
+});
+
+test('image scheduler has no arbitrary ten-second cooldown or same-tick hot polling', () => {
+  assert.match(entry, /cooldownMs: 0/);
+  assert.match(entry, /maxJobs: maxItems/);
+  assert.doesNotMatch(entry.slice(entry.indexOf('async function runSerialImageWatchdog'), entry.indexOf('async function runLegacyMaintenance')), /await sleep\(cooldownMs\)/);
+});
+
+test('work result renders generated image gallery', () => {
+  assert.match(cards, /result-image-gallery/);
+  assert.match(cards, /public_url/);
+});
+''')
+          PY
+          npm run verify
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add api-hub-v2/src/lib/kie-image.js api-hub-v2/src/lib/image-routes.js api-hub-v2/src/index.js worker/lib/image-executor.js worker/mcp-entry.js web/work-cards.js web/work-cards.css web/sw.js wrangler.example.jsonc tests/image-lifecycle-gallery.test.mjs
+          git commit -m "Fix image lifecycle throughput and expose generated previews"
+          git push origin HEAD:fix/image-lifecycle-gallery-20260907

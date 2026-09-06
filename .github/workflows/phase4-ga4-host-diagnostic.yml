@@ -1,0 +1,89 @@
+name: Phase 4 GA4 Host Diagnostic
+
+on:
+  push:
+    paths:
+      - '.github/phase4-ga4-host-diagnostic-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+      API_HUB_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Compare Blogger hosts and GA4 hostname coverage safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const host = value => {
+            try { return new URL(String(value||'')).hostname.toLowerCase().replace(/^www\./,''); }
+            catch { return String(value||'').trim().toLowerCase().replace(/^www\./,''); }
+          };
+          const isoDay = date => date.toISOString().slice(0,10);
+          const end = new Date();
+          end.setUTCDate(end.getUTCDate()-1);
+          const start = new Date(end);
+          start.setUTCDate(start.getUTCDate()-89);
+          const startDate = isoDay(start);
+          const endDate = isoDay(end);
+
+          const blogsResp = await fetch(`${process.env.ORCHESTRATOR_URL}/api/blogs`, {headers:{'x-admin-api-key':process.env.ADMIN_API_KEY}});
+          const blogs = await blogsResp.json().catch(()=>({}));
+          if (!blogsResp.ok) throw new Error(`BLOGS_HTTP_${blogsResp.status}`);
+          const bloggerRows = (blogs.blogs || []).map(blog => ({name:String(blog.name||''), host:host(blog.url)})).filter(item => item.host && !item.host.endsWith('tistory.com'));
+          if (bloggerRows.length !== 7) throw new Error(`BLOGGER_HOST_COUNT_INVALID:${bloggerRows.length}`);
+
+          const gaResp = await fetch(`${process.env.API_HUB_URL}/api/ga4/properties`, {method:'POST',headers:{'x-hub-api-key':process.env.HUB_API_KEY,'content-type':'application/json'},body:'{}'});
+          const ga = await gaResp.json().catch(()=>({}));
+          if (!gaResp.ok) throw new Error(`GA4_HTTP_${gaResp.status}:${String(ga?.error||'FAILED').split(':')[0]}`);
+
+          const relevantProperties = (ga.properties || []).filter(property => {
+            const texts = [property.displayName, ...(property.dataStreams || []).flatMap(stream => [stream.displayName, stream.defaultUri])].map(v=>String(v||'').toLowerCase());
+            return !texts.some(text => text.includes('tistory'));
+          });
+
+          const coverage = new Map(bloggerRows.map(item => [item.host, []]));
+          console.log(`GA4_HOSTNAME_SCAN_START blogs=${bloggerRows.length} properties=${relevantProperties.length} windowDays=90 tistory=ignored`);
+          for (const property of relevantProperties) {
+            const reportResp = await fetch(`${process.env.API_HUB_URL}/api/ga4/report`, {
+              method:'POST',
+              headers:{'x-hub-api-key':process.env.HUB_API_KEY,'content-type':'application/json'},
+              body:JSON.stringify({
+                propertyId: property.propertyId,
+                startDate,
+                endDate,
+                dimensions:['hostName'],
+                metrics:['screenPageViews'],
+                limit:500
+              })
+            });
+            const report = await reportResp.json().catch(()=>({}));
+            if (!reportResp.ok) {
+              console.log(`PROPERTY name=${JSON.stringify(String(property.displayName||''))} report=failed code=${String(report?.error||'FAILED').split(':')[0]}`);
+              continue;
+            }
+            const hosts = new Set((report.rows || []).map(row => host(row?.dimensions?.hostName)).filter(Boolean).filter(value => !value.endsWith('tistory.com')));
+            const matches = bloggerRows.filter(blog => hosts.has(blog.host));
+            for (const match of matches) coverage.get(match.host).push(String(property.displayName||''));
+            console.log(`PROPERTY name=${JSON.stringify(String(property.displayName||''))} hostnameRows=${hosts.size} bloggerMatches=${matches.length} matchedHosts=${JSON.stringify(matches.map(item=>item.host))}`);
+          }
+
+          let mapped = 0;
+          let ambiguous = 0;
+          for (const blog of bloggerRows) {
+            const matches = coverage.get(blog.host) || [];
+            if (matches.length === 1) mapped += 1;
+            if (matches.length > 1) ambiguous += 1;
+            console.log(`BLOG_COVERAGE name=${JSON.stringify(blog.name)} host=${blog.host} propertyMatches=${matches.length} properties=${JSON.stringify(matches)}`);
+          }
+          console.log(`GA4_HOSTNAME_SCAN_OK blogs=7 uniquelyMapped=${mapped} ambiguous=${ambiguous} unmapped=${7-mapped-ambiguous} tistory=ignored`);
+          NODE

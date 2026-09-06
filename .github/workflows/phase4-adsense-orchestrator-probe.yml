@@ -1,0 +1,49 @@
+name: Phase 4 AdSense Orchestrator Probe
+
+on:
+  push:
+    paths:
+      - '.github/phase4-adsense-orchestrator-probe-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Verify gated AdSense collection and D1 readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ADMIN_API_KEY" || { echo 'ADMIN_API_KEY is missing'; exit 1; }
+          node --input-type=module - <<'NODE'
+          const base=process.env.ORCHESTRATOR_URL;
+          const headers={'x-admin-api-key':process.env.ADMIN_API_KEY,'content-type':'application/json'};
+          const get=async path=>{const r=await fetch(`${base}${path}`,{headers,cache:'no-store'});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(`${path}:HTTP_${r.status}:${String(d?.error||'FAILED').split(':')[0]}`);return d;};
+          const post=async path=>{const r=await fetch(`${base}${path}`,{method:'POST',headers,body:'{}'});const d=await r.json().catch(()=>({}));if(!r.ok&&r.status!==207)throw new Error(`${path}:HTTP_${r.status}:${String(d?.error||'FAILED').split(':')[0]}`);return {status:r.status,data:d};};
+          const health=await get('/health');
+          if(health.bloggerWritesEnabled!==false)throw new Error('BLOGGER_WRITES_NOT_OFF');
+          if(health.phase2Automation?.autoPublishExecutionEnabled!==false)throw new Error('AUTO_PUBLISH_NOT_OFF');
+          const before=await get('/api/performance/adsense/today');
+          if(before.collectionEnabled!==false)throw new Error('ADSENSE_GATE_MUST_START_OFF');
+          if(before.collectionTime!=='03:35')throw new Error(`ADSENSE_TIME_INVALID:${before.collectionTime}`);
+          const collected=(await post('/api/performance/adsense/collect')).data;
+          if(Number(collected.blogCount)!==7)throw new Error(`ADSENSE_BLOG_COUNT_INVALID:${collected.blogCount}`);
+          if(Number(collected.failedCount)!==0)throw new Error(`ADSENSE_FAILED:${collected.failedCount}`);
+          if(Number(collected.partialCount)!==0)throw new Error(`ADSENSE_PARTIAL:${collected.partialCount}`);
+          if(!Array.isArray(collected.items)||collected.items.length!==7)throw new Error('ADSENSE_ITEMS_INVALID');
+          if(!collected.items.every(item=>Array.isArray(item.windows)&&item.windows.length===2&&item.windows.every(w=>w.status==='ok')))throw new Error('ADSENSE_WINDOW_INVALID');
+          const after=await get('/api/performance/adsense/today');
+          if(!Array.isArray(after.domains)||after.domains.length!==7)throw new Error(`ADSENSE_DOMAINS_INVALID:${after.domains?.length||0}`);
+          if(!Array.isArray(after.snapshots)||after.snapshots.length!==14)throw new Error(`ADSENSE_SNAPSHOTS_INVALID:${after.snapshots?.length||0}`);
+          if(after.collectionEnabled!==false)throw new Error('ADSENSE_GATE_CHANGED');
+          const active28=after.snapshots.filter(row=>Number(row.window_days)===28&&(Number(row.page_views)>0||Number(row.impressions)>0||Number(row.clicks)>0||Number(row.estimated_earnings)!==0)).length;
+          console.log(`PHASE4_3_ADSENSE_ORCHESTRATOR_OK blogs=${after.domains.length} snapshots=${after.snapshots.length} active28=${active28} collectionEnabled=${after.collectionEnabled}`);
+          console.log(`SAFETY bloggerWrites=${health.bloggerWritesEnabled} autoPublish=${health.phase2Automation?.autoPublishExecutionEnabled}`);
+          NODE

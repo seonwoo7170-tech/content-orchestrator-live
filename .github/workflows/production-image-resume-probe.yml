@@ -1,0 +1,78 @@
+name: production-image-resume-probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/production-image-resume-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  resume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Resume one production image job and inspect publication progression
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          const readHeaders={'x-admin-api-key':admin};
+          const started=Date.now();
+          const response=await fetch(`${base}/api/operations/images/resume?maxJobs=1`,{
+            method:'POST',headers,body:'{}',cache:'no-store',signal:AbortSignal.timeout(90000)
+          });
+          const result=await response.json().catch(()=>({}));
+          console.log('IMAGE_RESUME_RESULT',JSON.stringify({elapsedMs:Date.now()-started,httpStatus:response.status,...result}));
+          const diagResp=await fetch(`${base}/api/operations/images/diagnostics`,{headers:readHeaders,cache:'no-store'});
+          const diag=await diagResp.json().catch(()=>({}));
+          console.log('IMAGE_DIAGNOSTICS_AFTER_RESUME',JSON.stringify(diag));
+
+          const ids=[...new Set([
+            101,104,105,111,
+            ...(diag.ready||[]).filter(x=>['generating','attaching','failed'].includes(String(x.imageState||''))).map(x=>Number(x.jobId)),
+            ...(diag.failures||[]).map(x=>Number(x.jobId))
+          ].filter(Number.isFinite))].slice(0,12);
+          for (const jobId of ids) {
+            const [jr,ir]=await Promise.all([
+              fetch(`${base}/api/jobs/${jobId}`,{headers:readHeaders,cache:'no-store'}),
+              fetch(`${base}/api/jobs/${jobId}/images`,{headers:readHeaders,cache:'no-store'})
+            ]);
+            const jd=await jr.json().catch(()=>({}));
+            const d=await ir.json().catch(()=>({}));
+            const job=jd.job||{};
+            let parsed=null; try{parsed=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            const images=(d.images||[]).map(x=>({
+              id:x.id,role:x.role,position:x.position,status:x.status,provider:x.provider||null,
+              providerState:x.provider_status||null,providerTaskId:x.provider_task_id||null,
+              providerAttempts:x.provider_attempt_count||0,publicUrl:x.public_url||null,
+              storageKey:x.storage_key||null,error:x.error||null,updatedAt:x.updated_at||null
+            }));
+            console.log('JOB_STATE',JSON.stringify({
+              jobId,httpStatus:jr.status,status:job.status||null,mode:job.mode||null,
+              bloggerPostId:job.blogger_post_id||null,targetUrl:job.target_url||null,
+              updatedAt:job.updated_at||null,resultStatus:parsed?.status||null,
+              imagePipeline:parsed?.imagePipeline||null,publication:parsed?.publication||null,
+              publicationVerification:parsed?.publicationVerification||null,images
+            }));
+          }
+          const pubResp=await fetch(`${base}/api/operations/publications/today`,{headers:readHeaders,cache:'no-store'});
+          const pub=await pubResp.json().catch(()=>({}));
+          console.log('PUBLICATION_STATUS',JSON.stringify({httpStatus:pubResp.status,...pub}));
+          if(response.status>=500) throw new Error(`IMAGE_RESUME_HTTP_${response.status}`);
+          if(!diagResp.ok) throw new Error(`IMAGE_DIAGNOSTICS_HTTP_${diagResp.status}`);
+          if(!pubResp.ok) throw new Error(`PUBLICATION_STATUS_HTTP_${pubResp.status}`);
+          NODE
+
+# probe: lifecycle-and-gallery-2026-09-07-0018
+# probe: post-deploy-zero-delay-readback-2026-09-07-0255
+# probe: publication-progression-readback-2026-09-07-0302

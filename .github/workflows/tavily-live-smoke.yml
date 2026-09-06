@@ -1,0 +1,93 @@
+name: Tavily Live Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/tavily-live-smoke-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Resolve Hub key without printing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then HUB_API_KEY="$API_HUB_V2_KEY"; else HUB_API_KEY="$EXISTING_ORCHESTRATOR_KEY"; fi
+          test -n "$HUB_API_KEY" || { echo 'Hub key missing'; exit 1; }
+          echo "HUB_API_KEY=$HUB_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Confirm Tavily configured and all Blogger write gates are OFF
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const [hr, or] = await Promise.all([
+            fetch(`${process.env.API_HUB_V2_BASE_URL}/health`, { cache: 'no-store' }),
+            fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health`, { cache: 'no-store' })
+          ]);
+          const [h, o] = await Promise.all([hr.json(), or.json()]);
+          if (!hr.ok || h.tavilyConfigured !== true || h.writerResearchProvider !== 'tavily') throw new Error('TAVILY_NOT_CONFIGURED');
+          if (h.bloggerWritesEnabled !== false || h.bloggerWriteMode !== 'disabled') throw new Error('API_HUB_WRITES_NOT_OFF');
+          if (!or.ok || o.bloggerWritesEnabled !== false || o.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('ORCHESTRATOR_WRITES_NOT_OFF');
+          console.log('PRE_SMOKE_SAFE Tavily=true writes=OFF');
+          NODE
+
+      - name: Run exactly one Tavily Basic search
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/hub/search/tavily`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-hub-api-key': process.env.HUB_API_KEY
+            },
+            body: JSON.stringify({
+              query: 'Cloudflare Workers latest official updates August 2026',
+              maxResults: 3,
+              topic: 'general',
+              timeRange: 'month'
+            })
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok || data.ok !== true || data.provider !== 'tavily' || data.searchDepth !== 'basic') throw new Error(`TAVILY_LIVE_SMOKE_FAILED_${r.status}`);
+          if (!Number.isInteger(data.resultCount) || data.resultCount < 1 || !Array.isArray(data.results) || data.results.length < 1) throw new Error('TAVILY_LIVE_SMOKE_NO_RESULTS');
+          for (const item of data.results) {
+            if (!item?.title || !item?.url || !item?.content) throw new Error('TAVILY_LIVE_SMOKE_RESULT_INVALID');
+            const u = new URL(item.url);
+            if (!['http:', 'https:'].includes(u.protocol)) throw new Error('TAVILY_LIVE_SMOKE_URL_INVALID');
+          }
+          console.log(`TAVILY_LIVE_SMOKE_OK resultCount=${data.resultCount}; searchDepth=basic`);
+          NODE
+
+      - name: Reconfirm all write gates remain OFF
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const [hr, or] = await Promise.all([
+            fetch(`${process.env.API_HUB_V2_BASE_URL}/health`, { cache: 'no-store' }),
+            fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health`, { cache: 'no-store' })
+          ]);
+          const [h, o] = await Promise.all([hr.json(), or.json()]);
+          if (!hr.ok || h.bloggerWritesEnabled !== false || h.bloggerWriteMode !== 'disabled') throw new Error('API_HUB_FINAL_WRITES_NOT_OFF');
+          if (!or.ok || o.bloggerWritesEnabled !== false || o.phase2Automation?.autoPublishExecutionEnabled !== false) throw new Error('ORCHESTRATOR_FINAL_WRITES_NOT_OFF');
+          console.log('POST_SMOKE_SAFE writes=OFF');
+          NODE

@@ -1,0 +1,116 @@
+name: finish-existing-backlog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/finish-existing-backlog-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: content-orchestrator-backlog-finish
+  cancel-in-progress: false
+
+jobs:
+  finish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+    steps:
+      - name: Finish safe backlog synchronously and schedule eligible publications
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$ADMIN_API_KEY"
+          node - <<'NODE'
+          const BASE='https://content-orchestrator.smileseon.workers.dev';
+          const CF=`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}`;
+          const adminHeaders={'x-admin-api-key':process.env.ADMIN_API_KEY,'content-type':'application/json'};
+          const cfHeaders={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
+          const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
+
+          async function cf(url,init={}){
+            const r=await fetch(url,{...init,headers:{...cfHeaders,...(init.headers||{})},signal:AbortSignal.timeout(45000)});
+            const d=await r.json().catch(()=>({}));
+            if(!r.ok||d.success===false) throw new Error(`CF_API_FAILED:${r.status}`);
+            return d;
+          }
+          async function admin(path,{method='GET',timeout=360000}={}){
+            const r=await fetch(`${BASE}${path}`,{method,headers:adminHeaders,...(method==='GET'?{}:{body:'{}'}),cache:'no-store',signal:AbortSignal.timeout(timeout)});
+            const d=await r.json().catch(()=>({}));
+            return {ok:r.ok,status:r.status,data:d};
+          }
+
+          const list=await cf(`${CF}/d1/database`);
+          const db=(list.result||[]).find(x=>x.name==='content-orchestrator');
+          if(!db?.uuid) throw new Error('D1_DATABASE_NOT_FOUND');
+          const queryUrl=`${CF}/d1/database/${db.uuid}/query`;
+          async function query(sql){
+            const d=await cf(queryUrl,{method:'POST',body:JSON.stringify({sql})});
+            return (Array.isArray(d.result)?d.result[0]:d.result)||{};
+          }
+          const auditSql=`SELECT j.id,j.mode,j.blog_id,j.blogger_post_id,j.status,j.recovery_state,j.retry_count,j.last_error_code,j.hold_reason,j.updated_at,
+            CASE WHEN j.result_json IS NULL THEN 0 ELSE 1 END AS has_result,
+            (SELECT p.status FROM job_publications p WHERE p.job_id=j.id ORDER BY p.rowid DESC LIMIT 1) AS pub_status,
+            (SELECT p.blogger_post_id FROM job_publications p WHERE p.job_id=j.id ORDER BY p.rowid DESC LIMIT 1) AS pub_post_id,
+            (SELECT p.scheduled_time FROM job_publications p WHERE p.job_id=j.id ORDER BY p.rowid DESC LIMIT 1) AS scheduled_time,
+            (SELECT p.error FROM job_publications p WHERE p.job_id=j.id ORDER BY p.rowid DESC LIMIT 1) AS pub_error,
+            (SELECT COUNT(*) FROM job_images i WHERE i.job_id=j.id) AS image_count,
+            (SELECT COUNT(*) FROM job_images i WHERE i.job_id=j.id AND i.status='attached') AS attached_images
+            FROM jobs j WHERE j.archived_at IS NULL AND j.status<>'completed' ORDER BY j.id`;
+          async function audit(label){
+            const q=await query(auditSql); const rows=q.results||[];
+            const counts=rows.reduce((a,r)=>(a[r.status]=(a[r.status]||0)+1,a),{});
+            console.log(`${label} total=${rows.length} statuses=${JSON.stringify(counts)}`);
+            for(const r of rows) console.log(`${label}_JOB id=${r.id} mode=${r.mode} status=${r.status} recovery=${r.recovery_state||'none'} retry=${Number(r.retry_count||0)} error=${r.last_error_code||'none'} hold=${r.hold_reason||'none'} pub=${r.pub_status||'none'} pubPost=${r.pub_post_id?'yes':'no'} scheduled=${r.scheduled_time||'none'} images=${Number(r.attached_images||0)}/${Number(r.image_count||0)} updated=${r.updated_at}`);
+            return rows;
+          }
+
+          await audit('SYNC_PRE');
+          const health=await admin('/health',{timeout:30000});
+          if(!health.ok) throw new Error(`HEALTH_FAILED:${health.status}`);
+
+          let emptyPasses=0;
+          for(let i=1;i<=10;i++){
+            const r=await admin('/api/operations/recovery-tick?maxItems=1&staleMinutes=5',{method:'POST',timeout:390000});
+            const item=(r.data?.items||[])[0]||{};
+            const rescue=r.data?.autoRescue||{};
+            console.log(`RECOVERY_${i} http=${r.status} ok=${r.ok} attempted=${Number(r.data?.attempted||0)} completed=${Number(r.data?.completed||0)} retryWait=${Number(r.data?.retryWait||0)} held=${Number(r.data?.held||0)} itemJob=${item.jobId||'none'} itemStatus=${item.status||'none'} jobState=${item.jobState||'none'} error=${item.errorCode||'none'} rescueChecked=${Number(rescue.checked||0)} rescueRetryDue=${Number(rescue.retryDue||0)} rescueHeld=${Number(rescue.held||0)}`);
+            if(Number(r.data?.attempted||0)===0) emptyPasses++; else emptyPasses=0;
+            if(emptyPasses>=2) break;
+            await sleep(2000);
+          }
+
+          for(let i=1;i<=5;i++){
+            const r=await admin('/api/operations/publish-tick',{method:'POST',timeout:180000});
+            console.log(`PUBLISH_${i} http=${r.status} ok=${r.ok} images=${Number(r.data?.images?.completed||0)}/${Number(r.data?.images?.attempted||0)} pubAttempted=${Number(r.data?.publications?.attempted||0)} scheduled=${Number(r.data?.publications?.scheduled||0)} blocked=${Number(r.data?.publications?.blocked||0)} links=${JSON.stringify(r.data?.links||[])}`);
+            await sleep(2500);
+          }
+
+          for(let i=1;i<=3;i++){
+            const r=await admin('/api/operations/repair-publish-tick',{method:'POST',timeout:180000});
+            const rep=r.data?.repairs||{};
+            console.log(`REPAIR_PUBLISH_${i} http=${r.status} ok=${r.ok} scheduled=${Number(rep.scheduled||0)} updated=${Number(rep.updated||0)} pending=${Number(rep.verificationPending||0)} blocked=${Number(rep.blocked||0)} failed=${Number(rep.failed||0)} outcomes=${JSON.stringify(rep.outcomes||[])}`);
+            await sleep(2500);
+          }
+
+          for(let i=1;i<=3;i++){
+            const r=await admin('/api/operations/publish-tick?images=false',{method:'POST',timeout:120000});
+            console.log(`FINAL_PUBLISH_${i} http=${r.status} ok=${r.ok} attempted=${Number(r.data?.publications?.attempted||0)} scheduled=${Number(r.data?.publications?.scheduled||0)} blocked=${Number(r.data?.publications?.blocked||0)} links=${JSON.stringify(r.data?.links||[])}`);
+            await sleep(2000);
+          }
+
+          const rows=await audit('SYNC_FINAL');
+          const pending=rows.filter(r=>!['publishing_new','updating_existing'].includes(String(r.status||'')));
+          const held=rows.filter(r=>String(r.recovery_state||'')==='held');
+          const scheduled=rows.filter(r=>['scheduled','scheduled_update','published','updated','verification_pending','claimed'].includes(String(r.pub_status||'')));
+          console.log(`SYNC_RESULT active=${rows.length} pending=${pending.length} held=${held.length} publicationTracked=${scheduled.length}`);
+          NODE

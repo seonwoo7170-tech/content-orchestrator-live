@@ -1,0 +1,103 @@
+name: API Hub v2 AI Pipeline Dry Run
+
+on:
+  push:
+    paths:
+      - '.github/api-hub-v2-ai-dryrun-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-ai-dryrun
+  cancel-in-progress: false
+
+jobs:
+  dryrun:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      HUB_URL: https://api-hub-v2.smileseon.workers.dev
+      HUB_KEY: ${{ secrets.HUB_API_KEY }}
+      TARGET_BLOG_ID: '7741529904469657049'
+      TEST_TOPIC: '스마트폰 저장공간 부족 경고가 뜰 때 안전하게 정리하는 순서'
+    steps:
+      - name: Verify full AI pipeline without DB or Blogger writes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_KEY" || { echo 'HUB_KEY missing'; exit 1; }
+          node - <<'NODE'
+          async function rawCall(path, body) {
+            const r = await fetch(`${process.env.HUB_URL}${path}`, {
+              method: 'POST',
+              headers: {'content-type':'application/json','x-hub-api-key':process.env.HUB_KEY},
+              body: JSON.stringify(body)
+            });
+            const data = await r.json().catch(() => ({}));
+            return { r, data };
+          }
+
+          async function call(path, body) {
+            const { r, data } = await rawCall(path, body);
+            if (!r.ok) throw new Error(`${path}:${r.status}:${data?.error || 'REQUEST_FAILED'}`);
+            return data;
+          }
+
+          function issueSummary(result) {
+            const issues = Array.isArray(result?.issues) ? result.issues : [];
+            return issues.map(i => `${i.code}:${i.severity}`).join(',') || 'none';
+          }
+
+          const healthResp = await fetch(`${process.env.HUB_URL}/health`, {cache:'no-store'});
+          const health = await healthResp.json().catch(() => ({}));
+          if (!healthResp.ok || health?.ok !== true) throw new Error('HEALTH_FAILED');
+          if (health?.bloggerWritesEnabled !== false || health?.bloggerWriteMode !== 'disabled') throw new Error('BLOGGER_WRITES_MUST_REMAIN_DISABLED');
+          console.log(`health ok; writes=disabled; writer=${health.writerModel}; critic=${health.criticModel}`);
+
+          const diagnostic = await rawCall('/api/hub/ai/diagnostics/cloudflare', {});
+          console.log(`ai diagnostic: HTTP ${diagnostic.r.status}; ok=${diagnostic.data?.ok === true ? 'yes' : 'no'}; error=${String(diagnostic.data?.error || 'none')}; model=${String(diagnostic.data?.model || 'unknown')}`);
+          if (!diagnostic.r.ok || diagnostic.data?.ok !== true) {
+            throw new Error(`AI_DIAGNOSTIC_FAILED:${diagnostic.r.status}:${diagnostic.data?.error || 'UNKNOWN'}`);
+          }
+
+          const writer = await call('/api/hub/ai/writer', {
+            blogId: process.env.TARGET_BLOG_ID,
+            topic: process.env.TEST_TOPIC,
+            language: 'ko'
+          });
+          const article = writer?.article;
+          if (!article?.title || !article?.html) throw new Error('WRITER_ARTICLE_MISSING');
+          console.log(`writer ok; titleChars=${article.title.length}; htmlChars=${article.html.length}; sources=${Array.isArray(article.sources) ? article.sources.length : -1}`);
+
+          const initial = await call('/api/hub/ai/critic', {article, stage:'initial'});
+          console.log(`initial critic=${initial.status}:${initial.score ?? 'n/a'}; issues=${Array.isArray(initial.issues) ? initial.issues.length : -1}; summary=${issueSummary(initial)}`);
+          if (!['PASS','FAIL'].includes(initial?.status)) throw new Error('INITIAL_CRITIC_SCHEMA_INVALID');
+
+          let finalArticle = article;
+          let finalCritic = initial;
+          let repairApplied = false;
+
+          if (initial.status === 'FAIL') {
+            const repaired = await call('/api/hub/ai/repair', {
+              article,
+              issues: initial.issues,
+              strategy: 'targeted_sections_only'
+            });
+            if (!repaired?.article?.title || !repaired?.article?.html) throw new Error('REPAIR_ARTICLE_MISSING');
+            finalArticle = repaired.article;
+            repairApplied = true;
+            console.log(`repair ok; htmlChars=${finalArticle.html.length}`);
+
+            finalCritic = await call('/api/hub/ai/critic', {article:finalArticle, stage:'final'});
+            console.log(`final critic=${finalCritic.status}:${finalCritic.score ?? 'n/a'}; issues=${Array.isArray(finalCritic.issues) ? finalCritic.issues.length : -1}; summary=${issueSummary(finalCritic)}; repairApplied=yes`);
+            if (finalCritic?.status !== 'PASS') throw new Error('FINAL_CRITIC_NOT_PASS');
+          } else {
+            console.log(`final critic=reused-initial-pass:${initial.score ?? 'n/a'}; issues=0; repairApplied=no`);
+          }
+
+          const finalHealth = await fetch(`${process.env.HUB_URL}/health`, {cache:'no-store'}).then(r => r.json());
+          if (finalHealth?.bloggerWritesEnabled !== false || finalHealth?.bloggerWriteMode !== 'disabled') throw new Error('FINAL_BLOGGER_WRITE_GATE_CHANGED');
+          console.log(`AI_PIPELINE_DRYRUN_OK; finalStatus=${finalCritic.status}; repairApplied=${repairApplied ? 'yes' : 'no'}; no DB/job/Blogger write endpoint called; write gate remained disabled`);
+          NODE

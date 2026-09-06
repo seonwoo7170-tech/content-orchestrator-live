@@ -1,0 +1,341 @@
+name: HomeFix Korean Post Repair
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/homefix-korean-post-repair-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-hub-v2-production
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      DEPLOY_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      R2_API_TOKEN: ${{ secrets.CLOUDFLARE_R2_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
+      KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.API_HUB_V2_GOOGLE_REFRESH_TOKEN }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+      EXPECTED_BLOG_NAME: Smile HomeFix
+      EXPECTED_BLOG_HOST: www.smileinfo.net
+      TARGET_URL: https://www.smileinfo.net/2026/08/5.html
+      ARTICLE_TOPIC: Low Shower Water Pressure - 5 Things to Check at Home First
+      BUCKET_NAME: content-orchestrator-images
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install root dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify source before production action
+        run: |
+          npm run verify
+          (cd api-hub-v2 && npm run verify)
+
+      - name: Resolve keys without printing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then HUB_API_KEY="$API_HUB_V2_KEY"; else HUB_API_KEY="$EXISTING_ORCHESTRATOR_KEY"; fi
+          test -n "$HUB_API_KEY" || { echo 'Hub key missing'; exit 1; }
+          echo "HUB_API_KEY=$HUB_API_KEY" >> "$GITHUB_ENV"
+          for name in DEPLOY_API_TOKEN R2_API_TOKEN CLOUDFLARE_ACCOUNT_ID GEMINI_API_KEY KIE_API_KEY TAVILY_API_KEY GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_REFRESH_TOKEN; do
+            test -n "${!name}" || { echo "$name missing"; exit 1; }
+          done
+
+      - name: Prepare disabled API Hub config and secret bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOOGLE_OAUTH_SETUP_ENABLED=false node api-hub-v2/scripts/render-wrangler.mjs
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          const normal = JSON.parse(fs.readFileSync('api-hub-v2/wrangler.jsonc','utf8'));
+          if (normal.vars?.BLOGGER_WRITES_ENABLED !== 'false' || normal.vars?.BLOGGER_WRITE_MODE !== 'disabled') throw new Error('NORMAL_GATE_NOT_DISABLED');
+          fs.writeFileSync('api-hub-v2/wrangler.normal.jsonc', JSON.stringify(normal,null,2));
+          const secrets = {
+            ORCHESTRATOR_API_KEY: process.env.HUB_API_KEY,
+            GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+            KIE_API_KEY: process.env.KIE_API_KEY,
+            TAVILY_API_KEY: process.env.TAVILY_API_KEY,
+            GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,
+            GOOGLE_REFRESH_TOKEN: process.env.GOOGLE_REFRESH_TOKEN
+          };
+          fs.writeFileSync('api-hub-v2/.homefix-repair-secrets.json', JSON.stringify(secrets));
+          fs.chmodSync('api-hub-v2/.homefix-repair-secrets.json', 0o600);
+          NODE
+          (cd api-hub-v2 && CLOUDFLARE_API_TOKEN="$DEPLOY_API_TOKEN" npx --yes wrangler@latest deploy --config wrangler.normal.jsonc --secrets-file .homefix-repair-secrets.json)
+
+      - name: Confirm safe state and lock exact Korean target
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          function visible(html){return String(html||'').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim()}
+          async function call(path, body){
+            const r=await fetch(`${process.env.API_HUB_V2_BASE_URL}${path}`,{method:'POST',headers:{'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY},body:JSON.stringify(body)});
+            const data=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`${path}:${r.status}:${data.error||'REQUEST_FAILED'}`);
+            return data;
+          }
+          const [hr,or]=await Promise.all([fetch(`${process.env.API_HUB_V2_BASE_URL}/health?repair_pre=${Date.now()}`,{cache:'no-store'}),fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health?repair_pre=${Date.now()}`,{cache:'no-store'})]);
+          const [h,o]=await Promise.all([hr.json(),or.json()]);
+          if(!hr.ok||h.bloggerWritesEnabled!==false||h.bloggerWriteMode!=='disabled'||h.tavilyConfigured!==true) throw new Error('API_HUB_NOT_SAFE');
+          if(!or.ok||o.bloggerWritesEnabled!==false||o.phase2Automation?.autoPublishExecutionEnabled!==false) throw new Error('ORCHESTRATOR_NOT_SAFE');
+          const blogs=await call('/api/blogger/blogs',{action:'list'});
+          const target=(blogs.blogs||[]).find(b=>{
+            let host=''; try{host=new URL(String(b.url||'')).hostname.toLowerCase()}catch{}
+            return String(b.name||b.blogName||'')===process.env.EXPECTED_BLOG_NAME&&host===process.env.EXPECTED_BLOG_HOST;
+          });
+          if(!target?.id&&!target?.blogId) throw new Error('HOMEFIX_NOT_CONNECTED');
+          const blogId=String(target.id||target.blogId);
+          const existing=await call('/api/blogger/post/get',{blogId,targetUrl:process.env.TARGET_URL});
+          const postId=String(existing.identity?.bloggerPostId||'').trim();
+          if(!postId) throw new Error('TARGET_POST_ID_MISSING');
+          if(String(existing.identity?.status||'').toUpperCase()!=='LIVE') throw new Error('TARGET_NOT_LIVE');
+          if(new URL(String(existing.identity?.permalink||'')).pathname!==new URL(process.env.TARGET_URL).pathname) throw new Error('TARGET_URL_MISMATCH');
+          const text=`${existing.article?.title||''}\n${visible(existing.article?.html||'')}`;
+          const hangul=(text.match(/[가-힣]/g)||[]).length;
+          const latin=(text.match(/[A-Za-z]/g)||[]).length;
+          if(hangul<12||hangul<latin*0.15) throw new Error('TARGET_NO_LONGER_KOREAN');
+          fs.appendFileSync(process.env.GITHUB_ENV,`TARGET_BLOG_ID=${blogId}\nTARGET_POST_ID=${postId}\n`);
+          console.log('HOMEFIX_KOREAN_TARGET_LOCKED same URL, LIVE, and visible Korean language; IDs not printed.');
+          NODE
+
+      - name: Build one English replacement through Writer Critic Repair pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { runNewArticlePipeline } from './worker/lib/pipeline.js';
+          import { validateArticle } from './worker/lib/contracts.js';
+          import { lintNaturalWriting } from './worker/lib/natural-writing-linter.js';
+          const env={API_HUB_BASE_URL:process.env.API_HUB_V2_BASE_URL,HUB_API_KEY:process.env.HUB_API_KEY};
+          let chosen=null;
+          for(let attempt=1;attempt<=3;attempt+=1){
+            const result=await runNewArticlePipeline(env,{blogId:process.env.TARGET_BLOG_ID,topic:process.env.ARTICLE_TOPIC,language:'en'},fetch,{onStage:async stage=>console.log(`candidate=${attempt}; stage=${stage}`)});
+            if(result.status!=='READY') continue;
+            if(result.finalCritic?.status!=='PASS'||Number(result.finalCritic?.score||0)<95||(result.finalCritic?.issues||[]).length!==0) continue;
+            const article=validateArticle(result.article);
+            const visible=String(article.html||'').replace(/<[^>]+>/g,' ');
+            if(article.language!=='en') throw new Error('ARTICLE_LANGUAGE_NOT_EN');
+            if(/[가-힣]/.test(`${article.title}\n${visible}`)) throw new Error('VISIBLE_KOREAN_REMAINED_IN_REPLACEMENT');
+            if(lintNaturalWriting(article).status==='BLOCK') continue;
+            chosen={article,finalCritic:result.finalCritic,attempt,research:result.research||null};
+            break;
+          }
+          if(!chosen) throw new Error('NO_READY_ENGLISH_CANDIDATE');
+          fs.writeFileSync('.homefix-korean-repair-ready.json',JSON.stringify({...chosen,images:[]}));
+          fs.chmodSync('.homefix-korean-repair-ready.json',0o600);
+          console.log(`ENGLISH_READY title=${chosen.article.title}; finalCritic=${chosen.finalCritic.score}; candidate=${chosen.attempt}; tavilyUsed=${Boolean(chosen.research?.used)}`);
+          NODE
+
+      - name: Generate replacement images with no text in source images
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          import { validateArticle } from './worker/lib/contracts.js';
+          import { buildImagePlan, attachStoredImages } from './worker/lib/image-plan.js';
+          import { postprocessThumbnail } from './worker/lib/thumbnail-postprocess.js';
+          const ready=JSON.parse(fs.readFileSync('.homefix-korean-repair-ready.json','utf8'));
+          const plan=buildImagePlan(ready.article,{bodyCount:2});
+          const rows=[];
+          try{
+            for(let i=0;i<plan.images.length;i+=1){
+              const image=plan.images[i];
+              const strictPrompt=`${image.prompt}\n\nSTRICT VISUAL RULE: photorealistic editorial home-maintenance image. Show only a plain residential shower fixture, water flow, plumbing hardware, hands/tools where useful, and neutral bathroom surfaces. No product packaging, control panels, labels, signs, screens, decorative lettering, letters, numbers, logos, watermarks, symbols, or text-like glyphs anywhere in the generated source image.`;
+              const r=await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/hub/image/generate`,{method:'POST',headers:{'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY},body:JSON.stringify({role:image.role,providerMode:'kie',prompt:strictPrompt,aspectRatio:image.role==='thumbnail'?'16:9':'4:3'})});
+              const g=await r.json().catch(()=>({}));
+              if(!r.ok||g.ok!==true) throw new Error(`KIE_IMAGE_${i}_FAILED:${g.error||r.status}`);
+              let bytes=Buffer.from(String(g.imageBase64||''),'base64');
+              let mime=String(g.mimeType||'').split(';')[0].trim().toLowerCase();
+              let hookText=null;
+              if(image.role==='thumbnail'){
+                const processed=await postprocessThumbnail(image,g);
+                bytes=Buffer.from(processed.bytes); mime=processed.mimeType; hookText=processed.hookText;
+              }
+              const ext=mime==='image/png'?'png':mime==='image/webp'?'webp':mime==='image/jpeg'?'jpg':'';
+              if(!ext||bytes.length<1000) throw new Error('IMAGE_OUTPUT_INVALID');
+              const localFile=`/tmp/homefix-korean-repair-${i}.${ext}`;
+              const storageKey=`jobs/homefix-korean-repair-${process.env.GITHUB_RUN_ID}/${image.role}-${image.position}.${ext}`;
+              fs.writeFileSync(localFile,bytes);
+              rows.push({id:950000+i,role:image.role,position:image.position,status:'stored',public_url:`${process.env.ORCHESTRATOR_BASE_URL}/media/${storageKey}`,alt_text:image.altText,storage_key:storageKey,mimeType:mime,localFile,hookText});
+            }
+            ready.article=validateArticle(attachStoredImages(ready.article,rows));
+            ready.images=rows;
+            console.log(`REPLACEMENT_IMAGES_READY count=${rows.length}; thumbnailHook=${rows.find(x=>x.role==='thumbnail')?.hookText||'none'}`);
+          }catch(error){
+            console.log(`REPLACEMENT_IMAGES_SKIPPED reason=${String(error.message||'unknown')}; proceeding without generated images rather than attaching unsafe/partial images.`);
+            for(const row of rows){try{fs.unlinkSync(row.localFile)}catch{}}
+            ready.images=[];
+          }
+          fs.writeFileSync('.homefix-korean-repair-ready.json',JSON.stringify(ready));
+          NODE
+
+      - name: Upload complete replacement image set to R2 and verify bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          COUNT="$(node -e "const fs=require('fs');const x=JSON.parse(fs.readFileSync('.homefix-korean-repair-ready.json'));process.stdout.write(String((x.images||[]).length))")"
+          if [ "$COUNT" = "0" ]; then echo 'No replacement images to upload.'; exit 0; fi
+          node --input-type=module - <<'NODE' > /tmp/homefix-korean-repair-r2.tsv
+          import fs from 'node:fs';
+          const ready=JSON.parse(fs.readFileSync('.homefix-korean-repair-ready.json','utf8'));
+          for(const image of ready.images) console.log([image.localFile,image.storage_key,image.mimeType].join('\t'));
+          NODE
+          while IFS=$'\t' read -r file key mime; do
+            CLOUDFLARE_API_TOKEN="$R2_API_TOKEN" npx --yes wrangler@latest r2 object put "$BUCKET_NAME/$key" --file "$file" --content-type "$mime" --remote
+          done < /tmp/homefix-korean-repair-r2.tsv
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          const ready=JSON.parse(fs.readFileSync('.homefix-korean-repair-ready.json','utf8'));
+          for(const image of ready.images){
+            const r=await fetch(image.public_url,{cache:'no-store'});
+            if(!r.ok) throw new Error(`MEDIA_HTTP_${r.status}`);
+            const remote=Buffer.from(await r.arrayBuffer());
+            if(!remote.equals(fs.readFileSync(image.localFile))) throw new Error(`MEDIA_BYTES_MISMATCH:${image.storage_key}`);
+          }
+          console.log(`R2_REPLACEMENTS_VERIFIED count=${ready.images.length}`);
+          NODE
+
+      - name: Prepare and enable exact-target single repair gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          const normal=JSON.parse(fs.readFileSync('api-hub-v2/wrangler.normal.jsonc','utf8'));
+          const repair=structuredClone(normal);
+          repair.vars.BLOGGER_WRITES_ENABLED='true';
+          repair.vars.BLOGGER_WRITE_MODE='phase2_single_repair';
+          repair.vars.PHASE2_SINGLE_REPAIR_BLOG_ID=process.env.TARGET_BLOG_ID;
+          repair.vars.PHASE2_SINGLE_REPAIR_POST_ID=process.env.TARGET_POST_ID;
+          fs.writeFileSync('api-hub-v2/wrangler.repair.jsonc',JSON.stringify(repair,null,2));
+          NODE
+          (cd api-hub-v2 && CLOUDFLARE_API_TOKEN="$DEPLOY_API_TOKEN" npx --yes wrangler@latest deploy --config wrangler.repair.jsonc --secrets-file .homefix-repair-secrets.json)
+
+      - name: Confirm exact repair gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          for(let i=0;i<20;i++){
+            const r=await fetch(`${process.env.API_HUB_V2_BASE_URL}/health?repair_gate=${Date.now()}_${i}`,{cache:'no-store'});
+            const h=await r.json().catch(()=>({}));
+            if(r.ok&&h.bloggerWritesEnabled===true&&h.bloggerWriteMode==='phase2_single_repair'&&h.tavilyConfigured===true){console.log('SINGLE_REPAIR_GATE_ACTIVE');process.exit(0)}
+            await sleep(1500);
+          }
+          throw new Error('SINGLE_REPAIR_GATE_NOT_READY');
+          NODE
+
+      - name: Update exactly the same Blogger Post ID in English and read back
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import fs from 'node:fs';
+          const ready=JSON.parse(fs.readFileSync('.homefix-korean-repair-ready.json','utf8'));
+          const visible=html=>String(html||'').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
+          async function call(path,body){
+            const r=await fetch(`${process.env.API_HUB_V2_BASE_URL}${path}`,{method:'POST',headers:{'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY},body:JSON.stringify(body)});
+            const data=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`${path}:${r.status}:${data.error||'REQUEST_FAILED'}`);
+            return data;
+          }
+          const updated=await call('/api/blogger/post',{phase2SingleRepair:true,operation:'update',blogId:process.env.TARGET_BLOG_ID,bloggerPostId:process.env.TARGET_POST_ID,article:ready.article});
+          if(String(updated.bloggerPostId||'')!==process.env.TARGET_POST_ID) throw new Error('POST_ID_CHANGED_DURING_REPAIR');
+          fs.writeFileSync('.homefix-update-call-succeeded','yes');
+          const verify=await call('/api/blogger/post/get',{blogId:process.env.TARGET_BLOG_ID,bloggerPostId:process.env.TARGET_POST_ID,language:'en'});
+          if(String(verify.identity?.bloggerPostId||'')!==process.env.TARGET_POST_ID) throw new Error('READBACK_POST_ID_MISMATCH');
+          if(String(verify.identity?.status||'').toUpperCase()!=='LIVE') throw new Error('REPAIRED_POST_NOT_LIVE');
+          if(new URL(String(verify.identity?.permalink||'')).pathname!==new URL(process.env.TARGET_URL).pathname) throw new Error('REPAIRED_URL_CHANGED');
+          const text=`${verify.article?.title||''}\n${visible(verify.article?.html||'')}`;
+          if(/[가-힣]/.test(text)) throw new Error('VISIBLE_KOREAN_REMAINED_AFTER_REPAIR');
+          for(const image of ready.images||[]){
+            if(!String(verify.article?.html||'').includes(image.public_url)) throw new Error(`REPLACEMENT_IMAGE_MISSING:${image.storage_key}`);
+            const r=await fetch(image.public_url,{cache:'no-store'});
+            if(!r.ok) throw new Error(`REPLACEMENT_IMAGE_BROKEN:${image.storage_key}`);
+          }
+          fs.writeFileSync('.homefix-repair-verified','yes');
+          console.log(`HOMEFIX_KOREAN_REPAIR_OK title=${verify.article.title}; status=LIVE; images=${(ready.images||[]).length}; finalCritic=${ready.finalCritic.score}`);
+          console.log(`HOMEFIX_PUBLIC_URL=${verify.identity.permalink}`);
+          NODE
+
+      - name: Restore API Hub Blogger writes disabled
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f api-hub-v2/wrangler.normal.jsonc ] && [ -f api-hub-v2/.homefix-repair-secrets.json ]; then
+            (cd api-hub-v2 && CLOUDFLARE_API_TOKEN="$DEPLOY_API_TOKEN" npx --yes wrangler@latest deploy --config wrangler.normal.jsonc --secrets-file .homefix-repair-secrets.json)
+          fi
+
+      - name: Verify final safety and exact post remains LIVE
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          let safe=false;
+          for(let i=0;i<20;i++){
+            const [hr,or]=await Promise.all([fetch(`${process.env.API_HUB_V2_BASE_URL}/health?repair_final=${Date.now()}_${i}`,{cache:'no-store'}),fetch(`${process.env.ORCHESTRATOR_BASE_URL}/health?repair_final=${Date.now()}_${i}`,{cache:'no-store'})]);
+            const [h,o]=await Promise.all([hr.json().catch(()=>({})),or.json().catch(()=>({}))]);
+            safe=hr.ok&&or.ok&&h.bloggerWritesEnabled===false&&h.bloggerWriteMode==='disabled'&&h.tavilyConfigured===true&&o.bloggerWritesEnabled===false&&o.phase2Automation?.autoPublishExecutionEnabled===false;
+            if(safe) break;
+            await sleep(1500);
+          }
+          if(!safe) throw new Error('FINAL_WRITE_GATES_NOT_DISABLED');
+          if(process.env.TARGET_POST_ID){
+            const r=await fetch(`${process.env.API_HUB_V2_BASE_URL}/api/blogger/post/get`,{method:'POST',headers:{'content-type':'application/json','x-hub-api-key':process.env.HUB_API_KEY},body:JSON.stringify({blogId:process.env.TARGET_BLOG_ID,bloggerPostId:process.env.TARGET_POST_ID,language:'en'})});
+            const data=await r.json().catch(()=>({}));
+            if(!r.ok||String(data.identity?.bloggerPostId||'')!==process.env.TARGET_POST_ID||String(data.identity?.status||'').toUpperCase()!=='LIVE') throw new Error('FINAL_POST_READBACK_FAILED');
+          }
+          console.log('FINAL_SAFETY_OK APIHubWrites=OFF; OrchestratorWrites=OFF; AutoPublish=OFF; Tavily=true');
+          NODE
+
+      - name: Delete orphan replacement images only when Blogger update never succeeded
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f .homefix-update-call-succeeded ]; then echo 'Blogger update succeeded; replacement images are retained even if later validation failed.'; exit 0; fi
+          if [ ! -f .homefix-korean-repair-ready.json ]; then exit 0; fi
+          node --input-type=module - <<'NODE' > /tmp/homefix-korean-repair-orphans.txt
+          import fs from 'node:fs';
+          const ready=JSON.parse(fs.readFileSync('.homefix-korean-repair-ready.json','utf8'));
+          for(const image of ready.images||[]) console.log(image.storage_key);
+          NODE
+          while IFS= read -r key; do
+            [ -n "$key" ] || continue
+            CLOUDFLARE_API_TOKEN="$R2_API_TOKEN" npx --yes wrangler@latest r2 object delete "$BUCKET_NAME/$key" --remote || true
+          done < /tmp/homefix-korean-repair-orphans.txt
+
+      - name: Cleanup local sensitive files
+        if: always()
+        run: rm -f .homefix-korean-repair-ready.json .homefix-update-call-succeeded .homefix-repair-verified api-hub-v2/.homefix-repair-secrets.json api-hub-v2/wrangler*.jsonc /tmp/homefix-korean-repair-* /tmp/homefix-korean-repair-orphans.txt

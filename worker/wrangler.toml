@@ -1,0 +1,14 @@
+name = "content-orchestrator"
+main = "index.js"
+compatibility_date = "2026-08-28"
+
+[vars]
+BLOGGER_WRITES_ENABLED = "false"
+HUB_WRITER_PATH = "/api/hub/ai/writer"
+HUB_CRITIC_PATH = "/api/hub/ai/critic"
+HUB_REPAIR_PATH = "/api/hub/ai/repair"
+HUB_CLOUDFLARE_DIAGNOSTIC_PATH = "/api/hub/ai/diagnostics/cloudflare"
+HUB_BLOGGER_POST_PATH = "/api/blogger/post"
+
+# Add a D1 binding named ORCHESTRATOR_DB during deployment.
+# Secrets are set in the Cloudflare dashboard / wrangler secret and never committed.

@@ -1,0 +1,59 @@
+name: HomeFix KIE Scene QA
+
+on:
+  push:
+    paths:
+      - '.github/homefix-kie-scene-qa-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      API_HUB_V2_KEY: ${{ secrets.API_HUB_V2_ORCHESTRATOR_API_KEY }}
+      EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      KIE_SCENE_QA_LIMIT: '1'
+      KIE_SCENE_QA_INDEX: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCR
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr
+      - name: Resolve API Hub key without printing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$API_HUB_V2_KEY" ]; then HUB_API_KEY="$API_HUB_V2_KEY"; else HUB_API_KEY="$EXISTING_ORCHESTRATOR_KEY"; fi
+          test -n "$HUB_API_KEY" || { echo 'Hub key missing'; exit 1; }
+          echo "HUB_API_KEY=$HUB_API_KEY" >> "$GITHUB_ENV"
+      - name: Probe scene-first KIE images with OCR gate
+        run: node scripts/homefix-kie-scene-qa.mjs
+      - name: Persist safe OCR diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .kie-scene-probe/result.json || exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mkdir -p diagnostics
+          cp .kie-scene-probe/result.json diagnostics/kie-scene-qa-latest.json
+          git add diagnostics/kie-scene-qa-latest.json
+          git diff --cached --quiet && exit 0
+          git commit -m 'Record KIE scene QA diagnostics [skip ci]'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+      - name: Upload probe images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: homefix-kie-scene-qa-${{ github.run_id }}
+          path: .kie-scene-probe/
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 3

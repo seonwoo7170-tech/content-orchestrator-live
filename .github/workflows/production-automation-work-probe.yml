@@ -1,0 +1,62 @@
+name: production-automation-work-probe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/production-automation-work-probe.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-automation-work-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      BASE_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Run one bounded work item and read back state
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          const beforeResp=await fetch(`${base}/api/operations/today`,{headers,cache:'no-store'});
+          const before=await beforeResp.json().catch(()=>({}));
+          if(!beforeResp.ok) throw new Error(`BEFORE_READ_FAILED:${beforeResp.status}`);
+          const beforeSlots=Array.isArray(before.slots)?before.slots:[];
+          const beforeResolved=beforeSlots.filter(s=>s.status==='resolved').length;
+          const beforeRetry=beforeSlots.filter(s=>s.recovery_state==='retry_wait').length;
+
+          const workResp=await fetch(`${base}/api/operations/work-tick?maxItems=1`,{
+            method:'POST',headers,body:'{}',cache:'no-store',signal:AbortSignal.timeout(180000)
+          });
+          const work=await workResp.json().catch(()=>({}));
+          if(workResp.status>=500) throw new Error(`WORK_TICK_FAILED:${workResp.status}:${String(work.error||'unknown').slice(0,80)}`);
+          const item=(Array.isArray(work.items)?work.items:[])[0]||{};
+          console.log(`WORK_PROBE_RESULT status=${workResp.status} attempted=${Number(work.attempted||0)} completed=${Number(work.completed||0)} failed=${Number(work.failed||0)} skipped=${Number(work.skipped||0)} blog=${String(item.blogName||'none')} kind=${String(item.kind||'none')} itemStatus=${String(item.status||'none')} recovery=${String(item.recovery?.recoveryState||'none')} code=${String(item.errorCode||'none')}`);
+
+          const [afterResp,recoveryResp]=await Promise.all([
+            fetch(`${base}/api/operations/today`,{headers,cache:'no-store'}),
+            fetch(`${base}/api/operations/recovery`,{headers,cache:'no-store'})
+          ]);
+          const [after,recovery]=await Promise.all([afterResp.json(),recoveryResp.json()]);
+          if(!afterResp.ok||!recoveryResp.ok) throw new Error('AFTER_READ_FAILED');
+          const afterSlots=Array.isArray(after.slots)?after.slots:[];
+          const afterResolved=afterSlots.filter(s=>s.status==='resolved').length;
+          const afterRetry=afterSlots.filter(s=>s.recovery_state==='retry_wait').length;
+          console.log(`WORK_PROBE_READBACK beforeResolved=${beforeResolved} afterResolved=${afterResolved} beforeRetryWait=${beforeRetry} afterRetryWait=${afterRetry} dueRetries=${Array.isArray(recovery.dueRetries)?recovery.dueRetries.length:0}`);
+          console.log('CHANGED_SLOTS',JSON.stringify(afterSlots.filter(s=>{
+            const b=beforeSlots.find(x=>Number(x.id)===Number(s.id));
+            return !b || b.status!==s.status || b.recovery_state!==s.recovery_state || b.job_id!==s.job_id || b.updated_at!==s.updated_at;
+          }).map(s=>({id:Number(s.id),blogName:s.blog_name,kind:s.kind,status:s.status,jobId:s.job_id?Number(s.job_id):null,recoveryState:s.recovery_state||'none',retryCount:Number(s.retry_count||0),nextRetryAt:s.next_retry_at||null,lastErrorCode:s.last_error_code||null,updatedAt:s.updated_at||null}))));
+          NODE

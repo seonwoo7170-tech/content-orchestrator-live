@@ -1,0 +1,44 @@
+name: Phase 4 Google Scope Probe
+
+on:
+  push:
+    paths:
+      - '.github/phase4-google-scope-probe-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_URL: https://api-hub-v2.smileseon.workers.dev
+    steps:
+      - name: Check Phase 4 Google scopes without exposing tokens
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$HUB_API_KEY" || { echo 'HUB_API_KEY is missing'; exit 1; }
+          node - <<'NODE'
+          const response = await fetch(`${process.env.API_HUB_URL}/api/google/scopes`, {
+            method: 'POST',
+            headers: {
+              'x-hub-api-key': process.env.HUB_API_KEY,
+              'content-type': 'application/json'
+            },
+            body: '{}'
+          });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(`GOOGLE_SCOPE_PROBE_HTTP_${response.status}:${String(data?.error || 'FAILED').split(':')[0]}`);
+          const flags = {
+            blogger: data.blogger === true,
+            searchConsole: data.searchConsole === true,
+            analytics: data.analytics === true,
+            adsense: data.adsense === true,
+            phase4Ready: data.phase4Ready === true
+          };
+          console.log(`PHASE4_GOOGLE_SCOPE_STATUS blogger=${flags.blogger?'yes':'no'} gsc=${flags.searchConsole?'yes':'no'} ga4=${flags.analytics?'yes':'no'} adsense=${flags.adsense?'yes':'no'} phase4Ready=${flags.phase4Ready?'yes':'no'}`);
+          NODE

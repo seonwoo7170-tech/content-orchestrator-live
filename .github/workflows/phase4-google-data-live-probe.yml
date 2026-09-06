@@ -1,0 +1,93 @@
+name: Phase 4 Google Data Live Probe
+
+on:
+  push:
+    paths:
+      - '.github/phase4-google-data-live-probe-trigger'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase4-google-data-live-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: production
+    env:
+      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+      ORCHESTRATOR_URL: https://content-orchestrator.smileseon.workers.dev
+    steps:
+      - name: Verify GSC and GA4 end-to-end readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ADMIN_API_KEY" || { echo 'ADMIN_API_KEY is missing'; exit 1; }
+          node - <<'NODE'
+          const base = process.env.ORCHESTRATOR_URL;
+          const headers = {'x-admin-api-key': process.env.ADMIN_API_KEY};
+          async function get(path) {
+            const r = await fetch(`${base}${path}`, {headers, cache:'no-store'});
+            const data = await r.json().catch(()=>({}));
+            if (!r.ok) throw new Error(`${path}:HTTP_${r.status}:${String(data?.error||'FAILED').split(':')[0]}`);
+            return data;
+          }
+          async function post(path) {
+            const r = await fetch(`${base}${path}`, {method:'POST', headers:{...headers,'content-type':'application/json'}, body:'{}'});
+            const data = await r.json().catch(()=>({}));
+            if (!r.ok && r.status !== 207) throw new Error(`${path}:HTTP_${r.status}:${String(data?.error||'FAILED').split(':')[0]}`);
+            return {status:r.status,data};
+          }
+
+          const health = await get('/health');
+          const blogs = await get('/api/blogs');
+          if (!Array.isArray(blogs.blogs) || !blogs.blogs.length) throw new Error('BLOGS_EMPTY');
+
+          const gscBefore = await get('/api/performance/gsc/today');
+          const ga4Before = await get('/api/performance/ga4/today');
+          if (gscBefore.collectionEnabled !== true) throw new Error('GSC_AUTOMATIC_COLLECTION_DISABLED');
+          if (ga4Before.collectionEnabled !== true) throw new Error('GA4_AUTOMATIC_COLLECTION_DISABLED');
+
+          const [gscProbe, ga4Probe] = await Promise.all([
+            post('/api/performance/gsc/collect'),
+            post('/api/performance/ga4/collect')
+          ]);
+          const gsc = gscProbe.data || {};
+          const ga4 = ga4Probe.data || {};
+          const gscCounts = {
+            sites:Number(gsc.siteCount||0), blogs:Number(gsc.blogCount||0), mapped:Number(gsc.mappedCount||0),
+            ok:Number(gsc.okCount||0), partial:Number(gsc.partialCount||0), failed:Number(gsc.failedCount||0)
+          };
+          const ga4Counts = {
+            properties:Number(ga4.propertyCount||0), streams:Number(ga4.webStreamCount||0), blogs:Number(ga4.blogCount||0),
+            mapped:Number(ga4.mappedCount||0), ok:Number(ga4.okCount||0), partial:Number(ga4.partialCount||0), failed:Number(ga4.failedCount||0), unmapped:Number(ga4.unmappedCount||0)
+          };
+          const ga4Unmapped = (Array.isArray(ga4.items) ? ga4.items : [])
+            .filter((item) => item?.mapped !== true)
+            .map((item) => ({blogId:String(item?.blogId||''), blogName:String(item?.blogName||''), matchType:String(item?.matchType||'unmapped')}));
+          console.log(`GOOGLE_DATA_GSC sites=${gscCounts.sites} blogs=${gscCounts.blogs} mapped=${gscCounts.mapped} ok=${gscCounts.ok} partial=${gscCounts.partial} failed=${gscCounts.failed}`);
+          console.log(`GOOGLE_DATA_GA4 properties=${ga4Counts.properties} streams=${ga4Counts.streams} blogs=${ga4Counts.blogs} mapped=${ga4Counts.mapped} ok=${ga4Counts.ok} partial=${ga4Counts.partial} failed=${ga4Counts.failed} unmapped=${ga4Counts.unmapped}`);
+          console.log(`GOOGLE_DATA_GA4_UNMAPPED ${JSON.stringify(ga4Unmapped)}`);
+
+          if (gscCounts.blogs !== blogs.blogs.length) throw new Error(`GSC_BLOG_COUNT_MISMATCH:${gscCounts.blogs}`);
+          if (gscCounts.sites < 1 || gscCounts.mapped < 1) throw new Error('GSC_NO_READABLE_PROPERTY');
+          if (gscCounts.failed > 0) throw new Error(`GSC_COLLECTION_FAILED:${gscCounts.failed}`);
+          if (ga4Counts.blogs !== blogs.blogs.length) throw new Error(`GA4_BLOG_COUNT_MISMATCH:${ga4Counts.blogs}`);
+          if (ga4Counts.properties < 1 || ga4Counts.mapped < 1) throw new Error('GA4_NO_READABLE_PROPERTY');
+          if (ga4Counts.failed > 0) throw new Error(`GA4_COLLECTION_FAILED:${ga4Counts.failed}`);
+
+          const [gscAfter, ga4After] = await Promise.all([
+            get('/api/performance/gsc/today'),
+            get('/api/performance/ga4/today')
+          ]);
+          if (!Array.isArray(gscAfter.properties) || gscAfter.properties.length !== blogs.blogs.length) throw new Error('GSC_READBACK_PROPERTY_COUNT_INVALID');
+          if (!Array.isArray(gscAfter.snapshots) || gscAfter.snapshots.length < gscCounts.mapped * 2) throw new Error('GSC_READBACK_SNAPSHOTS_MISSING');
+          if (!Array.isArray(ga4After.properties) || ga4After.properties.length !== blogs.blogs.length) throw new Error('GA4_READBACK_PROPERTY_COUNT_INVALID');
+          if (!Array.isArray(ga4After.snapshots) || ga4After.snapshots.length < ga4Counts.mapped * 2) throw new Error('GA4_READBACK_SNAPSHOTS_MISSING');
+
+          const writeSafe = health.bloggerWritesEnabled !== true || health.phase2Automation?.autoPublishExecutionEnabled !== true;
+          console.log(`GOOGLE_DATA_LIVE_READBACK_OK gscMapped=${gscCounts.mapped} ga4Mapped=${ga4Counts.mapped} gscSnapshots=${gscAfter.snapshots.length} ga4Snapshots=${ga4After.snapshots.length} writeSafetyObserved=${writeSafe?'yes':'no'}`);
+          NODE

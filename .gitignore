@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.dev.vars
+worker/.dev.vars
+wrangler.jsonc
+.deploy-secrets.json
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
