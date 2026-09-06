@@ -1,0 +1,48 @@
+name: Apply D1 read amplification fix
+
+on:
+  push:
+    branches:
+      - fix/d1-read-amplification-20260907
+    paths:
+      - .github/workflows/apply-d1-read-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/d1-read-amplification-20260907
+      - name: Patch hot D1 queries
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          workload_path = Path('worker/lib/adaptive-workload.js')
+          workload = workload_path.read_text()
+          old_query = """  const result = await requireDb(env).prepare(\n    `SELECT blog_id, status, recovery_state, updated_at, COUNT(*) AS count\n     FROM jobs\n     WHERE blog_id IS NOT NULL AND blog_id <> '' AND status <> 'completed'\n     GROUP BY blog_id, status, recovery_state, updated_at`\n  ).all();\n  const map = new Map();\n  for (const row of result.results || []) {\n    const blogId = String(row.blog_id || '');\n    if (!map.has(blogId)) map.set(blogId, { active: 0, failed: 0, needsReview: 0, retryWait: 0, held: 0 });\n    const signal = map.get(blogId);\n    const count = nonNegativeInteger(row.count);\n    const status = String(row.status || '');\n    const recoveryState = String(row.recovery_state || 'none');\n    if (ACTIVE_JOB_STATES.has(status)) signal.active += count;\n    if (failedJobBlocksWork(row, planDate)) signal.failed += count;\n    if (status === 'needs_review') signal.needsReview += count;\n    if (recoveryState === 'retry_wait') signal.retryWait += count;\n    if (recoveryState === 'held') signal.held += count;\n  }\n  return map;"""
+          new_query = """  const result = await requireDb(env).prepare(\n    `SELECT blog_id,\n            SUM(CASE WHEN status IN ('queued','writing','critic_review','repairing','final_critic','updating_existing','publishing_new') THEN 1 ELSE 0 END) AS active_count,\n            SUM(CASE WHEN status = 'failed' AND (recovery_state IN ('retry_wait','held') OR substr(updated_at, 1, 10) = ?) THEN 1 ELSE 0 END) AS failed_count,\n            SUM(CASE WHEN status = 'needs_review' THEN 1 ELSE 0 END) AS review_count,\n            SUM(CASE WHEN recovery_state = 'retry_wait' THEN 1 ELSE 0 END) AS retry_wait_count,\n            SUM(CASE WHEN recovery_state = 'held' THEN 1 ELSE 0 END) AS held_count\n     FROM jobs\n     WHERE archived_at IS NULL\n       AND blog_id IS NOT NULL AND blog_id <> ''\n       AND status <> 'completed'\n     GROUP BY blog_id`\n  ).bind(planDate).all();\n  const map = new Map();\n  for (const row of result.results || []) {\n    const blogId = String(row.blog_id || '');\n    if (!blogId) continue;\n    map.set(blogId, {\n      active: nonNegativeInteger(row.active_count),\n      failed: nonNegativeInteger(row.failed_count),\n      needsReview: nonNegativeInteger(row.review_count),\n      retryWait: nonNegativeInteger(row.retry_wait_count),\n      held: nonNegativeInteger(row.held_count)\n    });\n  }\n  return map;"""
+          if old_query not in workload:
+              raise SystemExit('adaptive workload query shape changed; refusing blind patch')
+          workload_path.write_text(workload.replace(old_query, new_query))
+
+          diagnostics_path = Path('worker/lib/daily-diagnostics.js')
+          diagnostics = diagnostics_path.read_text()
+          old_diag = """     FROM jobs\n     WHERE status <> 'completed'\n     ORDER BY id DESC`"""
+          new_diag = """     FROM jobs\n     WHERE archived_at IS NULL\n       AND status <> 'completed'\n     ORDER BY id DESC`"""
+          if old_diag not in diagnostics:
+              raise SystemExit('daily diagnostics query shape changed; refusing blind patch')
+          diagnostics_path.write_text(diagnostics.replace(old_diag, new_diag))
+
+          Path('tests/d1-read-budget.test.mjs').write_text("""import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n\nconst workload = fs.readFileSync(new URL('../worker/lib/adaptive-workload.js', import.meta.url), 'utf8');\nconst diagnostics = fs.readFileSync(new URL('../worker/lib/daily-diagnostics.js', import.meta.url), 'utf8');\n\ntest('daily planning reads only the active job queue and aggregates once per blog', () => {\n  assert.match(workload, /WHERE archived_at IS NULL/);\n  assert.match(workload, /SUM\\(CASE WHEN status IN/);\n  assert.match(workload, /GROUP BY blog_id`/);\n  assert.doesNotMatch(workload, /GROUP BY blog_id, status, recovery_state, updated_at/);\n});\n\ntest('daily diagnostics exclude archived historical jobs from repeated self-heal reads', () => {\n  assert.match(diagnostics, /FROM jobs\\s+WHERE archived_at IS NULL\\s+AND status <> 'completed'/);\n});\n""")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker/lib/adaptive-workload.js worker/lib/daily-diagnostics.js tests/d1-read-budget.test.mjs
+          git commit -m "Reduce repeated D1 job history scans"
+          git push origin HEAD:fix/d1-read-amplification-20260907
