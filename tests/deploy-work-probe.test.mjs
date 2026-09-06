@@ -4,16 +4,21 @@ import { readFile } from 'node:fs/promises';
 
 const workflow = await readFile(new URL('../.github/workflows/deploy-cloudflare.yml', import.meta.url), 'utf8');
 
-test('deployment fails on Worker HTTP 5xx but treats transport reset as inconclusive', () => {
-  assert.match(workflow, /PRODUCTION_WORK_TICK_FAILED/);
-  assert.match(workflow, /hardFailure:true/);
-  assert.match(workflow, /PRODUCTION_WORK_TICK_INCONCLUSIVE/);
-  assert.match(workflow, /PRODUCTION_PROGRESS_READBACK_FAILED/);
-  assert.match(workflow, /PRODUCTION_AUTOMATION_GATE_READBACK_FAILED/);
+test('public production deploy preserves runtime secrets and requires only Cloudflare deployment credentials', () => {
+  assert.match(workflow, /CLOUDFLARE_DEPLOY_API_TOKEN/);
+  assert.match(workflow, /CLOUDFLARE_ACCOUNT_ID/);
+  assert.doesNotMatch(workflow, /secrets\.HUB_API_KEY/);
+  assert.doesNotMatch(workflow, /secrets\.ADMIN_API_KEY/);
+  assert.doesNotMatch(workflow, /--secrets-file/);
+  assert.match(workflow, /wrangler@latest deploy --config wrangler\.jsonc/);
 });
 
-test('inconclusive probe is followed by health, today and recovery readback', () => {
-  assert.match(workflow, /\/api\/operations\/today/);
-  assert.match(workflow, /\/api\/operations\/recovery/);
-  assert.match(workflow, /\/health\?probe=/);
+test('public deployment readback verifies production automation gates without exposing admin credentials', () => {
+  assert.match(workflow, /Production public health read-back/);
+  assert.match(workflow, /\/health\?deploy=/);
+  assert.match(workflow, /bloggerWritesEnabled===true/);
+  assert.match(workflow, /phase2Automation\?\.autoPublishExecutionEnabled===true/);
+  assert.match(workflow, /PRODUCTION_PUBLIC_HEALTH_READBACK_FAILED/);
+  assert.doesNotMatch(workflow, /x-admin-api-key/);
+  assert.doesNotMatch(workflow, /\/api\/operations\/work-tick/);
 });
