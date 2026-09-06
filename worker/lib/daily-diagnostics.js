@@ -105,7 +105,8 @@ async function openJobs(env) {
   const result = await requireDb(env).prepare(
     `SELECT id, mode, blog_id, status, updated_at
      FROM jobs
-     WHERE status <> 'completed'
+     WHERE archived_at IS NULL
+       AND status <> 'completed'
      ORDER BY id DESC`
   ).all();
   return result.results || [];
