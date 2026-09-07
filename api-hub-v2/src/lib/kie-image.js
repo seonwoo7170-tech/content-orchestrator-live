@@ -1,6 +1,9 @@
 const DEFAULT_KIE_BASE_URL = 'https://api.kie.ai';
 const DEFAULT_KIE_MODEL = 'z-image';
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+const DEFAULT_KIE_TASK_TIMEOUT_MS = 15 * 60 * 1000;
+const MIN_KIE_TASK_TIMEOUT_MS = 5 * 60 * 1000;
+const MAX_KIE_TASK_TIMEOUT_MS = 30 * 60 * 1000;
 const PENDING_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);
 
 function requiredKey(env) {
@@ -23,6 +26,42 @@ function safeModel(env) {
   const model = String(env?.KIE_IMAGE_MODEL || DEFAULT_KIE_MODEL).trim();
   if (model !== DEFAULT_KIE_MODEL) throw Object.assign(new Error('KIE_IMAGE_MODEL_NOT_ALLOWED'), { status: 500 });
   return model;
+}
+
+export function kieCallbackUrl(env = {}) {
+  const raw = String(env?.KIE_IMAGE_CALLBACK_URL || '').trim();
+  if (!raw) return '';
+  let url;
+  try { url = new URL(raw); } catch { throw Object.assign(new Error('KIE_IMAGE_CALLBACK_URL_INVALID'), { status: 500 }); }
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash) {
+    throw Object.assign(new Error('KIE_IMAGE_CALLBACK_URL_INVALID'), { status: 500 });
+  }
+  return url.href;
+}
+
+export function kieTaskTimeoutMs(env = {}) {
+  const configured = Number(env?.KIE_IMAGE_TASK_TIMEOUT_MS ?? DEFAULT_KIE_TASK_TIMEOUT_MS);
+  if (!Number.isInteger(configured) || configured < MIN_KIE_TASK_TIMEOUT_MS || configured > MAX_KIE_TASK_TIMEOUT_MS) {
+    return DEFAULT_KIE_TASK_TIMEOUT_MS;
+  }
+  return configured;
+}
+
+function providerTimestampMs(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number < 1_000_000_000_000 ? Math.trunc(number * 1000) : Math.trunc(number);
+}
+
+export function kieTaskAgeMs(task, nowMs = Date.now()) {
+  const createdAt = providerTimestampMs(task?.createTime);
+  if (!createdAt) return 0;
+  return Math.max(0, Number(nowMs) - createdAt);
+}
+
+export function kieTaskTimedOut(task, env = {}, nowMs = Date.now()) {
+  const ageMs = kieTaskAgeMs(task, nowMs);
+  return ageMs > 0 && ageMs >= kieTaskTimeoutMs(env);
 }
 
 export function normalizeAspectRatio(value, role) {
@@ -182,6 +221,17 @@ export async function startKieImageTask(env, { role, prompt, aspectRatio }, fetc
   const apiKey = requiredKey(env);
   const baseUrl = safeBaseUrl(env);
   const model = safeModel(env);
+  const callbackUrl = kieCallbackUrl(env);
+  const body = {
+    model,
+    input: {
+      prompt: safePromptForKie(prompt),
+      aspect_ratio: normalizeAspectRatio(aspectRatio, role),
+      nsfw_checker: true
+    }
+  };
+  if (callbackUrl) body.callBackUrl = callbackUrl;
+
   const create = await jsonRequest(
     fetchImpl,
     `${baseUrl}/api/v1/jobs/createTask`,
@@ -191,14 +241,7 @@ export async function startKieImageTask(env, { role, prompt, aspectRatio }, fetc
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json'
       },
-      body: JSON.stringify({
-        model,
-        input: {
-          prompt: safePromptForKie(prompt),
-          aspect_ratio: normalizeAspectRatio(aspectRatio, role),
-          nsfw_checker: true
-        }
-      })
+      body: JSON.stringify(body)
     },
     'KIE_CREATE_TASK_FAILED'
   );
@@ -212,7 +255,8 @@ export async function startKieImageTask(env, { role, prompt, aspectRatio }, fetc
     taskId,
     state: 'waiting',
     pending: true,
-    complete: false
+    complete: false,
+    callback: Boolean(callbackUrl)
   };
 }
 
@@ -232,6 +276,18 @@ export async function pollKieImageTask(env, taskId, fetchImpl = fetch) {
   const state = String(task.state || '').trim().toLowerCase();
   if (state === 'fail') throw kieTaskFailure(task);
   if (state !== 'success') {
+    if (kieTaskTimedOut(task, env)) {
+      const error = Object.assign(new Error('KIE_TASK_TIMEOUT'), {
+        status: 504,
+        taskId: normalizedTaskId,
+        taskState: PENDING_STATES.has(state) ? state : (state || 'waiting'),
+        taskAgeMs: kieTaskAgeMs(task),
+        taskTimeoutMs: kieTaskTimeoutMs(env)
+      });
+      const progress = Number(task?.progress);
+      if (Number.isFinite(progress)) error.progress = progress;
+      throw error;
+    }
     return {
       ok: true,
       provider: 'kie-ai',
