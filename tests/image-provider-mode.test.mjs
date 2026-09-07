@@ -8,9 +8,10 @@ test('automatic image routing is always the default', () => {
   assert.equal(imageProviderMode({ KIE_IMAGE_FALLBACK_ENABLED: 'false' }), 'auto');
 });
 
-test('automatic image routing is KIE first then Cloudflare', () => {
-  assert.deepEqual(imageProviderSequence('auto'), ['kie', 'cloudflare']);
+test('automatic image routing is KIE first, ModelScope second, then Cloudflare', () => {
+  assert.deepEqual(imageProviderSequence('auto'), ['kie', 'modelscope', 'cloudflare']);
   assert.deepEqual(imageProviderSequence('kie'), ['kie']);
+  assert.deepEqual(imageProviderSequence('modelscope'), ['modelscope']);
   assert.deepEqual(imageProviderSequence('cloudflare'), ['cloudflare']);
 });
 
@@ -18,6 +19,7 @@ test('explicit provider mode is respected without inspecting provider secrets in
   assert.equal(imageProviderMode({ IMAGE_PROVIDER_MODE: 'cloudflare' }), 'cloudflare');
   assert.equal(imageProviderMode({ IMAGE_PROVIDER_MODE: 'auto' }), 'auto');
   assert.equal(imageProviderMode({ IMAGE_PROVIDER_MODE: 'kie' }), 'kie');
+  assert.equal(imageProviderMode({ IMAGE_PROVIDER_MODE: 'modelscope' }), 'modelscope');
   assert.throws(() => imageProviderMode({ IMAGE_PROVIDER_MODE: 'unknown' }), /IMAGE_PROVIDER_MODE_INVALID/);
 });
 
