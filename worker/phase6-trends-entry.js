@@ -4,6 +4,7 @@ import { loadConnectedBlogs } from './lib/connected-blogs.js';
 import { readAutomationSettings } from './lib/automation-settings.js';
 import { listKeywordRankings, listTrendInsights, refreshTrendKeywords } from './lib/trend-keywords.js';
 import { handleHubWriterTransportDiagnostic, HUB_WRITER_TRANSPORT_DIAGNOSTIC_PATH } from './lib/hub-writer-transport-diagnostic.js';
+import { handleKieImageCallback, KIE_IMAGE_CALLBACK_PATH } from './lib/kie-image-callback.js';
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -77,6 +78,9 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     try {
+      if (url.pathname === KIE_IMAGE_CALLBACK_PATH) {
+        return await handleKieImageCallback(request, env, ctx);
+      }
       if (request.method === 'POST' && url.pathname === HUB_WRITER_TRANSPORT_DIAGNOSTIC_PATH) {
         return await handleHubWriterTransportDiagnostic(request, env);
       }
