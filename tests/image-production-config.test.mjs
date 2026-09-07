@@ -9,10 +9,11 @@ const phase5OpsTick = fs.readFileSync(new URL('../worker/phase5-ops-tick.js', im
 const imageCompletion = fs.readFileSync(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
 const resilientImageExecutor = fs.readFileSync(new URL('../worker/lib/image-executor-resilient.js', import.meta.url), 'utf8');
 
-test('production image routing is ModelScope-first, async-resumable, serial per article, and local fallback is disabled', () => {
+test('legacy production maintenance mode disables remote image starts while preserving resumable executor code', () => {
+  assert.equal(config.vars.SYSTEM_PAUSED, 'true');
   assert.equal(config.vars.IMAGE_PROVIDER_MODE, 'auto');
-  assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'true');
-  assert.equal(config.vars.KIE_IMAGE_FALLBACK_ENABLED, 'true');
+  assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'false');
+  assert.equal(config.vars.KIE_IMAGE_FALLBACK_ENABLED, 'false');
   assert.equal(config.vars.LOCAL_IMAGE_FALLBACK_ENABLED, 'false');
   assert.equal(Number(config.vars.IMAGE_STAGE_PACING_MS), 0);
   assert.equal(Number(config.vars.IMAGE_COMPLETION_MAX_ITEMS), 1);
@@ -32,7 +33,7 @@ test('production image routing is ModelScope-first, async-resumable, serial per 
   assert.doesNotMatch(resilientImageExecutor, /localFallback:\s*true/);
 });
 
-test('text AI stages use a four-second pacing interval', () => {
+test('text AI stages retain a four-second pacing interval in preserved code', () => {
   assert.equal(Number(config.vars.AI_STAGE_PACING_MS), 4000);
 });
 

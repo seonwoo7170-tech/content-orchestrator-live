@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "content-orchestrator",
-  "main": "worker/mcp-entry.js",
+  "main": "worker/maintenance-entry.js",
   "compatibility_date": "2026-08-28",
   "workers_dev": true,
   "triggers": {
@@ -36,6 +36,7 @@
     }
   ],
   "vars": {
+    "SYSTEM_PAUSED": "true",
     "API_HUB_BASE_URL": "https://api-hub-v2.smileseon.workers.dev",
     "HUB_REQUEST_TIMEOUT_MS": "180000",
     "AI_STAGE_PACING_MS": "4000",

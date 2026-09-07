@@ -52,9 +52,10 @@ test('full-rewrite continuation resumes at Critic but protected jobs never claim
   );
 });
 
-test('scheduled wrapper uses a 3-minute watchdog, 30-second serial cooldown and keeps legacy maintenance isolated', async () => {
-  const [entry, wrangler] = await Promise.all([
+test('preserved scheduler code remains isolated behind a production maintenance wrapper', async () => {
+  const [entry, wrapper, wrangler] = await Promise.all([
     readFile(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8'),
+    readFile(new URL('../worker/maintenance-entry.js', import.meta.url), 'utf8'),
     readFile(new URL('../wrangler.example.jsonc', import.meta.url), 'utf8')
   ]);
   assert.match(entry, /WATCHDOG_CRON = '\*\/3 \* \* \* \*'/);
@@ -70,7 +71,11 @@ test('scheduled wrapper uses a 3-minute watchdog, 30-second serial cooldown and 
   assert.match(entry, /LEGACY_SCHEDULED_CHAIN_FAILED/);
   assert.match(entry, /SCHEDULED_AUTOMATIC_WORK_FAILED/);
   assert.match(entry, /SERIAL_AI_WATCHDOG/);
-  assert.match(wrangler, /"crons":\s*\["\*\/3 \* \* \* \*", "\*\/5 \* \* \* \*"\]/);
+  assert.match(wrapper, /if \(systemPaused\(env\)\)/);
+  assert.match(wrapper, /SYSTEM_PAUSED_SCHEDULE_SKIPPED/);
+  assert.match(wrangler, /"main":\s*"worker\/maintenance-entry\.js"/);
+  assert.match(wrangler, /"crons":\s*\[\]/);
+  assert.match(wrangler, /"SYSTEM_PAUSED":\s*"true"/);
   assert.match(wrangler, /"SERIAL_AI_COOLDOWN_MS":\s*"30000"/);
   assert.match(wrangler, /"DAILY_WORK_MAX_ITEMS":\s*"1"/);
   assert.match(wrangler, /"JOB_RECOVERY_MAX_ITEMS":\s*"1"/);

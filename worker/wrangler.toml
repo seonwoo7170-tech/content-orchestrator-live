@@ -3,6 +3,7 @@ main = "index.js"
 compatibility_date = "2026-08-28"
 
 [vars]
+SYSTEM_PAUSED = "true"
 BLOGGER_WRITES_ENABLED = "false"
 HUB_WRITER_PATH = "/api/hub/ai/writer"
 HUB_CRITIC_PATH = "/api/hub/ai/critic"

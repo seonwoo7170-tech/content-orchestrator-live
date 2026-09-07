@@ -65,6 +65,8 @@ jobs:
           const fs=require('node:fs');
           const text=fs.readFileSync('wrangler.jsonc','utf8');
           for (const needle of [
+            '"SYSTEM_PAUSED": "true"',
+            '"main": "worker/maintenance-entry.js"',
             '"HUB_REQUEST_TIMEOUT_MS": "180000"',
             '"BLOGGER_WRITES_ENABLED": "false"',
             '"AUTO_PUBLISH_EXECUTION_ENABLED": "false"',
@@ -108,11 +110,20 @@ jobs:
           for(let i=1;i<=20;i++){
             const response=await fetch(`${base}/health?deploy=${Date.now()}_${i}`,{cache:'no-store'});
             const health=await response.json().catch(()=>({}));
+            const pausedProbe=await fetch(`${base}/mcp?pause_probe=${Date.now()}_${i}`,{
+              method:'POST',
+              headers:{'content-type':'application/json'},
+              body:'{}'
+            });
+            const pausedBody=await pausedProbe.json().catch(()=>({}));
             const ok=response.ok
+              && health.systemPaused===true
               && health.bloggerWritesEnabled===false
-              && health.phase2Automation?.autoPublishExecutionEnabled===false;
+              && health.phase2Automation?.autoPublishExecutionEnabled===false
+              && pausedProbe.status===503
+              && pausedBody.error==='SYSTEM_PAUSED';
             if(ok){
-              console.log(`PRODUCTION_PUBLIC_HEALTH_PAUSED bloggerWrites=${health.bloggerWritesEnabled} autoPublish=${health.phase2Automation?.autoPublishExecutionEnabled}`);
+              console.log(`PRODUCTION_PUBLIC_HEALTH_PAUSED systemPaused=${health.systemPaused} bloggerWrites=${health.bloggerWritesEnabled} autoPublish=${health.phase2Automation?.autoPublishExecutionEnabled} mutationStatus=${pausedProbe.status}`);
               process.exit(0);
             }
             await sleep(1000);

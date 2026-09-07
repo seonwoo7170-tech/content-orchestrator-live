@@ -11,6 +11,7 @@ import {
 import { isTrendRefreshDue } from '../worker/phase6-trends-entry.js';
 
 const wrangler = fs.readFileSync(new URL('../wrangler.example.jsonc', import.meta.url), 'utf8');
+const maintenanceEntry = fs.readFileSync(new URL('../worker/maintenance-entry.js', import.meta.url), 'utf8');
 const mcpEntry = fs.readFileSync(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');
 const ui = fs.readFileSync(new URL('../web/trend-insights.js', import.meta.url), 'utf8');
 const sw = fs.readFileSync(new URL('../web/sw.js', import.meta.url), 'utf8');
@@ -68,10 +69,12 @@ test('trend refresh runs only at configured KST slots', () => {
   assert.equal(isTrendRefreshDue(env, new Date('2026-09-03T04:40:00.000Z')), false);
 });
 
-test('runtime and UI clearly separate Trends, GSC average position and estimated SEO competition behind MCP wrapper', () => {
-  assert.match(wrangler, /"main": "worker\/mcp-entry\.js"/);
+test('runtime and UI preserve Trends code behind a globally paused maintenance wrapper', () => {
+  assert.match(wrangler, /"main": "worker\/maintenance-entry\.js"/);
+  assert.match(wrangler, /"SYSTEM_PAUSED": "true"/);
+  assert.match(maintenanceEntry, /import app from '\.\/mcp-entry\.js'/);
   assert.match(mcpEntry, /import app from '\.\/phase6-trends-entry\.js'/);
-  assert.match(wrangler, /"TREND_KEYWORDS_ENABLED": "true"/);
+  assert.match(wrangler, /"TREND_KEYWORDS_ENABLED": "false"/);
   assert.match(ui, /Google Trends/);
   assert.match(ui, /Google Ads 경쟁률이 아닌 Smileseon 내부 추정치/);
   assert.match(ui, /평균/);
