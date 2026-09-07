@@ -7,9 +7,11 @@ const baseEntry = fs.readFileSync(new URL('../worker/entry.js', import.meta.url)
 const phase5Entry = fs.readFileSync(new URL('../worker/phase5-entry.js', import.meta.url), 'utf8');
 const phase5OpsTick = fs.readFileSync(new URL('../worker/phase5-ops-tick.js', import.meta.url), 'utf8');
 const imageCompletion = fs.readFileSync(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
+const resilientImageExecutor = fs.readFileSync(new URL('../worker/lib/image-executor-resilient.js', import.meta.url), 'utf8');
 
-test('production image routing is KIE-first, async-resumable, serial per article, and local fallback is disabled', () => {
+test('production image routing is ModelScope-first, async-resumable, serial per article, and local fallback is disabled', () => {
   assert.equal(config.vars.IMAGE_PROVIDER_MODE, 'auto');
+  assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'true');
   assert.equal(config.vars.KIE_IMAGE_FALLBACK_ENABLED, 'true');
   assert.equal(config.vars.LOCAL_IMAGE_FALLBACK_ENABLED, 'false');
   assert.equal(Number(config.vars.IMAGE_STAGE_PACING_MS), 0);
@@ -22,8 +24,12 @@ test('production image routing is KIE-first, async-resumable, serial per article
   assert.equal(Number(config.vars.SERIAL_IMAGE_CHAIN_START_CUTOFF_MS), 130000);
   assert.equal(Number(config.vars.SERIAL_IMAGE_CHAIN_MAX_ITEMS), 8);
   assert.equal(Number(config.vars.SERIAL_IMAGE_LEASE_TTL_SECONDS), 210);
-  assert.match(imageCompletion, /localFallback:\s*env\?\.LOCAL_IMAGE_FALLBACK_ENABLED === 'true'/);
+  assert.match(imageCompletion, /localFallback:\s*false/);
   assert.match(imageCompletion, /maxImages:\s*1/);
+  assert.match(resilientImageExecutor, /attempts === 0 && modelScopeImageEnabled\(env\)\) return 'modelscope'/);
+  assert.match(resilientImageExecutor, /provider === 'modelscope'\) return 'kie'/);
+  assert.match(resilientImageExecutor, /IMAGE_PROVIDER_MODE: 'cloudflare'/);
+  assert.doesNotMatch(resilientImageExecutor, /localFallback:\s*true/);
 });
 
 test('text AI stages use a four-second pacing interval', () => {
