@@ -21,11 +21,14 @@ test('failed image work remains retryable without introducing concurrent image e
   assert.match(source, /Math\.max\(3, Math\.min\(60, Number\(options\.failedRetryCooldownMinutes \?\? 10\)/);
 });
 
-test('scheduled image lane stays on one article, polls active KIE work, and cools down only between articles', () => {
+test('scheduled image lane stays on one article, resumes async work, and cools down only between articles', () => {
   assert.match(source, /SERIAL_IMAGE_POLL_INTERVAL_MS/);
   assert.match(source, /SERIAL_ARTICLE_IMAGE_COOLDOWN_MS/);
   assert.match(source, /completeReadyJobImages\(env, candidate, effective, \{ \.\.\.options, maxImages: 1 \}\)/);
-  assert.match(source, /if \(Number\(item\?\.pending \|\| 0\) > 0\) \{\s*await sleep\(pollIntervalMs\)/s);
+  assert.match(source, /if \(Number\(item\?\.pending \|\| 0\) > 0\) \{/);
+  assert.match(source, /if \(callbackMode && String\(item\?\.pendingProvider \|\| ''\) === 'kie-ai'\)/);
+  assert.match(source, /AWAITING_KIE_CALLBACK/);
+  assert.match(source, /await sleep\(pollIntervalMs\)/);
   assert.match(source, /if \(!item\?\.complete\) break/);
   assert.match(source, /await sleep\(articleCooldownMs\)/);
 });
