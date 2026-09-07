@@ -58,7 +58,7 @@ jobs:
           echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
       - name: Render Wrangler config
         run: node scripts/render-wrangler.mjs
-      - name: Validate production automation gates
+      - name: Validate production pause gates
         shell: bash
         run: |
           node - <<'NODE'
@@ -66,20 +66,21 @@ jobs:
           const text=fs.readFileSync('wrangler.jsonc','utf8');
           for (const needle of [
             '"HUB_REQUEST_TIMEOUT_MS": "180000"',
-            '"BLOGGER_WRITES_ENABLED": "true"',
-            '"AUTO_PUBLISH_EXECUTION_ENABLED": "true"',
-            '"DAILY_WORK_EXECUTION_ENABLED": "true"',
-            '"JOB_RECOVERY_EXECUTION_ENABLED": "true"',
-            '"DAILY_NEW_PER_BLOG": "2"',
-            '"DAILY_REPAIR_PER_BLOG": "2"',
-            '"SERIAL_AI_COOLDOWN_MS": "30000"',
-            '"SERIAL_AI_CHAIN_MAX_ITEMS": "4"',
-            '"IMAGE_STAGE_PACING_MS": "0"',
-            '"SERIAL_IMAGE_COOLDOWN_MS": "0"',
-            '"SERIAL_IMAGE_POLL_INTERVAL_MS": "5000"',
-            '"SERIAL_ARTICLE_IMAGE_COOLDOWN_MS": "10000"',
-            '"crons": ["*/3 * * * *", "*/5 * * * *"]'
-          ]) if (!text.includes(needle)) throw new Error(`PRODUCTION_GATE_INVALID:${needle}`);
+            '"BLOGGER_WRITES_ENABLED": "false"',
+            '"AUTO_PUBLISH_EXECUTION_ENABLED": "false"',
+            '"DAILY_WORK_EXECUTION_ENABLED": "false"',
+            '"JOB_RECOVERY_EXECUTION_ENABLED": "false"',
+            '"GSC_COLLECTION_ENABLED": "false"',
+            '"GA4_COLLECTION_ENABLED": "false"',
+            '"ADSENSE_COLLECTION_ENABLED": "false"',
+            '"MODELSCOPE_IMAGE_ENABLED": "false"',
+            '"KIE_IMAGE_CALLBACK_ENABLED": "false"',
+            '"KIE_IMAGE_FALLBACK_ENABLED": "false"',
+            '"TREND_KEYWORDS_ENABLED": "false"',
+            '"DAILY_NEW_PER_BLOG": "0"',
+            '"DAILY_REPAIR_PER_BLOG": "0"',
+            '"crons": []'
+          ]) if (!text.includes(needle)) throw new Error(`PRODUCTION_PAUSE_GATE_INVALID:${needle}`);
           NODE
       - name: Decide D1 migration mode
         id: d1_migrations
@@ -108,13 +109,13 @@ jobs:
             const response=await fetch(`${base}/health?deploy=${Date.now()}_${i}`,{cache:'no-store'});
             const health=await response.json().catch(()=>({}));
             const ok=response.ok
-              && health.bloggerWritesEnabled===true
-              && health.phase2Automation?.autoPublishExecutionEnabled===true;
+              && health.bloggerWritesEnabled===false
+              && health.phase2Automation?.autoPublishExecutionEnabled===false;
             if(ok){
-              console.log(`PRODUCTION_PUBLIC_HEALTH_OK bloggerWrites=${health.bloggerWritesEnabled} autoPublish=${health.phase2Automation?.autoPublishExecutionEnabled}`);
+              console.log(`PRODUCTION_PUBLIC_HEALTH_PAUSED bloggerWrites=${health.bloggerWritesEnabled} autoPublish=${health.phase2Automation?.autoPublishExecutionEnabled}`);
               process.exit(0);
             }
             await sleep(1000);
           }
-          throw new Error('PRODUCTION_PUBLIC_HEALTH_READBACK_FAILED');
+          throw new Error('PRODUCTION_PUBLIC_HEALTH_PAUSE_READBACK_FAILED');
           NODE
