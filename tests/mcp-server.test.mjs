@@ -159,9 +159,11 @@ test('modern header mismatch is rejected before tool execution', async () => {
   assert.equal(downstream.calls.length, 0);
 });
 
-test('worker config routes /mcp to the MCP entrypoint', () => {
+test('worker config routes /mcp through the production maintenance wrapper to the MCP entrypoint', () => {
   const wrangler = readFileSync(new URL('../wrangler.example.jsonc', import.meta.url), 'utf8');
-  assert.match(wrangler, /"main": "worker\/mcp-entry\.js"/);
+  const maintenanceEntry = readFileSync(new URL('../worker/maintenance-entry.js', import.meta.url), 'utf8');
+  assert.match(wrangler, /"main": "worker\/maintenance-entry\.js"/);
+  assert.match(maintenanceEntry, /import app from '\.\/mcp-entry\.js'/);
   assert.match(wrangler, /"\/mcp"/);
   assert.ok(MCP_TOOLS.length >= 10);
 });
