@@ -34,6 +34,7 @@
     "IMAGE_MODEL": "@cf/black-forest-labs/flux-1-schnell",
     "KIE_IMAGE_MODEL": "z-image",
     "KIE_API_BASE_URL": "https://api.kie.ai",
+    "KIE_IMAGE_CALLBACK_URL": "https://content-orchestrator.smileseon.workers.dev/api/kie/image-callback",
     "BLOGGER_WRITES_ENABLED": "REPLACE_WITH_BLOGGER_WRITES_ENABLED",
     "BLOGGER_WRITE_MODE": "REPLACE_WITH_BLOGGER_WRITE_MODE",
     "BLOGGER_WRITE_ALLOWED_BLOG_IDS": "REPLACE_WITH_BLOGGER_WRITE_ALLOWED_BLOG_IDS",
