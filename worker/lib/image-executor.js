@@ -10,7 +10,7 @@ import {
 import { generateLocalFallbackImage } from './local-image-fallback.js';
 import { postprocessThumbnail } from './thumbnail-postprocess.js';
 
-const IMAGE_PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie']);
+const IMAGE_PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie', 'modelscope']);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,7 +128,7 @@ export function imageProviderMode(env = {}) {
     return explicit;
   }
 
-  // Production policy: KIE is preferred and Cloudflare is the publishing fallback.
+  // The resilient scheduled wrapper chooses free-first production ordering.
   // The deterministic local renderer is diagnostics-only and requires explicit opt-in.
   return 'auto';
 }
@@ -146,7 +146,7 @@ async function callImageProvider(env, image, prompt, providerMode, callHubFn) {
     prompt,
     providerMode
   };
-  if (providerMode === 'kie' && String(image?.provider_task_id || '').trim()) {
+  if ((providerMode === 'kie' || providerMode === 'modelscope') && String(image?.provider_task_id || '').trim()) {
     payload.taskId = String(image.provider_task_id).trim();
   }
   return callHubFn(env, env.HUB_IMAGE_GENERATE_PATH || '/api/hub/image/generate', payload);
@@ -310,7 +310,7 @@ export async function generatePlannedImages(env, jobId, options = {}) {
       const generated = await generateSourceImage(env, image, options, callHubFn);
       if (generated?.pending === true || generated?.complete === false) {
         const taskId = String(generated?.taskId || image?.provider_task_id || '').trim();
-        if (!taskId) throw new Error('KIE_TASK_ID_MISSING');
+        if (!taskId) throw new Error('IMAGE_PROVIDER_TASK_ID_MISSING');
         const previousTaskId = String(image?.provider_task_id || '').trim();
         if (previousTaskId && previousTaskId === taskId) {
           await markImageProviderProgress(env, image.id, { state: generated?.state || 'generating' });

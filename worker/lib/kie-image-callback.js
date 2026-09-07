@@ -17,21 +17,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function callbackTaskId(payload) {
+export function callbackTaskId(payload) {
   const data = payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object'
     ? payload.data
     : payload;
-  return String(data?.taskId || payload?.taskId || '').trim();
+  return String(data?.taskId || data?.task_id || payload?.taskId || payload?.task_id || '').trim();
 }
 
 async function findCallbackCandidate(env, taskId) {
   if (!env?.ORCHESTRATOR_DB) throw new Error('DB_NOT_BOUND');
   const row = await env.ORCHESTRATOR_DB.prepare(
     `SELECT j.id AS job_id, j.mode, j.blog_id, j.result_json, j.updated_at,
-            ji.id AS image_id, ji.provider_task_id, ji.provider_status
+            ji.id AS image_id, ji.provider_task_id, ji.provider_status, ji.provider_attempt_count
        FROM job_images ji
        JOIN jobs j ON j.id = ji.job_id
       WHERE ji.provider_task_id = ?
+        AND COALESCE(ji.provider, 'kie-ai') = 'kie-ai'
         AND ji.status IN ('planned', 'generating', 'generated')
         AND j.status = 'ready'
         AND j.archived_at IS NULL
@@ -70,6 +71,10 @@ async function resumeCallbackJob(env, candidate, executionContext) {
     if (Number(item?.pending || 0) > 0) return { ok: true, item, reason: 'AWAITING_NEXT_CALLBACK' };
     if (Number(item?.failed || 0) > 0) return { ok: false, item, reason: 'PROVIDER_FAILURE' };
     if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) continue;
+
+    // A terminal KIE failure is converted to retrying/planned, so one immediate
+    // second pass starts a fresh KIE task instead of waiting for the watchdog.
+    if (attempt === 0) continue;
     return { ok: true, item, reason: 'NO_FURTHER_PROGRESS' };
   }
 
@@ -77,6 +82,8 @@ async function resumeCallbackJob(env, candidate, executionContext) {
 }
 
 export async function handleKieImageCallback(request, env, ctx) {
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204 });
+  if (request.method === 'GET') return json({ ok: true, endpoint: 'kie-image-callback' }, 200);
   if (request.method !== 'POST') return json({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405);
 
   let payload;

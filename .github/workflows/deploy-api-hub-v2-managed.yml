@@ -25,6 +25,7 @@ jobs:
       EXISTING_ORCHESTRATOR_KEY: ${{ secrets.HUB_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
       FREE_AI_API_KEY: ${{ secrets.API_HUB_V2_FREE_AI_API_KEY }}
+      MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
       KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
@@ -91,6 +92,8 @@ jobs:
             '"AI_PROVIDER_RETRY_DELAY_MS": "4000"',
             '"FREE_AI_FALLBACK_ENABLED": "true"',
             '"FREE_AI_MODEL": "qwen7b"',
+            '"MODELSCOPE_IMAGE_MODEL": "Tongyi-MAI/Z-Image-Turbo"',
+            '"MODELSCOPE_API_BASE_URL": "https://api-inference.modelscope.ai"',
             '"BLOGGER_WRITES_ENABLED": "true"',
             '"BLOGGER_WRITE_MODE": "managed_allowlist"'
           ]) if(!text.includes(needle)) throw new Error(`API_HUB_PRODUCTION_GATE_INVALID:${needle}`);
@@ -104,9 +107,11 @@ jobs:
           const values={ORCHESTRATOR_API_KEY:process.env.ORCHESTRATOR_API_KEY,GEMINI_API_KEY:process.env.GEMINI_API_KEY,KIE_API_KEY:process.env.KIE_API_KEY,TAVILY_API_KEY:process.env.TAVILY_API_KEY};
           for(const [k,v] of Object.entries(values)) if(!v) throw new Error(k+'_REQUIRED');
           if(process.env.FREE_AI_API_KEY) values.FREE_AI_API_KEY=process.env.FREE_AI_API_KEY;
+          if(process.env.MODELSCOPE_TOKEN) values.MODELSCOPE_TOKEN=process.env.MODELSCOPE_TOKEN;
           if(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET){values.GOOGLE_CLIENT_ID=process.env.GOOGLE_CLIENT_ID;values.GOOGLE_CLIENT_SECRET=process.env.GOOGLE_CLIENT_SECRET;}
           if(process.env.GOOGLE_REFRESH_TOKEN) values.GOOGLE_REFRESH_TOKEN=process.env.GOOGLE_REFRESH_TOKEN;
           writeFileSync('api-hub-v2/.deploy-secrets.json',JSON.stringify(values));chmodSync('api-hub-v2/.deploy-secrets.json',0o600);
+          console.log(`MODELSCOPE_RUNTIME_SECRET_${process.env.MODELSCOPE_TOKEN?'ENABLED':'MISSING_FALLBACK_ONLY'}`);
           NODE
       - name: Deploy API Hub v2
         run: npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
@@ -131,6 +136,7 @@ jobs:
           }
           if(Boolean(h.freeAiConfigured)!==freeConfigured) throw new Error('FREE_AI_CONFIG_READBACK_FAILED');
           console.log(`API_HUB_AI_FAILOVER_GATE_OK|primary=google-gemini|freeAi=${freeConfigured?'enabled':'inactive'}|final=cloudflare-workers-ai|geminiTimeoutMs=60000|geminiRetryDelayMs=4000`);
+          console.log(`MODELSCOPE_DEPLOY_CONFIG|token=${process.env.MODELSCOPE_TOKEN?'configured':'missing-fallback-only'}|endpoint=https://api-inference.modelscope.ai|model=Tongyi-MAI/Z-Image-Turbo`);
           console.log('API_HUB_WRITE_GATE_OK|enabled=true|mode=managed_allowlist|count=7');
           const headers={'content-type':'application/json','x-hub-api-key':process.env.ORCHESTRATOR_API_KEY};
           const scope=await fetch(`${base}/api/google/scopes`,{method:'POST',headers,body:'{}'}).then(r=>r.json());

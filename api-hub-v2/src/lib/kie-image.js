@@ -4,7 +4,14 @@ const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const DEFAULT_KIE_TASK_TIMEOUT_MS = 15 * 60 * 1000;
 const MIN_KIE_TASK_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_KIE_TASK_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_KIE_QUERY_RETRY_MAX = 4;
+const DEFAULT_KIE_QUERY_RETRY_BASE_MS = 1000;
+const DEFAULT_KIE_RESULT_DOWNLOAD_RETRY_MAX = 3;
 const PENDING_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function requiredKey(env) {
   const key = String(env?.KIE_API_KEY || '').trim();
@@ -44,6 +51,24 @@ export function kieTaskTimeoutMs(env = {}) {
   if (!Number.isInteger(configured) || configured < MIN_KIE_TASK_TIMEOUT_MS || configured > MAX_KIE_TASK_TIMEOUT_MS) {
     return DEFAULT_KIE_TASK_TIMEOUT_MS;
   }
+  return configured;
+}
+
+export function kieQueryRetryMax(env = {}) {
+  const configured = Number(env?.KIE_IMAGE_QUERY_RETRY_MAX ?? DEFAULT_KIE_QUERY_RETRY_MAX);
+  if (!Number.isInteger(configured) || configured < 1 || configured > 5) return DEFAULT_KIE_QUERY_RETRY_MAX;
+  return configured;
+}
+
+export function kieQueryRetryBaseMs(env = {}) {
+  const configured = Number(env?.KIE_IMAGE_QUERY_RETRY_BASE_MS ?? DEFAULT_KIE_QUERY_RETRY_BASE_MS);
+  if (!Number.isInteger(configured) || configured < 250 || configured > 5000) return DEFAULT_KIE_QUERY_RETRY_BASE_MS;
+  return configured;
+}
+
+export function kieResultDownloadRetryMax(env = {}) {
+  const configured = Number(env?.KIE_IMAGE_RESULT_DOWNLOAD_RETRY_MAX ?? DEFAULT_KIE_RESULT_DOWNLOAD_RETRY_MAX);
+  if (!Number.isInteger(configured) || configured < 1 || configured > 5) return DEFAULT_KIE_RESULT_DOWNLOAD_RETRY_MAX;
   return configured;
 }
 
@@ -180,6 +205,44 @@ async function jsonRequest(fetchImpl, url, init, safeError) {
   return data;
 }
 
+function transientQueryError(error) {
+  const status = Number(error?.status || 0);
+  const message = String(error?.message || '');
+  return message === 'KIE_NETWORK_ERROR'
+    || message === 'KIE_RATE_LIMITED'
+    || message === 'KIE_PROVIDER_ERROR'
+    || status === 429
+    || status >= 500;
+}
+
+async function queryKieTaskDetail(env, baseUrl, apiKey, taskId, fetchImpl) {
+  const maxAttempts = kieQueryRetryMax(env);
+  const baseDelay = kieQueryRetryBaseMs(env);
+  let lastError = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return {
+        data: await jsonRequest(
+          fetchImpl,
+          `${baseUrl}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
+          { headers: { authorization: `Bearer ${apiKey}` } },
+          'KIE_TASK_QUERY_FAILED'
+        ),
+        transientError: null,
+        attempts: attempt + 1
+      };
+    } catch (error) {
+      if (!transientQueryError(error)) throw error;
+      lastError = error;
+      if (attempt + 1 >= maxAttempts) break;
+      await sleep(Math.min(8000, baseDelay * (2 ** attempt)));
+    }
+  }
+
+  return { data: null, transientError: lastError, attempts: maxAttempts };
+}
+
 function parseResultUrl(task) {
   let parsed;
   try { parsed = JSON.parse(String(task?.resultJson || '{}')); } catch { return ''; }
@@ -197,24 +260,52 @@ function classifyMimeType(value) {
   return 'image/jpeg';
 }
 
-async function downloadKieResult(fetchImpl, resultUrl) {
-  let imageResponse;
-  try { imageResponse = await fetchImpl(resultUrl, { redirect: 'follow' }); } catch {
-    throw Object.assign(new Error('KIE_RESULT_DOWNLOAD_FAILED'), { status: 502 });
-  }
-  if (!imageResponse.ok) throw Object.assign(new Error('KIE_RESULT_DOWNLOAD_FAILED'), { status: 502 });
-  const bytes = new Uint8Array(await imageResponse.arrayBuffer());
-  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) {
-    throw Object.assign(new Error(bytes.length ? 'KIE_IMAGE_TOO_LARGE' : 'KIE_IMAGE_EMPTY'), { status: 502 });
+async function downloadKieResult(env, fetchImpl, resultUrl) {
+  const maxAttempts = kieResultDownloadRetryMax(env);
+  let lastError = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    let imageResponse;
+    try {
+      imageResponse = await fetchImpl(resultUrl, {
+        redirect: 'follow',
+        headers: {
+          accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          'user-agent': 'Mozilla/5.0 (compatible; SmileseonImageFetcher/1.0)'
+        }
+      });
+    } catch {
+      lastError = Object.assign(new Error('KIE_RESULT_DOWNLOAD_FAILED'), { status: 502, transient: true });
+      imageResponse = null;
+    }
+
+    if (imageResponse?.ok) {
+      const bytes = new Uint8Array(await imageResponse.arrayBuffer());
+      if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) {
+        throw Object.assign(new Error(bytes.length ? 'KIE_IMAGE_TOO_LARGE' : 'KIE_IMAGE_EMPTY'), { status: 502 });
+      }
+
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      return {
+        mimeType: classifyMimeType(imageResponse.headers?.get?.('content-type')),
+        imageBase64: btoa(binary)
+      };
+    }
+
+    if (imageResponse && !imageResponse.ok) {
+      lastError = Object.assign(new Error('KIE_RESULT_DOWNLOAD_FAILED'), {
+        status: 502,
+        providerHttpStatus: Number(imageResponse.status || 0),
+        transient: true
+      });
+    }
+
+    if (attempt + 1 < maxAttempts) await sleep(1000 * (2 ** attempt));
   }
 
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  return {
-    mimeType: classifyMimeType(imageResponse.headers?.get?.('content-type')),
-    imageBase64: btoa(binary)
-  };
+  throw lastError || Object.assign(new Error('KIE_RESULT_DOWNLOAD_FAILED'), { status: 502, transient: true });
 }
 
 export async function startKieImageTask(env, { role, prompt, aspectRatio }, fetchImpl = fetch) {
@@ -266,13 +357,23 @@ export async function pollKieImageTask(env, taskId, fetchImpl = fetch) {
   const apiKey = requiredKey(env);
   const baseUrl = safeBaseUrl(env);
   const model = safeModel(env);
-  const detail = await jsonRequest(
-    fetchImpl,
-    `${baseUrl}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(normalizedTaskId)}`,
-    { headers: { authorization: `Bearer ${apiKey}` } },
-    'KIE_TASK_QUERY_FAILED'
-  );
-  const task = detail?.data || {};
+  const queried = await queryKieTaskDetail(env, baseUrl, apiKey, normalizedTaskId, fetchImpl);
+
+  if (queried.transientError) {
+    return {
+      ok: true,
+      provider: 'kie-ai',
+      model,
+      taskId: normalizedTaskId,
+      state: 'query_retry',
+      pending: true,
+      complete: false,
+      queryAttempts: queried.attempts,
+      recoveryReason: String(queried.transientError?.message || 'KIE_TASK_QUERY_RETRY')
+    };
+  }
+
+  const task = queried.data?.data || {};
   const state = String(task.state || '').trim().toLowerCase();
   if (state === 'fail') throw kieTaskFailure(task);
   if (state !== 'success') {
@@ -300,8 +401,39 @@ export async function pollKieImageTask(env, taskId, fetchImpl = fetch) {
   }
 
   const resultUrl = parseResultUrl(task);
-  if (!resultUrl) throw Object.assign(new Error('KIE_RESULT_URL_MISSING'), { status: 502 });
-  const downloaded = await downloadKieResult(fetchImpl, resultUrl);
+  if (!resultUrl) {
+    return {
+      ok: true,
+      provider: 'kie-ai',
+      model,
+      taskId: normalizedTaskId,
+      state: 'result_pending',
+      pending: true,
+      complete: false,
+      recoveryReason: 'KIE_RESULT_URL_MISSING'
+    };
+  }
+
+  let downloaded;
+  try {
+    downloaded = await downloadKieResult(env, fetchImpl, resultUrl);
+  } catch (error) {
+    if (error?.transient === true || String(error?.message || '') === 'KIE_RESULT_DOWNLOAD_FAILED') {
+      return {
+        ok: true,
+        provider: 'kie-ai',
+        model,
+        taskId: normalizedTaskId,
+        state: 'result_download_retry',
+        pending: true,
+        complete: false,
+        sourceUrl: resultUrl,
+        recoveryReason: 'KIE_RESULT_DOWNLOAD_FAILED'
+      };
+    }
+    throw error;
+  }
+
   return {
     ok: true,
     provider: 'kie-ai',

@@ -2,6 +2,7 @@ import { requireAuthorized } from './lib/auth.js';
 import { json, readJson, MASTER_V45 } from './lib/contracts.js';
 import { critic, diagnostic, repair, writer } from './lib/ai-routes.js';
 import { generateImage } from './lib/image-routes.js';
+import { modelScopeConfigured } from './lib/modelscope-image.js';
 import { geminiRequestTimeoutMs } from './lib/gemini-ai.js';
 import { freeAiConfigured, freeAiFallbackEnabled, freeAiModel } from './lib/free-ai.js';
 import { masterV45RuntimeStatus } from './lib/master-v45-bundle.js';
@@ -85,6 +86,7 @@ export default {
         const geminiConfigured = Boolean(String(env.GEMINI_API_KEY || '').trim());
         const freeAiIsConfigured = freeAiConfigured(env);
         const freeAiIsEnabled = freeAiFallbackEnabled(env) && freeAiIsConfigured;
+        const modelScopeIsConfigured = modelScopeConfigured(env);
         const kieConfigured = Boolean(String(env.KIE_API_KEY || '').trim());
         const imageQaRequired = String(env.IMAGE_QA_REQUIRED || 'false').trim().toLowerCase() === 'true';
         const writerProviderOrder = textProviderOrder(env);
@@ -92,6 +94,11 @@ export default {
         const repairProviderOrder = textProviderOrder(env);
         const textPrimaryProvider = writerProviderOrder[0];
         const textCloudflareFallbackEnabled = String(env.TEXT_CLOUDFLARE_FALLBACK_ENABLED || 'false').trim().toLowerCase() === 'true';
+        const imageProviderOrder = [
+          ...(modelScopeIsConfigured ? ['modelscope'] : []),
+          ...(kieConfigured ? ['kie-ai'] : []),
+          'cloudflare-workers-ai'
+        ];
         return json({
           ok: true,
           service: 'api-hub-v2',
@@ -121,15 +128,17 @@ export default {
           criticAuditMode: 'master-v4.5-role-critic-gemini-granular',
           repairModel: env.REPAIR_MODEL || '@cf/openai/gpt-oss-120b',
           repairProviderOrder,
-          imageProvider: 'kie-ai',
-          imageProviderOrder: ['kie-ai', 'cloudflare-workers-ai'],
+          imageProvider: imageProviderOrder[0],
+          imageProviderOrder,
           imageModel: env.IMAGE_MODEL || '@cf/black-forest-labs/flux-1-schnell',
-          imageConfigured: Boolean(env.AI) || kieConfigured,
+          imageConfigured: Boolean(env.AI) || kieConfigured || modelScopeIsConfigured,
           imageQaRequired,
           imageQaConfigured: imageQaRequired && geminiConfigured,
           imageQaProvider: 'google-gemini',
           imageQaModel: env.GEMINI_IMAGE_QA_MODEL || env.GEMINI_CRITIC_MODEL || 'gemini-3.5-flash-lite',
           imageQaMaxAttempts: Number(env.IMAGE_QA_MAX_ATTEMPTS || 3),
+          modelScopeImageConfigured: modelScopeIsConfigured,
+          modelScopeImageModel: env.MODELSCOPE_IMAGE_MODEL || 'Tongyi-MAI/Z-Image-Turbo',
           kieImageConfigured: kieConfigured,
           kieImageModel: env.KIE_IMAGE_MODEL || 'z-image',
           geminiConfigured,

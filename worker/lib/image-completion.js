@@ -1,7 +1,7 @@
 import { readAutomationSettings } from './automation-settings.js';
 import { attachStoredImages } from './image-plan.js';
 import { buildSupplementalImagePlan, validateImagePolicy } from './image-policy.js';
-import { generatePlannedImages } from './image-executor.js';
+import { generatePlannedImages } from './image-executor-resilient.js';
 import { listJobImages, markImageAttached, persistImagePlan } from './image-store.js';
 import { persistJobResult } from './job-store.js';
 
@@ -31,8 +31,8 @@ export function kieImageCallbackEnabled(env = {}) {
 }
 
 export function kieImageCallbackRecoveryMinutes(env = {}) {
-  const configured = Number(env?.KIE_IMAGE_CALLBACK_RECOVERY_MINUTES ?? 15);
-  if (!Number.isInteger(configured) || configured < 10 || configured > 30) return 15;
+  const configured = Number(env?.KIE_IMAGE_CALLBACK_RECOVERY_MINUTES ?? 3);
+  if (!Number.isInteger(configured) || configured < 2 || configured > 15) return 3;
   return configured;
 }
 
@@ -64,6 +64,17 @@ function readyResult(candidate) {
     throw new Error(mode === 'repair_existing' ? 'REPAIR_IMAGE_READY_RESULT_INVALID' : 'IMAGE_COMPLETION_READY_RESULT_INVALID');
   }
   return result;
+}
+
+const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);
+
+function pendingProvider(images = []) {
+  const image = images.find((row) => {
+    const taskId = String(row?.provider_task_id || '').trim();
+    const providerState = String(row?.provider_status || '').trim().toLowerCase();
+    return Boolean(taskId) && ACTIVE_PROVIDER_STATES.has(providerState);
+  });
+  return image ? String(image.provider || '').trim().toLowerCase() || null : null;
 }
 
 export function imageCompletionState(images = [], expectedCount = 0) {
@@ -113,6 +124,7 @@ async function listReadyImageCandidates(env, options = {}) {
             SELECT 1
               FROM job_images ci
              WHERE ci.job_id = j.id
+               AND COALESCE(ci.provider, 'kie-ai') = 'kie-ai'
                AND ci.provider_task_id IS NOT NULL
                AND ci.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running')
                AND COALESCE(ci.provider_checked_at, ci.updated_at) > datetime('now', ?)
@@ -197,6 +209,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
       existingCount: plan.existingCount,
       generated: 0,
       pending: 0,
+      pendingProvider: null,
       failed: 0
     };
   }
@@ -256,6 +269,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
       complete: false,
       generated: generated.stored,
       pending: generated.pending,
+      pendingProvider: pendingProvider(images),
       failed: generated.failed,
       attachedThisRun: attachableImages.length,
       targetTotal: plan.targetTotal,
@@ -273,6 +287,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
     complete: true,
     generated: generated.stored,
     pending: generated.pending,
+    pendingProvider: null,
     failed: generated.failed,
     attachedThisRun: attachableImages.length,
     targetTotal: plan.targetTotal,
@@ -313,7 +328,7 @@ export async function runScheduledImageCompletion(env, options = {}) {
         item = await completeReadyJobImages(env, candidate, effective, { ...options, maxImages: 1 });
         if (item?.complete || Number(item?.failed || 0) > 0) break;
         if (Number(item?.pending || 0) > 0) {
-          if (callbackMode) {
+          if (callbackMode && String(item?.pendingProvider || '') === 'kie-ai') {
             item = { ...item, reason: 'AWAITING_KIE_CALLBACK' };
             break;
           }
