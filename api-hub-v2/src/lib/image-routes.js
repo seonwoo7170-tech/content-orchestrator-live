@@ -1,12 +1,13 @@
 import { classifyWorkersAiFailure } from './cloudflare-ai.js';
 import { runGeminiAi } from './gemini-ai.js';
 import { generateKieImage } from './kie-image.js';
+import { generateModelScopeImage } from './modelscope-image.js';
 
 const DEFAULT_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
 const DEFAULT_IMAGE_QA_MODEL = 'gemini-3.1-flash-lite';
 const ALLOWED_IMAGE_MODELS = new Set([DEFAULT_IMAGE_MODEL]);
 const IMAGE_ROLES = new Set(['thumbnail', 'body']);
-const PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie']);
+const PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie', 'modelscope']);
 const PLAIN_SURFACE_GUARD = 'Favor simple generic real-world subjects with broad uniform surfaces, simple geometry, natural textures, and minimal decorative detail.';
 const KIE_NO_TEXT_TAIL = 'No visible text, logos, branding, or watermark.';
 const IMAGE_QA_TRANSIENT_DELAYS_MS = [250, 750];
@@ -206,6 +207,11 @@ async function generateProviderImage(env, { role, prompt, steps, seed, providerM
     return { ...result, role, providerMode: 'kie' };
   }
 
+  if (providerMode === 'modelscope') {
+    const result = await generateModelScopeImage(env, { role, prompt, aspectRatio, taskId }, fetchImpl);
+    return { ...result, role, providerMode: 'modelscope' };
+  }
+
   try {
     return { ...(await generateCloudflareImage(env, { role, prompt, steps, seed }, aiBinding)), providerMode };
   } catch (cloudflareError) {
@@ -292,7 +298,7 @@ export async function generateImage(env, input, aiBinding = env?.AI, fetchImpl =
   const qaRequired = imageQaRequired(env);
   const maxAttempts = qaRequired ? imageQaAttempts(env) : 1;
 
-  if (providerMode !== 'kie') {
+  if (providerMode === 'auto' || providerMode === 'cloudflare') {
     const model = String(env?.IMAGE_MODEL || DEFAULT_IMAGE_MODEL).trim();
     if (!ALLOWED_IMAGE_MODELS.has(model)) throw Object.assign(new Error('IMAGE_MODEL_NOT_ALLOWED'), { status: 500 });
   }
@@ -339,7 +345,7 @@ export async function generateImage(env, input, aiBinding = env?.AI, fetchImpl =
       };
     }
 
-    if (generated.provider === 'kie-ai') break;
+    if (generated.provider === 'kie-ai' || generated.provider === 'modelscope-ai') break;
   }
 
   const error = new Error('IMAGE_QA_REJECTED');

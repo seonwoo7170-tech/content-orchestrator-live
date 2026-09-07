@@ -10,7 +10,7 @@ import {
 import { generateLocalFallbackImage } from './local-image-fallback.js';
 import { postprocessThumbnail } from './thumbnail-postprocess.js';
 
-const IMAGE_PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie']);
+const IMAGE_PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie', 'modelscope']);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -128,7 +128,8 @@ export function imageProviderMode(env = {}) {
     return explicit;
   }
 
-  // Production policy: KIE is preferred and Cloudflare is the publishing fallback.
+  // Production policy: KIE is preferred, ModelScope is the free secondary provider,
+  // and Cloudflare Workers AI is the final publishing fallback.
   // The deterministic local renderer is diagnostics-only and requires explicit opt-in.
   return 'auto';
 }
@@ -136,8 +137,31 @@ export function imageProviderMode(env = {}) {
 export function imageProviderSequence(providerMode = 'auto') {
   const mode = String(providerMode || 'auto').trim().toLowerCase();
   if (!IMAGE_PROVIDER_MODES.has(mode)) throw new Error('IMAGE_PROVIDER_MODE_INVALID');
-  if (mode === 'auto') return ['kie', 'cloudflare'];
+  if (mode === 'auto') return ['kie', 'modelscope', 'cloudflare'];
   return [mode];
+}
+
+function providerRuntimeName(providerMode) {
+  if (providerMode === 'kie') return 'kie-ai';
+  if (providerMode === 'modelscope') return 'modelscope-ai';
+  if (providerMode === 'cloudflare') return 'cloudflare-workers-ai';
+  return String(providerMode || '');
+}
+
+function providerModeFromRuntimeName(provider) {
+  const value = String(provider || '').trim().toLowerCase();
+  if (value === 'kie-ai') return 'kie';
+  if (value === 'modelscope-ai') return 'modelscope';
+  if (value === 'cloudflare-workers-ai') return 'cloudflare';
+  return '';
+}
+
+function providerSequenceForImage(providerMode, image = {}) {
+  const sequence = imageProviderSequence(providerMode);
+  if (providerMode !== 'auto' || !String(image?.provider_task_id || '').trim()) return sequence;
+  const activeMode = providerModeFromRuntimeName(image?.provider);
+  const activeIndex = sequence.indexOf(activeMode);
+  return activeIndex >= 0 ? sequence.slice(activeIndex) : sequence;
 }
 
 async function callImageProvider(env, image, prompt, providerMode, callHubFn) {
@@ -146,8 +170,9 @@ async function callImageProvider(env, image, prompt, providerMode, callHubFn) {
     prompt,
     providerMode
   };
-  if (providerMode === 'kie' && String(image?.provider_task_id || '').trim()) {
-    payload.taskId = String(image.provider_task_id).trim();
+  const taskId = String(image?.provider_task_id || '').trim();
+  if (taskId && String(image?.provider || '').trim().toLowerCase() === providerRuntimeName(providerMode)) {
+    payload.taskId = taskId;
   }
   return callHubFn(env, env.HUB_IMAGE_GENERATE_PATH || '/api/hub/image/generate', payload);
 }
@@ -167,7 +192,7 @@ async function restartKieAfterQa(env, image, callHubFn) {
 async function generateSourceImage(env, image, options, callHubFn) {
   const prompt = retryPromptForImage(image);
   const providerMode = imageProviderMode(env);
-  const providers = imageProviderSequence(providerMode);
+  const providers = providerSequenceForImage(providerMode, image);
   const pacingMs = imageStagePacingMs(env);
   let firstError = null;
   let lastError = null;
@@ -181,7 +206,7 @@ async function generateSourceImage(env, image, options, callHubFn) {
       if (index === 0) return generated;
       return {
         ...generated,
-        fallbackFrom: providers[0] === 'kie' ? 'kie-ai' : providers[0],
+        fallbackFrom: providerRuntimeName(providers[0]),
         fallbackReason: String(firstError?.message || 'PRIMARY_IMAGE_FAILED')
       };
     } catch (error) {
@@ -274,7 +299,7 @@ export function isResumableImageStatus(status, retryFailed = true) {
     || (retryFailed && value === 'failed');
 }
 
-const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);
+const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queued', 'queuing', 'created', 'generating', 'pending', 'processing', 'running']);
 
 export function imageExecutionPriority(image = {}) {
   const status = String(image?.status || '');
@@ -310,14 +335,14 @@ export async function generatePlannedImages(env, jobId, options = {}) {
       const generated = await generateSourceImage(env, image, options, callHubFn);
       if (generated?.pending === true || generated?.complete === false) {
         const taskId = String(generated?.taskId || image?.provider_task_id || '').trim();
-        if (!taskId) throw new Error('KIE_TASK_ID_MISSING');
+        if (!taskId) throw new Error('IMAGE_PROVIDER_TASK_ID_MISSING');
         const previousTaskId = String(image?.provider_task_id || '').trim();
         if (previousTaskId && previousTaskId === taskId) {
           await markImageProviderProgress(env, image.id, { state: generated?.state || 'generating' });
         } else {
           await markImageProviderPending(env, image.id, {
-            provider: generated?.provider || 'kie-ai',
-            model: generated?.model || 'z-image',
+            provider: generated?.provider || 'image-provider',
+            model: generated?.model || '',
             taskId,
             state: generated?.state || 'waiting'
           });
@@ -325,8 +350,8 @@ export async function generatePlannedImages(env, jobId, options = {}) {
         outcomes.push({
           imageId: image.id,
           status: 'pending',
-          provider: generated?.provider || 'kie-ai',
-          model: generated?.model || 'z-image',
+          provider: generated?.provider || 'image-provider',
+          model: generated?.model || '',
           taskId,
           providerState: generated?.state || 'generating'
         });
