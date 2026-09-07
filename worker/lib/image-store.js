@@ -92,6 +92,29 @@ export async function markImageProviderProgress(env, imageId, meta = {}) {
   if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_STATE_WRITE_FAILED');
 }
 
+export async function markImageProviderRetry(env, imageId, error) {
+  const db = requireDb(env);
+  const safeError = String(error || 'IMAGE_PROVIDER_RETRY').slice(0, 300);
+  const providerCode = safeProviderError(safeError);
+  const result = await db.prepare(
+    `UPDATE job_images
+        SET status = 'planned',
+            provider_task_id = NULL,
+            provider_status = 'retrying',
+            provider_error_code = ?,
+            provider_error_message = ?,
+            error = NULL,
+            provider_checked_at = datetime('now'),
+            updated_at = datetime('now')
+      WHERE id = ?`
+  ).bind(
+    providerCode,
+    safeError,
+    normalizeId(imageId, 'IMAGE_ID_INVALID')
+  ).run();
+  if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_STATE_WRITE_FAILED');
+}
+
 export async function markImageGenerated(env, imageId, meta) {
   const db = requireDb(env);
   const fallbackCode = meta?.fallbackFrom ? safeProviderError(meta?.fallbackReason || 'PRIMARY_IMAGE_FAILED') : '';
