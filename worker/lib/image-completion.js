@@ -26,6 +26,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function kieImageCallbackEnabled(env = {}) {
+  return String(env?.KIE_IMAGE_CALLBACK_ENABLED || 'false').trim().toLowerCase() === 'true';
+}
+
+export function kieImageCallbackRecoveryMinutes(env = {}) {
+  const configured = Number(env?.KIE_IMAGE_CALLBACK_RECOVERY_MINUTES ?? 15);
+  if (!Number.isInteger(configured) || configured < 10 || configured > 30) return 15;
+  return configured;
+}
+
 export function imagePollIntervalMs(env = {}, options = {}) {
   return boundedMs(options.pollIntervalMs ?? env?.SERIAL_IMAGE_POLL_INTERVAL_MS, 5000, 500, 5000);
 }
@@ -75,6 +85,8 @@ async function listReadyImageCandidates(env, options = {}) {
   const maxJobs = positiveLimit(options.maxJobs, 1);
   const staleMinutes = Math.max(0, Math.min(60, Number(options.staleMinutes ?? 2) || 0));
   const failedRetryCooldownMinutes = Math.max(3, Math.min(60, Number(options.failedRetryCooldownMinutes ?? 10) || 10));
+  const callbackMode = kieImageCallbackEnabled(env);
+  const callbackRecoveryMinutes = kieImageCallbackRecoveryMinutes(env);
   const result = await requireDb(env).prepare(
     `SELECT DISTINCT j.id AS job_id, j.mode, j.blog_id, j.result_json, j.updated_at,
             COALESCE(s.plan_date, date('now')) AS plan_date,
@@ -96,6 +108,17 @@ async function listReadyImageCandidates(env, options = {}) {
         AND j.mode IN ('new_article', 'repair_existing')
         AND j.updated_at <= datetime('now', ?)
         AND (
+          ? = 0
+          OR NOT EXISTS (
+            SELECT 1
+              FROM job_images ci
+             WHERE ci.job_id = j.id
+               AND ci.provider_task_id IS NOT NULL
+               AND ci.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running')
+               AND COALESCE(ci.provider_checked_at, ci.updated_at) > datetime('now', ?)
+          )
+        )
+        AND (
           j.mode = 'repair_existing'
           OR (
             j.mode = 'new_article'
@@ -105,9 +128,6 @@ async function listReadyImageCandidates(env, options = {}) {
             )
           )
         )
-      -- Failed work gets a real retry, but only after a cooldown. This prevents one
-      -- provider-chain failure from monopolizing the serial lane while also ensuring
-      -- it cannot starve forever behind a continuously growing healthy backlog.
       ORDER BY CASE
                  WHEN has_failed_images = 1 AND image_activity_at <= datetime('now', ?) THEN 0
                  WHEN has_failed_images = 0 THEN 1
@@ -116,7 +136,13 @@ async function listReadyImageCandidates(env, options = {}) {
                CASE WHEN has_failed_images = 1 THEN image_activity_at ELSE j.updated_at END,
                j.id
       LIMIT ?`
-  ).bind(`-${staleMinutes} minutes`, `-${failedRetryCooldownMinutes} minutes`, maxJobs * 6).all();
+  ).bind(
+    `-${staleMinutes} minutes`,
+    callbackMode ? 1 : 0,
+    `-${callbackRecoveryMinutes} minutes`,
+    `-${failedRetryCooldownMinutes} minutes`,
+    maxJobs * 6
+  ).all();
   return result.results || [];
 }
 
@@ -184,7 +210,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
     generated = await generatePlannedImages(env, jobId, {
       retryFailed: true,
       maxImages: positiveLimit(options.maxImages, 1, 3),
-      localFallback: env?.LOCAL_IMAGE_FALLBACK_ENABLED === 'true',
+      localFallback: false,
       executionContext: options.executionContext
     });
     images = await listJobImages(env, jobId);
@@ -261,9 +287,6 @@ export async function runScheduledImageCompletion(env, options = {}) {
     return { ok: true, enabled: false, reason: 'DAILY_WORK_EXECUTION_DISABLED', attempted: 0, completed: 0, items: [] };
   }
 
-  // Image completion must remain independent from API Hub/Blogger inventory.
-  // The ready jobs already carry stable blog IDs, and automation settings live in D1.
-  // A transient Blogger/API Hub outage must never strand image work at READY.
   const candidates = await listReadyImageCandidates(env, options);
   const blogs = options.blogs || candidateBlogs(candidates);
   const automation = options.automation || await readAutomationSettings(env, blogs);
@@ -274,6 +297,7 @@ export async function runScheduledImageCompletion(env, options = {}) {
   const articleCooldownMs = articleImageCooldownMs(env, options);
   const jobBudgetMs = imageJobBudgetMs(env, options);
   const chainBudgetMs = imageChainBudgetMs(env, options);
+  const callbackMode = kieImageCallbackEnabled(env);
   const chainStartedAt = Date.now();
 
   for (const candidate of candidates) {
@@ -285,15 +309,14 @@ export async function runScheduledImageCompletion(env, options = {}) {
     const jobStartedAt = Date.now();
     let item = null;
     try {
-      // Keep one article in the image lane until it either completes, fails, or
-      // exhausts its bounded execution budget. Each provider call handles exactly
-      // one image, so image N+1 starts immediately after image N is actually stored.
-      // While KIE is still processing the current image, poll that same task instead
-      // of starting an image for another article.
       while (Date.now() - jobStartedAt < jobBudgetMs && Date.now() - chainStartedAt < chainBudgetMs) {
         item = await completeReadyJobImages(env, candidate, effective, { ...options, maxImages: 1 });
         if (item?.complete || Number(item?.failed || 0) > 0) break;
         if (Number(item?.pending || 0) > 0) {
+          if (callbackMode) {
+            item = { ...item, reason: 'AWAITING_KIE_CALLBACK' };
+            break;
+          }
           await sleep(pollIntervalMs);
           continue;
         }
@@ -316,14 +339,9 @@ export async function runScheduledImageCompletion(env, options = {}) {
       items.push(item);
     }
 
-    // Never interleave articles. If this article is still incomplete, leave it at
-    // the head of the next watchdog run rather than starting another article now.
     if (!item?.complete) break;
     if (items.length >= maxJobs) break;
 
-    // The fixed 10-second safety gap belongs at the article boundary, not between
-    // images in the same article. Keep enough time in reserve for the image-lane
-    // lease instead of sleeping and starting work that cannot finish safely.
     if (articleCooldownMs > 0) {
       if (Date.now() - chainStartedAt + articleCooldownMs >= chainBudgetMs) break;
       await sleep(articleCooldownMs);
@@ -332,6 +350,8 @@ export async function runScheduledImageCompletion(env, options = {}) {
   return {
     ok: items.every((item) => !item.errorCode),
     enabled: true,
+    callbackMode,
+    callbackRecoveryMinutes: kieImageCallbackRecoveryMinutes(env),
     attempted: items.length,
     completed: items.filter((item) => item.complete).length,
     repairAttempted: items.filter((item) => item.mode === 'repair_existing').length,
