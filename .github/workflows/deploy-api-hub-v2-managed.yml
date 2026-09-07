@@ -26,6 +26,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.API_HUB_V2_GEMINI_API_KEY }}
       FREE_AI_API_KEY: ${{ secrets.API_HUB_V2_FREE_AI_API_KEY }}
       KIE_API_KEY: ${{ secrets.KIE_API_KEY }}
+      MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
       TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       GOOGLE_CLIENT_ID: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.API_HUB_V2_GOOGLE_CLIENT_SECRET }}
@@ -101,7 +102,7 @@ jobs:
           set -euo pipefail
           node - <<'NODE'
           const {writeFileSync,chmodSync}=require('node:fs');
-          const values={ORCHESTRATOR_API_KEY:process.env.ORCHESTRATOR_API_KEY,GEMINI_API_KEY:process.env.GEMINI_API_KEY,KIE_API_KEY:process.env.KIE_API_KEY,TAVILY_API_KEY:process.env.TAVILY_API_KEY};
+          const values={ORCHESTRATOR_API_KEY:process.env.ORCHESTRATOR_API_KEY,GEMINI_API_KEY:process.env.GEMINI_API_KEY,KIE_API_KEY:process.env.KIE_API_KEY,MODELSCOPE_TOKEN:process.env.MODELSCOPE_TOKEN,TAVILY_API_KEY:process.env.TAVILY_API_KEY};
           for(const [k,v] of Object.entries(values)) if(!v) throw new Error(k+'_REQUIRED');
           if(process.env.FREE_AI_API_KEY) values.FREE_AI_API_KEY=process.env.FREE_AI_API_KEY;
           if(process.env.GOOGLE_CLIENT_ID&&process.env.GOOGLE_CLIENT_SECRET){values.GOOGLE_CLIENT_ID=process.env.GOOGLE_CLIENT_ID;values.GOOGLE_CLIENT_SECRET=process.env.GOOGLE_CLIENT_SECRET;}
