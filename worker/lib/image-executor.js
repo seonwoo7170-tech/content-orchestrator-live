@@ -1,10 +1,10 @@
 import { callHub } from './api-hub.js';
 import {
   listJobImages,
-  markImageFailed,
   markImageGenerated,
   markImageProviderPending,
   markImageProviderProgress,
+  markImageProviderRetry,
   markImageStored
 } from './image-store.js';
 import { generateLocalFallbackImage } from './local-image-fallback.js';
@@ -128,8 +128,8 @@ export function imageProviderMode(env = {}) {
     return explicit;
   }
 
-  // Production policy: KIE is always the preferred provider. Automatic mode means
-  // KIE first and Cloudflare only after a confirmed KIE failure.
+  // Production policy: KIE is preferred and Cloudflare is the publishing fallback.
+  // The deterministic local renderer is diagnostics-only and requires explicit opt-in.
   return 'auto';
 }
 
@@ -177,8 +177,6 @@ async function generateSourceImage(env, image, options, callHubFn) {
     if (index > 0 && pacingMs > 0) await sleep(pacingMs);
     try {
       const generated = await callImageProvider(env, image, prompt, provider, callHubFn);
-      // KIE is asynchronous. A waiting/queuing/generating task is still healthy and
-      // must never fall through to Cloudflare or the local renderer.
       if (generated?.pending === true || generated?.complete === false) return generated;
       if (index === 0) return generated;
       return {
@@ -203,16 +201,10 @@ async function generateSourceImage(env, image, options, callHubFn) {
     }
   }
 
-  // Normal production flow stops after KIE -> Cloudflare. The local renderer is
-  // retained only for explicit diagnostics/recovery calls that opt in to it.
   if (options.localFallback !== true) {
-    if (providers.length > 1 && firstError && lastError && firstError !== lastError) {
-      const error = new Error(`IMAGE_PROVIDER_CHAIN_FAILED:${String(firstError?.message || 'KIE_IMAGE_FAILED')}:${String(lastError?.message || 'CLOUDFLARE_IMAGE_FAILED')}`);
-      error.cause = lastError;
-      error.rejectedImageData = firstError?.data?.rejectedImageUrl ? firstError.data : (lastError?.data?.rejectedImageUrl ? lastError.data : null);
-      throw error;
-    }
-    throw lastError || firstError || new Error('IMAGE_PROVIDER_CHAIN_FAILED');
+    const error = new Error(`IMAGE_PROVIDER_CHAIN_RETRY:${String(firstError?.message || 'PRIMARY_IMAGE_FAILED')}:${String(lastError?.message || 'SECONDARY_IMAGE_FAILED')}`);
+    error.cause = lastError || firstError;
+    throw error;
   }
 
   try {
@@ -225,7 +217,7 @@ async function generateSourceImage(env, image, options, callHubFn) {
       fallbackReason: String(lastError?.message || firstError?.message || 'PRIMARY_IMAGE_FAILED')
     };
   } catch (localError) {
-    const error = new Error(`IMAGE_PROVIDER_CHAIN_FAILED:${String(firstError?.message || 'PRIMARY_IMAGE_FAILED')}:${String(lastError?.message || 'SECONDARY_IMAGE_FAILED')}:${String(localError?.message || 'LOCAL_IMAGE_FAILED')}`);
+    const error = new Error(`IMAGE_PROVIDER_CHAIN_RETRY:${String(firstError?.message || 'PRIMARY_IMAGE_FAILED')}:${String(lastError?.message || 'SECONDARY_IMAGE_FAILED')}:${String(localError?.message || 'LOCAL_IMAGE_FAILED')}`);
     error.cause = localError;
     throw error;
   }
@@ -397,8 +389,8 @@ export async function generatePlannedImages(env, jobId, options = {}) {
       });
     } catch (error) {
       const rejectedPreviewUrl = await preserveRejectedPreview(env, bucket, baseUrl, jobId, image, error).catch(() => null);
-      await markImageFailed(env, image.id, error?.message || 'IMAGE_GENERATION_FAILED');
-      outcomes.push({ imageId: image.id, status: 'failed', error: String(error?.message || 'IMAGE_GENERATION_FAILED'), rejectedPreviewUrl });
+      await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY');
+      outcomes.push({ imageId: image.id, status: 'retrying', error: String(error?.message || 'IMAGE_GENERATION_RETRY'), rejectedPreviewUrl });
     }
   }
 
@@ -407,7 +399,8 @@ export async function generatePlannedImages(env, jobId, options = {}) {
     requested: candidates.length,
     stored: outcomes.filter((item) => item.status === 'stored').length,
     pending: outcomes.filter((item) => item.status === 'pending').length,
-    failed: outcomes.filter((item) => item.status === 'failed').length,
+    retrying: outcomes.filter((item) => item.status === 'retrying').length,
+    failed: 0,
     outcomes,
     images: finalRows
   };
