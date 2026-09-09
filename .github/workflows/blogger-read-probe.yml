@@ -19,7 +19,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: Inspect deployed API Hub Blogger route surface
+      - name: Inspect deployed API Hub Blogger list contract
         shell: bash
         run: |
           set -euo pipefail
@@ -33,29 +33,19 @@ jobs:
           if (!listRes.ok || list.success === false) throw new Error(`WORKER_LIST_FAILED:${listRes.status}`);
           const scripts = Array.isArray(list.result) ? list.result : [];
           const candidates = scripts.map((item) => String(item?.id || item?.name || '')).filter((name) => name.toLowerCase().includes('api-hub'));
-          console.log('API_HUB_WORKERS', JSON.stringify(candidates));
           const name = candidates.find((value) => value === 'api-hub-v2') || candidates[0];
           if (!name) throw new Error('API_HUB_WORKER_NOT_FOUND');
           const scriptRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${encodeURIComponent(name)}`, { headers, signal: AbortSignal.timeout(15000) });
           const source = await scriptRes.text();
           if (!scriptRes.ok) throw new Error(`WORKER_SOURCE_FAILED:${scriptRes.status}`);
-          const routes = [...new Set((source.match(/\/api\/blogger\/[A-Za-z0-9_./:-]+/g) || []).map((value) => value.replace(/["'`),;}]+$/g, '')))].sort();
-          const capabilities = {
-            postsList: /posts\.list|posts\/list|post\/list|blogger\/posts/.test(source),
-            postSearch: /posts\.search|post\/search|posts\/search/.test(source),
-            postGet: /post\/get|posts\.get/.test(source),
-            bloggerApiPostsCollection: /\/blogs\/[^\s"'`]+\/posts/.test(source) || /blogger\/v3\/blogs/.test(source)
-          };
-          console.log('BLOGGER_ROUTES', JSON.stringify(routes));
-          console.log('BLOGGER_CAPABILITIES', JSON.stringify(capabilities));
-          const marker = '/api/blogger/posts';
-          const index = source.indexOf(marker);
-          if (index >= 0) {
-            const scrubbed = source.slice(Math.max(0, index - 1800), index + 4200)
-              .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]')
-              .replace(/(client_secret|refresh_token|access_token|api[_-]?key)\s*[:=]\s*["'`][^"'`]+["'`]/gi, '$1:[REDACTED]');
-            console.log('BLOGGER_POSTS_ROUTE_CONTEXT_BEGIN');
-            console.log(scrubbed);
-            console.log('BLOGGER_POSTS_ROUTE_CONTEXT_END');
-          }
+          const markers = ['async function listPosts', 'function listPosts', 'var listPosts', 'const listPosts'];
+          const found = markers.map((marker) => ({ marker, index: source.indexOf(marker) })).find((item) => item.index >= 0);
+          console.log('LIST_POSTS_DEFINITION', JSON.stringify(found || null));
+          if (!found) throw new Error('LIST_POSTS_DEFINITION_NOT_FOUND');
+          const scrubbed = source.slice(Math.max(0, found.index - 800), found.index + 6200)
+            .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]')
+            .replace(/(client_secret|refresh_token|access_token|api[_-]?key)\s*[:=]\s*["'`][^"'`]+["'`]/gi, '$1:[REDACTED]');
+          console.log('LIST_POSTS_CONTEXT_BEGIN');
+          console.log(scrubbed);
+          console.log('LIST_POSTS_CONTEXT_END');
           NODE
