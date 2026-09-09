@@ -1,0 +1,42 @@
+name: production-resume-snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/production-resume-snapshot-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Snapshot production D1
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const token=process.env.CLOUDFLARE_API_TOKEN, account=process.env.CLOUDFLARE_ACCOUNT_ID;
+          if(!token||!account) throw new Error('CF_CREDENTIALS_MISSING');
+          const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+          async function cf(url,init={}){const r=await fetch(url,{...init,headers:{...headers,...(init.headers||{})},signal:AbortSignal.timeout(45000)});const d=await r.json().catch(()=>({}));if(!r.ok||d.success===false)throw new Error(`CF:${r.status}:${JSON.stringify(d.errors||d).slice(0,400)}`);return d;}
+          const list=await cf(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database`);
+          const db=(list.result||[]).find(x=>x.name==='content-orchestrator'); if(!db?.uuid)throw new Error('D1_DATABASE_NOT_FOUND');
+          const url=`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db.uuid}/query`;
+          async function q(sql){const d=await cf(url,{method:'POST',body:JSON.stringify({sql})});return ((Array.isArray(d.result)?d.result[0]:d.result)||{}).results||[];}
+          const counts=await q(`SELECT status,COUNT(*) n FROM jobs WHERE archived_at IS NULL GROUP BY status ORDER BY status`);
+          const recent=await q(`SELECT id,mode,blog_id,status,last_error_code,recovery_state,retry_count,updated_at FROM jobs WHERE archived_at IS NULL AND status<>'completed' ORDER BY datetime(updated_at) DESC,id DESC LIMIT 40`);
+          const slots=await q(`SELECT id,plan_date,blog_id,kind,status,job_id,recovery_state,last_error_code,updated_at FROM daily_plan_slots WHERE plan_date=date('now','+9 hours') ORDER BY id`);
+          const images=await q(`SELECT job_id,status,provider,provider_status,provider_task_id,updated_at FROM job_images WHERE status<>'attached' ORDER BY datetime(updated_at) DESC,id DESC LIMIT 40`);
+          console.log('COUNTS '+JSON.stringify(counts));
+          console.log('RECENT '+JSON.stringify(recent));
+          console.log('TODAY_SLOTS '+JSON.stringify(slots));
+          console.log('OPEN_IMAGES '+JSON.stringify(images));
+          NODE
