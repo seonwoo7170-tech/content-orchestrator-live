@@ -9,7 +9,7 @@ const phase5OpsTick = fs.readFileSync(new URL('../worker/phase5-ops-tick.js', im
 const imageCompletion = fs.readFileSync(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
 const resilientImageExecutor = fs.readFileSync(new URL('../worker/lib/image-executor-resilient.js', import.meta.url), 'utf8');
 
-test('active production uses resumable three-image polling without fixed per-image cooldown', () => {
+test('active production uses resumable durable image polling without fixed per-image cooldown', () => {
   assert.equal(config.vars.SYSTEM_PAUSED, 'false');
   assert.equal(config.vars.IMAGE_PROVIDER_MODE, 'auto');
   assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'false');
@@ -27,10 +27,13 @@ test('active production uses resumable three-image polling without fixed per-ima
   assert.equal(Number(config.vars.SERIAL_IMAGE_CHAIN_MAX_ITEMS), 8);
   assert.equal(Number(config.vars.SERIAL_IMAGE_LEASE_TTL_SECONDS), 210);
   assert.match(imageCompletion, /localFallback:\s*false/);
-  assert.match(imageCompletion, /maxImages:\s*3/);
+  assert.match(imageCompletion, /maxImages:\s*positiveLimit\(options\.maxImages, 1, 3\)/);
+  assert.match(imageCompletion, /storedBeforeGeneration/);
+  assert.match(resilientImageExecutor, /Math\.min\(3, number\)/);
   assert.match(resilientImageExecutor, /attempts === 0 && modelScopeImageEnabled\(env\)\) return 'modelscope'/);
   assert.match(resilientImageExecutor, /provider === 'modelscope'\) return 'kie'/);
   assert.match(resilientImageExecutor, /IMAGE_PROVIDER_MODE: 'cloudflare'/);
+  assert.match(resilientImageExecutor, /isSuccessfulPaidImageCheckpoint/);
   assert.doesNotMatch(resilientImageExecutor, /localFallback:\s*true/);
 });
 
