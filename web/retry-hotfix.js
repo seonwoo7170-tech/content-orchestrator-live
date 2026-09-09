@@ -13,7 +13,7 @@ function notify(message, tone = 'normal') {
   toast.dataset.tone = tone;
   toast.classList.add('visible');
   clearTimeout(notify.timer);
-  notify.timer = setTimeout(() => toast.classList.remove('visible'), 3600);
+  notify.timer = setTimeout(() => toast.classList.remove('visible'), 5000);
 }
 
 function sleep(ms) {
@@ -68,6 +68,16 @@ function markAccepted(button, position) {
   const pill = card?.querySelector('.status-pill');
   if (pill) {
     pill.textContent = position > 1 ? `순차 재시도 ${position}번` : '순차 재시도 대기';
+    pill.classList.remove('danger', 'success', 'neutral');
+    pill.classList.add('active');
+  }
+}
+
+function markPublicationReview(button) {
+  const card = button.closest('.job-row');
+  const pill = card?.querySelector('.status-pill');
+  if (pill) {
+    pill.textContent = '발행 여부 확인 중';
     pill.classList.remove('danger', 'success', 'neutral');
     pill.classList.add('active');
   }
@@ -154,11 +164,18 @@ async function resetAndQueue(jobId, button) {
   button.textContent = '접수 중';
   try {
     let queueRun = false;
+    let retryResult = null;
     try {
-      await requestJson(`/api/jobs/${jobId}/retry`, { method: 'POST', body: '{}', keepalive: true });
-      queueRun = true;
+      retryResult = await requestJson(`/api/jobs/${jobId}/retry`, { method: 'POST', body: '{}', keepalive: true });
+      queueRun = retryResult?.runRequired !== false;
     } catch (error) {
       const code = String(error?.message || '').toUpperCase();
+      if (code.includes('MANUAL_RETRY_REQUIRES_PUBLICATION_REVIEW')) {
+        markPublicationReview(button);
+        notify(`작업 #${jobId}은 중복 발행 방지를 위해 Blogger 발행 여부를 자동 확인 중입니다. 기존 글과 이미지는 다시 만들지 않습니다.`);
+        window.dispatchEvent(new CustomEvent('orchestrator:jobs-changed', { detail: { jobId } }));
+        return;
+      }
       if ((code.includes('JOB_NOT_RETRYABLE') || code.includes('JOB_RETRY_ALREADY_CLAIMED')) && await queuedAfterConflict(jobId)) {
         queueRun = true;
       } else {
@@ -166,7 +183,18 @@ async function resetAndQueue(jobId, button) {
       }
     }
 
-    const position = queueRun ? queueSerialRun(jobId) : 0;
+    if (!queueRun) {
+      markPublicationReview(button);
+      const action = String(retryResult?.action || '');
+      const message = action === 'adopted_existing'
+        ? `작업 #${jobId}의 기존 Blogger 글을 확인해 연결했습니다. 중복 발행하지 않습니다.`
+        : `작업 #${jobId}의 발행 상태를 확인했습니다. 기존 글과 이미지를 유지한 채 발행 단계만 이어갑니다.`;
+      notify(message);
+      window.dispatchEvent(new CustomEvent('orchestrator:jobs-changed', { detail: { jobId } }));
+      return;
+    }
+
+    const position = queueSerialRun(jobId);
     button.textContent = '대기열 등록';
     markAccepted(button, position);
     notify(`작업 #${jobId} 재시도를 순차 처리 대기열 ${position || '-'}번에 넣었습니다.`);
