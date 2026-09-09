@@ -41,9 +41,11 @@ test('new-post stale claim recovery cannot consume repair claims', () => {
   assert.match(publisher, /job_id IN \(SELECT id FROM jobs WHERE mode = 'new_article'\)/);
 });
 
-test('legacy production maintenance mode disables scheduled collectors and external distribution', () => {
-  assert.match(wrangler, /"SYSTEM_PAUSED": "true"/);
-  assert.match(wrangler, /"ADSENSE_COLLECTION_ENABLED": "false"/);
+test('resumed production enables scheduled collectors while external distribution remains separately gated', () => {
+  assert.match(wrangler, /"SYSTEM_PAUSED": "false"/);
+  assert.match(wrangler, /"GSC_COLLECTION_ENABLED": "true"/);
+  assert.match(wrangler, /"GA4_COLLECTION_ENABLED": "true"/);
+  assert.match(wrangler, /"ADSENSE_COLLECTION_ENABLED": "true"/);
   assert.match(wrangler, /"EXTERNAL_DISTRIBUTION_ENABLED": "false"/);
 });
 
