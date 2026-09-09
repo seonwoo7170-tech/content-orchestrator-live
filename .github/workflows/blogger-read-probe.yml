@@ -16,63 +16,36 @@ jobs:
     timeout-minutes: 5
     environment: production
     env:
-      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
-      API_HUB_BASE_URL: https://api-hub-v2.smileseon.workers.dev
-      TARGET_BLOG_ID: '5540565797560833468'
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: Probe read-only Blogger discovery routes
+      - name: Inspect deployed API Hub Blogger route surface
         shell: bash
         run: |
           set -euo pipefail
           node --input-type=module - <<'NODE'
-          const base = process.env.API_HUB_BASE_URL;
-          const key = process.env.HUB_API_KEY;
-          const blogId = process.env.TARGET_BLOG_ID;
-          if (!base || !key || !blogId) throw new Error('PROBE_CONFIG_MISSING');
-          const routes = [
-            '/api/blogger/posts',
-            '/api/blogger/posts/list',
-            '/api/blogger/post/list',
-            '/api/blogger/posts/search',
-            '/api/blogger/post/search'
-          ];
-          function safeShape(data) {
-            if (!data || typeof data !== 'object') return { type: typeof data };
-            const out = { keys: Object.keys(data).slice(0, 20) };
-            for (const key of ['ok','error','message','count','nextPageToken']) if (key in data) out[key] = data[key];
-            for (const key of ['posts','items','results']) {
-              if (Array.isArray(data[key])) {
-                out[key] = data[key].slice(0, 5).map((item) => ({
-                  id: item?.id || item?.bloggerPostId || null,
-                  title: item?.title || item?.name || null,
-                  url: item?.url || item?.permalink || null,
-                  status: item?.status || null,
-                  published: item?.published || item?.publishedAt || null,
-                  updated: item?.updated || item?.updatedAt || null
-                }));
-              }
-            }
-            return out;
-          }
-          async function call(path, method) {
-            const url = new URL(base + path);
-            const init = { method, headers: { 'x-hub-api-key': key, accept: 'application/json' } };
-            if (method === 'GET') {
-              url.searchParams.set('blogId', blogId);
-              url.searchParams.set('maxResults', '20');
-            } else {
-              init.headers['content-type'] = 'application/json';
-              init.body = JSON.stringify({ blogId, maxResults: 20, status: ['draft','live','scheduled'] });
-            }
-            const r = await fetch(url, { ...init, signal: AbortSignal.timeout(15000) });
-            const text = await r.text();
-            let data = null;
-            try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 160) }; }
-            console.log('PROBE', JSON.stringify({ path, method, http: r.status, shape: safeShape(data) }));
-            return r.status;
-          }
-          for (const path of routes) {
-            const getStatus = await call(path, 'GET');
-            if (getStatus === 405) await call(path, 'POST');
-          }
+          const token = process.env.CLOUDFLARE_API_TOKEN;
+          const account = process.env.CLOUDFLARE_ACCOUNT_ID;
+          if (!token || !account) throw new Error('CF_CREDENTIALS_MISSING');
+          const headers = { authorization: `Bearer ${token}` };
+          const listRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts`, { headers, signal: AbortSignal.timeout(15000) });
+          const list = await listRes.json().catch(() => ({}));
+          if (!listRes.ok || list.success === false) throw new Error(`WORKER_LIST_FAILED:${listRes.status}`);
+          const scripts = Array.isArray(list.result) ? list.result : [];
+          const candidates = scripts.map((item) => String(item?.id || item?.name || '')).filter((name) => name.toLowerCase().includes('api-hub'));
+          console.log('API_HUB_WORKERS', JSON.stringify(candidates));
+          const name = candidates.find((value) => value === 'api-hub-v2') || candidates[0];
+          if (!name) throw new Error('API_HUB_WORKER_NOT_FOUND');
+          const scriptRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/${encodeURIComponent(name)}`, { headers, signal: AbortSignal.timeout(15000) });
+          const source = await scriptRes.text();
+          if (!scriptRes.ok) throw new Error(`WORKER_SOURCE_FAILED:${scriptRes.status}`);
+          const routes = [...new Set((source.match(/\/api\/blogger\/[A-Za-z0-9_./:-]+/g) || []).map((value) => value.replace(/["'`),;}]+$/g, '')))].sort();
+          const capabilities = {
+            postsList: /posts\.list|posts\/list|post\/list|blogger\/posts/.test(source),
+            postSearch: /posts\.search|post\/search|posts\/search/.test(source),
+            postGet: /post\/get|posts\.get/.test(source),
+            bloggerApiPostsCollection: /\/blogs\/[^\s"'`]+\/posts/.test(source) || /blogger\/v3\/blogs/.test(source)
+          };
+          console.log('BLOGGER_ROUTES', JSON.stringify(routes));
+          console.log('BLOGGER_CAPABILITIES', JSON.stringify(capabilities));
           NODE
