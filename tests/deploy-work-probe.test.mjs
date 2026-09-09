@@ -13,15 +13,13 @@ test('public production deploy preserves runtime secrets and requires only Cloud
   assert.match(workflow, /wrangler@latest deploy --config wrangler\.jsonc/);
 });
 
-test('public deployment readback verifies global maintenance pause without exposing admin credentials', () => {
+test('public deployment readback verifies resumed automation without exposing admin credentials', () => {
   assert.match(workflow, /Production public health read-back/);
   assert.match(workflow, /\/health\?deploy=/);
-  assert.match(workflow, /health\.systemPaused===true/);
-  assert.match(workflow, /health\.bloggerWritesEnabled===false/);
-  assert.match(workflow, /health\.phase2Automation\?\.autoPublishExecutionEnabled===false/);
-  assert.match(workflow, /pausedProbe\.status===503/);
-  assert.match(workflow, /pausedBody\.error==='SYSTEM_PAUSED'/);
-  assert.match(workflow, /PRODUCTION_PUBLIC_HEALTH_PAUSE_READBACK_FAILED/);
+  assert.match(workflow, /health\.systemPaused!==true/);
+  assert.match(workflow, /health\.bloggerWritesEnabled===true/);
+  assert.match(workflow, /health\.phase2Automation\?\.autoPublishExecutionEnabled===true/);
+  assert.match(workflow, /PRODUCTION_PUBLIC_HEALTH_READBACK_FAILED/);
   assert.doesNotMatch(workflow, /x-admin-api-key/);
   assert.doesNotMatch(workflow, /\/api\/operations\/work-tick/);
 });
