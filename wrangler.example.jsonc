@@ -8,7 +8,7 @@
     "crons": ["*/3 * * * *", "*/5 * * * *"]
   },
   "secrets": {
-    "required": ["HUB_API_KEY", "ADMIN_API_KEY", "PUTER_AUTH_TOKEN"]
+    "required": ["HUB_API_KEY", "ADMIN_API_KEY"]
   },
   "services": [
     {
