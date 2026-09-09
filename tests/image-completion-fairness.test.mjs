@@ -4,13 +4,15 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
 
-test('recent failed image jobs rotate behind healthy work but become priority again after cooldown', () => {
+test('active provider tasks win first, then aged failed work, while recent failures rotate behind healthy work', () => {
+  assert.match(source, /AS has_active_provider_task/);
   assert.match(source, /AS has_failed_images/);
   assert.match(source, /AS image_activity_at/);
   assert.match(source, /failedRetryCooldownMinutes/);
-  assert.match(source, /WHEN has_failed_images = 1 AND image_activity_at <= datetime\('now', \?\) THEN 0/);
-  assert.match(source, /WHEN has_failed_images = 0 THEN 1/);
-  assert.match(source, /ELSE 2/);
+  assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);
+  assert.match(source, /WHEN has_failed_images = 1 AND image_activity_at <= datetime\('now', \?\) THEN 1/);
+  assert.match(source, /WHEN has_failed_images = 0 THEN 2/);
+  assert.match(source, /ELSE 3/);
   assert.match(source, /CASE WHEN has_failed_images = 1 THEN image_activity_at ELSE j\.updated_at END/);
 });
 
