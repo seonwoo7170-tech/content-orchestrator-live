@@ -1,11 +1,11 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "content-orchestrator",
-  "main": "worker/maintenance-entry.js",
+  "main": "worker/mcp-entry.js",
   "compatibility_date": "2026-08-28",
   "workers_dev": true,
   "triggers": {
-    "crons": []
+    "crons": ["*/3 * * * *", "*/5 * * * *"]
   },
   "secrets": {
     "required": ["HUB_API_KEY", "ADMIN_API_KEY"]
@@ -36,7 +36,7 @@
     }
   ],
   "vars": {
-    "SYSTEM_PAUSED": "true",
+    "SYSTEM_PAUSED": "false",
     "API_HUB_BASE_URL": "https://api-hub-v2.smileseon.workers.dev",
     "HUB_REQUEST_TIMEOUT_MS": "180000",
     "AI_STAGE_PACING_MS": "4000",
@@ -47,15 +47,15 @@
     "KIE_IMAGE_CALLBACK_ENABLED": "false",
     "KIE_IMAGE_CALLBACK_RECOVERY_MINUTES": "3",
     "KIE_IMAGE_GENERATION_RETRY_MAX": "3",
-    "BLOGGER_WRITES_ENABLED": "false",
-    "AUTO_PUBLISH_EXECUTION_ENABLED": "false",
-    "DAILY_WORK_EXECUTION_ENABLED": "false",
-    "JOB_RECOVERY_EXECUTION_ENABLED": "false",
-    "GSC_COLLECTION_ENABLED": "false",
+    "BLOGGER_WRITES_ENABLED": "true",
+    "AUTO_PUBLISH_EXECUTION_ENABLED": "true",
+    "DAILY_WORK_EXECUTION_ENABLED": "true",
+    "JOB_RECOVERY_EXECUTION_ENABLED": "true",
+    "GSC_COLLECTION_ENABLED": "true",
     "GSC_COLLECTION_TIME": "03:15",
-    "GA4_COLLECTION_ENABLED": "false",
+    "GA4_COLLECTION_ENABLED": "true",
     "GA4_COLLECTION_TIME": "03:25",
-    "ADSENSE_COLLECTION_ENABLED": "false",
+    "ADSENSE_COLLECTION_ENABLED": "true",
     "ADSENSE_COLLECTION_TIME": "03:35",
     "DAILY_WORK_MAX_ITEMS": "1",
     "JOB_RECOVERY_MAX_ITEMS": "1",
@@ -74,9 +74,9 @@
     "IMAGE_COMPLETION_MAX_ITEMS": "1",
     "KIE_IMAGE_FALLBACK_ENABLED": "false",
     "OPERATIONS_TIMEZONE": "Asia/Seoul",
-    "DAILY_NEW_PER_BLOG": "0",
-    "DAILY_REPAIR_PER_BLOG": "0",
-    "TREND_KEYWORDS_ENABLED": "false",
+    "DAILY_NEW_PER_BLOG": "2",
+    "DAILY_REPAIR_PER_BLOG": "2",
+    "TREND_KEYWORDS_ENABLED": "true",
     "TREND_REFRESH_TIMES": "08:35,13:35",
     "TREND_MIN_RELEVANCE": "0.28",
     "EXTERNAL_DISTRIBUTION_ENABLED": "false",
