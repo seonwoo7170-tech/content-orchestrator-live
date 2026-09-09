@@ -111,7 +111,14 @@ async function listReadyImageCandidates(env, options = {}) {
               SELECT MAX(ai.updated_at)
                 FROM job_images ai
                WHERE ai.job_id = j.id
-            ), j.updated_at) AS image_activity_at
+            ), j.updated_at) AS image_activity_at,
+            EXISTS(
+              SELECT 1
+                FROM job_images pi
+               WHERE pi.job_id = j.id
+                 AND pi.provider_task_id IS NOT NULL
+                 AND pi.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry')
+            ) AS has_active_provider_task
        FROM jobs j
        LEFT JOIN daily_plan_slots s ON s.job_id = j.id
       WHERE j.status = 'ready'
@@ -141,9 +148,10 @@ async function listReadyImageCandidates(env, options = {}) {
           )
         )
       ORDER BY CASE
-                 WHEN has_failed_images = 1 AND image_activity_at <= datetime('now', ?) THEN 0
-                 WHEN has_failed_images = 0 THEN 1
-                 ELSE 2
+                 WHEN has_active_provider_task = 1 THEN 0
+                 WHEN has_failed_images = 1 AND image_activity_at <= datetime('now', ?) THEN 1
+                 WHEN has_failed_images = 0 THEN 2
+                 ELSE 3
                END,
                CASE WHEN has_failed_images = 1 THEN image_activity_at ELSE j.updated_at END,
                j.id

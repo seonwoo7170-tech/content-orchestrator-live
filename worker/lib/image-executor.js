@@ -177,7 +177,14 @@ async function restartKieAfterQa(env, jobId, image, callHubFn) {
 async function generateSourceImage(env, jobId, image, options, callHubFn) {
   const prompt = retryPromptForImage(image);
   const providerMode = imageProviderMode(env);
-  const providers = imageProviderSequence(providerMode);
+  let providers = imageProviderSequence(providerMode);
+  const existingProvider = String(image?.provider || '').trim().toLowerCase();
+  const existingTaskId = String(image?.provider_task_id || '').trim();
+  if (providerMode === 'auto' && existingTaskId) {
+    if (existingProvider === 'puter') providers = ['puter', 'kie', 'cloudflare'];
+    else if (existingProvider === 'modelscope') providers = ['modelscope', 'kie', 'cloudflare'];
+    else if (existingProvider === 'kie' || existingProvider === 'kie-ai') providers = ['kie', 'cloudflare'];
+  }
   const pacingMs = imageStagePacingMs(env);
   let firstError = null;
   let lastError = null;
