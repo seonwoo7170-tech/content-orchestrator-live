@@ -71,7 +71,7 @@ function isComputerTechPrompt(prompt) {
 
 export function retryPromptForImage(image) {
   const prompt = String(image?.prompt || '').trim();
-  const error = String(image?.error || '');
+  const error = String(image?.error || image?.provider_error_message || image?.provider_error_code || '');
   if (!prompt || !/IMAGE_QA_REJECTED/i.test(error)) return prompt;
 
   const recoveryLevel = kieRecoveryLevelForImage(image);
@@ -185,6 +185,9 @@ async function generateSourceImage(env, image, options, callHubFn) {
         fallbackReason: String(firstError?.message || 'PRIMARY_IMAGE_FAILED')
       };
     } catch (error) {
+      // A transport/QA-service/storage failure does not mean the paid task failed.
+      // Keep polling that task instead of generating another image or falling back.
+      if (shouldPreserveImageTask(image, error)) throw error;
       if (provider === 'kie' && shouldRestartKieAfterQa(image, error, env)) {
         try {
           const regenerated = await restartKieAfterQa(env, image, callHubFn);
@@ -274,7 +277,14 @@ export function isResumableImageStatus(status, retryFailed = true) {
     || (retryFailed && value === 'failed');
 }
 
-const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);
+const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry']);
+
+export function shouldPreserveImageTask(image, error) {
+  if (!String(image?.provider_task_id || '').trim()) return false;
+  const message = String(error?.message || error || '');
+  // Only explicit terminal provider outcomes or a genuine QA rejection retire a task.
+  return !/(?:KIE_(?:TASK_TIMEOUT|IMAGE_GENERATION_FAILED|PROVIDER_GENERATION_FAILED|CONTENT_REJECTED|AUTH_FAILED|INSUFFICIENT_CREDITS|VALIDATION_FAILED)|MODELSCOPE_(?:IMAGE_GENERATION_FAILED|TASK_FAILED|TASK_TIMEOUT|AUTH_FAILED)|IMAGE_QA_REJECTED)/i.test(message);
+}
 
 export function imageExecutionPriority(image = {}) {
   const status = String(image?.status || '');
@@ -388,8 +398,20 @@ export async function generatePlannedImages(env, jobId, options = {}) {
         fallbackReason: generated.fallbackReason || null
       });
     } catch (error) {
+      if (shouldPreserveImageTask(image, error)) {
+        await markImageProviderProgress(env, image.id, { state: 'query_retry' });
+        outcomes.push({ imageId: image.id, status: 'pending', taskId: image.provider_task_id,
+          provider: image.provider || 'kie-ai', providerState: 'query_retry',
+          error: String(error?.message || 'IMAGE_TASK_RESUME_RETRY') });
+        continue;
+      }
       const rejectedPreviewUrl = await preserveRejectedPreview(env, bucket, baseUrl, jobId, image, error).catch(() => null);
-      await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY');
+      const mode = imageProviderMode(env);
+      const countAttempt = !String(image?.provider_task_id || '').trim() && mode !== 'cloudflare';
+      await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY', {
+        countAttempt,
+        provider: countAttempt ? (mode === 'modelscope' ? 'modelscope' : 'kie-ai') : null
+      });
       outcomes.push({ imageId: image.id, status: 'retrying', error: String(error?.message || 'IMAGE_GENERATION_RETRY'), rejectedPreviewUrl });
     }
   }

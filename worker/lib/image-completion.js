@@ -66,7 +66,7 @@ function readyResult(candidate) {
   return result;
 }
 
-const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);
+const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry']);
 
 function pendingProvider(images = []) {
   const image = images.find((row) => {
@@ -126,7 +126,7 @@ async function listReadyImageCandidates(env, options = {}) {
              WHERE ci.job_id = j.id
                AND COALESCE(ci.provider, 'kie-ai') = 'kie-ai'
                AND ci.provider_task_id IS NOT NULL
-               AND ci.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running')
+               AND ci.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry')
                AND COALESCE(ci.provider_checked_at, ci.updated_at) > datetime('now', ?)
           )
         )
