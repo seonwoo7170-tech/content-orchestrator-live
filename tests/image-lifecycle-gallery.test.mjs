@@ -17,7 +17,7 @@ test('image lane has no fixed wait between images and keeps the safety gap at ar
   assert.match(executor, /SERIAL_IMAGE_COOLDOWN_MS \?\? 0/);
   assert.match(executor, /if \(cooldownMs > 0\) await sleep\(cooldownMs\)/);
   assert.match(completion, /SERIAL_ARTICLE_IMAGE_COOLDOWN_MS/);
-  assert.match(completion, /completeReadyJobImages\(env, candidate, effective, \{ \.\.\.options, maxImages: 1 \}\)/);
+  assert.match(completion, /completeReadyJobImages\(env, candidate, effective, \{ \.\.\.options, maxImages: 3 \}\)/);
   assert.match(completion, /await sleep\(articleCooldownMs\)/);
 });
 
