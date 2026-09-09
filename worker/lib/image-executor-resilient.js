@@ -1,11 +1,19 @@
 import { generatePlannedImages as generateBaseImages, imageExecutionPriority, isResumableImageStatus } from './image-executor.js';
-import { listJobImages } from './image-store.js';
+import { listJobImages, markImageProviderRetry } from './image-store.js';
 import { puterImageConfigured } from './puter-image-provider.js';
+
+const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry']);
 
 export function kieGenerationRetryMax(env = {}) {
   const configured = Number(env?.KIE_IMAGE_GENERATION_RETRY_MAX ?? 3);
   if (!Number.isInteger(configured) || configured < 1 || configured > 5) return 3;
   return configured;
+}
+
+export function kieActiveTaskStaleMs(env = {}) {
+  const configured = Number(env?.KIE_ACTIVE_TASK_STALE_MS ?? 30 * 60_000);
+  if (!Number.isFinite(configured) || configured < 5 * 60_000 || configured > 6 * 60 * 60_000) return 30 * 60_000;
+  return Math.trunc(configured);
 }
 
 export function modelScopeImageEnabled(env = {}) {
@@ -28,6 +36,27 @@ function batchLimit(value, fallback = 3) {
   const number = Number(value ?? fallback);
   if (!Number.isInteger(number) || number < 1) return fallback;
   return Math.min(3, number);
+}
+
+function timestampMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return NaN;
+  const normalized = /(?:Z|[+-]\d\d:\d\d)$/i.test(raw) ? raw : `${raw.replace(' ', 'T')}Z`;
+  return Date.parse(normalized);
+}
+
+export function isStaleKieActiveTask(image = {}, env = {}, nowMs = Date.now()) {
+  const provider = normalizedProvider(image);
+  const taskId = String(image?.provider_task_id || '').trim();
+  const providerStatus = String(image?.provider_status || '').trim().toLowerCase();
+  if (!taskId || !['kie', 'kie-ai'].includes(provider) || !ACTIVE_PROVIDER_STATES.has(providerStatus)) return false;
+  // job_images rows are created immediately before the image provider stage, so created_at
+  // is a conservative lower bound for legacy task age even though old rows predate the
+  // provider_task_id columns. A task must still be active after a final poll before this
+  // stale guard is allowed to retire it.
+  const startedAt = timestampMs(image?.created_at);
+  if (!Number.isFinite(startedAt)) return false;
+  return Math.max(0, Number(nowMs) - startedAt) >= kieActiveTaskStaleMs(env);
 }
 
 export function isSuccessfulPaidImageCheckpoint(image = {}) {
@@ -100,6 +129,24 @@ function protectedCheckpointResult(image) {
   };
 }
 
+async function recoverStaleKieTask(env, jobId, image, imageOptions) {
+  const taskId = String(image?.provider_task_id || '').trim();
+  await markImageProviderRetry(env, image.id, `KIE_STALE_TASK_ABANDONED:${taskId}`, {
+    countAttempt: false,
+    provider: 'kie-ai'
+  });
+
+  // Never create a second paid KIE task for a legacy task that already consumed a
+  // submission. Prefer Puter when its runtime secret is actually present; otherwise
+  // use the free Cloudflare provider so the article can continue.
+  const nextMode = puterImageConfigured(env) ? 'puter' : 'cloudflare';
+  return generateBaseImages(
+    { ...env, IMAGE_PROVIDER_MODE: nextMode },
+    jobId,
+    imageOptions
+  );
+}
+
 async function runOneImage(env, jobId, image, options = {}) {
   const providerMode = scheduledProviderModeForImage(image, env);
 
@@ -117,6 +164,7 @@ async function runOneImage(env, jobId, image, options = {}) {
     localFallback: false
   };
 
+  const staleKieBeforePoll = providerMode === 'kie' && isStaleKieActiveTask(image, env);
   const first = await generateBaseImages(
     { ...env, IMAGE_PROVIDER_MODE: providerMode },
     jobId,
@@ -146,6 +194,17 @@ async function runOneImage(env, jobId, image, options = {}) {
       jobId,
       imageOptions
     );
+  }
+
+  if (providerMode === 'kie' && firstOutcome?.status === 'pending' && staleKieBeforePoll) {
+    // We have just performed a final status query for a KIE task that is already well
+    // past the normal generation window. Only retire it if the durable row still says
+    // it is active after that query; a success checkpoint must always win instead.
+    const current = await refreshedImage(env, jobId, image.id);
+    if (isSuccessfulPaidImageCheckpoint(current || image)) return first;
+    if (isStaleKieActiveTask(current || image, env)) {
+      return recoverStaleKieTask(env, jobId, current || image, imageOptions);
+    }
   }
 
   if (providerMode === 'kie' && firstOutcome?.status === 'retrying') {
@@ -190,6 +249,8 @@ function combineExecutionResults(results = [], images = []) {
  * - Puter is the free/user-allowance-first provider when configured;
  * - ModelScope Z-Image Turbo remains optional when explicitly enabled;
  * - an active async task always resumes on the provider that created it;
+ * - a KIE task that remains non-terminal beyond the stale window gets one final poll,
+ *   then exits to Puter/Cloudflare without submitting another paid KIE task;
  * - a successful KIE checkpoint is never regenerated or replaced;
  * - ModelScope terminal failure hands off immediately to KIE;
  * - KIE keeps its bounded retry budget, then Cloudflare is the final provider;
