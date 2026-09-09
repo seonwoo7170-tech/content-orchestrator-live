@@ -17,7 +17,8 @@ test('image lane has no fixed wait between images and keeps the safety gap at ar
   assert.match(executor, /SERIAL_IMAGE_COOLDOWN_MS \?\? 0/);
   assert.match(executor, /if \(cooldownMs > 0\) await sleep\(cooldownMs\)/);
   assert.match(completion, /SERIAL_ARTICLE_IMAGE_COOLDOWN_MS/);
-  assert.match(completion, /completeReadyJobImages\(env, candidate, effective, \{ \.\.\.options, maxImages: 3 \}\)/);
+  assert.match(completion, /maxImages:\s*positiveLimit\(options\.maxImages, 1, 3\)/);
+  assert.match(completion, /positiveLimit\(options\.maxImages, 1, 3\) === 1/);
   assert.match(completion, /await sleep\(articleCooldownMs\)/);
 });
 
@@ -42,4 +43,5 @@ test('stored accepted images are attached and persisted incrementally', () => {
   assert.ok(incompleteAt > persistAt, 'partial image progress must persist before incomplete return');
   assert.match(completion, /for \(const image of attachableImages\) await markImageAttached/);
   assert.match(completion, /attachedThisRun/);
+  assert.match(completion, /storedBeforeGeneration/);
 });
