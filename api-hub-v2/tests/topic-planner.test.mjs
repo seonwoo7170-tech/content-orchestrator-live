@@ -8,6 +8,7 @@ function aiMock(response) {
       assert.equal(model, '@cf/openai/gpt-oss-120b');
       assert.equal(body.messages[0].role, 'system');
       assert.match(body.messages[0].content, /conservative blog topic planner/);
+      assert.match(body.messages[0].content, /do not default every English topic to \"How to\"/i);
       return { response, usage: { input_tokens: 10, output_tokens: 5 } };
     }
   };
