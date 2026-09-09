@@ -2,15 +2,17 @@ import { callHub } from './api-hub.js';
 import {
   listJobImages,
   markImageGenerated,
+  markImagePuterAttempted,
   markImageProviderPending,
   markImageProviderProgress,
   markImageProviderRetry,
   markImageStored
 } from './image-store.js';
 import { generateLocalFallbackImage } from './local-image-fallback.js';
+import { generatePuterImage, puterCheckpointTaskId, puterImageConfigured } from './puter-image-provider.js';
 import { postprocessThumbnail } from './thumbnail-postprocess.js';
 
-const IMAGE_PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie', 'modelscope']);
+const IMAGE_PROVIDER_MODES = new Set(['auto', 'puter', 'cloudflare', 'kie', 'modelscope']);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -136,11 +138,14 @@ export function imageProviderMode(env = {}) {
 export function imageProviderSequence(providerMode = 'auto') {
   const mode = String(providerMode || 'auto').trim().toLowerCase();
   if (!IMAGE_PROVIDER_MODES.has(mode)) throw new Error('IMAGE_PROVIDER_MODE_INVALID');
-  if (mode === 'auto') return ['kie', 'cloudflare'];
+  if (mode === 'auto') return ['puter', 'kie', 'cloudflare'];
   return [mode];
 }
 
-async function callImageProvider(env, image, prompt, providerMode, callHubFn) {
+async function callImageProvider(env, jobId, image, prompt, providerMode, callHubFn) {
+  if (providerMode === 'puter') {
+    return generatePuterImage(env, jobId, image, prompt);
+  }
   const payload = {
     role: image.role,
     prompt,
@@ -152,7 +157,7 @@ async function callImageProvider(env, image, prompt, providerMode, callHubFn) {
   return callHubFn(env, env.HUB_IMAGE_GENERATE_PATH || '/api/hub/image/generate', payload);
 }
 
-async function restartKieAfterQa(env, image, callHubFn) {
+async function restartKieAfterQa(env, jobId, image, callHubFn) {
   const cooldownMs = kieQaRetryCooldownMs(env);
   if (cooldownMs > 0) await sleep(cooldownMs);
   const retryImage = {
@@ -161,10 +166,10 @@ async function restartKieAfterQa(env, image, callHubFn) {
     error: 'IMAGE_QA_REJECTED'
   };
   const prompt = retryPromptForImage(retryImage);
-  return callImageProvider(env, retryImage, prompt, 'kie', callHubFn);
+  return callImageProvider(env, jobId, retryImage, prompt, 'kie', callHubFn);
 }
 
-async function generateSourceImage(env, image, options, callHubFn) {
+async function generateSourceImage(env, jobId, image, options, callHubFn) {
   const prompt = retryPromptForImage(image);
   const providerMode = imageProviderMode(env);
   const providers = imageProviderSequence(providerMode);
@@ -176,7 +181,7 @@ async function generateSourceImage(env, image, options, callHubFn) {
     const provider = providers[index];
     if (index > 0 && pacingMs > 0) await sleep(pacingMs);
     try {
-      const generated = await callImageProvider(env, image, prompt, provider, callHubFn);
+      const generated = await callImageProvider(env, jobId, image, prompt, provider, callHubFn);
       if (generated?.pending === true || generated?.complete === false) return generated;
       if (index === 0) return generated;
       return {
@@ -188,7 +193,7 @@ async function generateSourceImage(env, image, options, callHubFn) {
       if (shouldPreserveImageTask(image, error)) throw error;
       if (provider === 'kie' && shouldRestartKieAfterQa(image, error, env)) {
         try {
-          const regenerated = await restartKieAfterQa(env, image, callHubFn);
+          const regenerated = await restartKieAfterQa(env, jobId, image, callHubFn);
           if (regenerated?.pending === true || regenerated?.complete === false) return regenerated;
           return regenerated;
         } catch (retryError) {
@@ -288,6 +293,11 @@ const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pen
 export function shouldPreserveImageTask(image, error) {
   if (!String(image?.provider_task_id || '').trim()) return false;
   const message = String(error?.message || error || '');
+  const provider = String(image?.provider || '').trim().toLowerCase();
+  if (provider === 'puter') {
+    if (/PUTER_OUTCOME_UNKNOWN(?:$|:|_WAIT)/i.test(message) && !/EXPIRED/i.test(message)) return true;
+    return !/(?:PUTER_(?:AUTH_FAILED|INSUFFICIENT_FUNDS|CONTENT_REJECTED|MODEL_UNAVAILABLE|UPSTREAM_FAILED|RATE_LIMITED|OUTCOME_UNKNOWN_EXPIRED|NOT_CONFIGURED|PROVIDER_ERROR)|IMAGE_QA_REJECTED)/i.test(message);
+  }
   // Only explicit terminal provider outcomes or a genuine QA rejection retire a task.
   return !/(?:KIE_(?:TASK_TIMEOUT|IMAGE_GENERATION_FAILED|PROVIDER_GENERATION_FAILED|CONTENT_REJECTED|AUTH_FAILED|INSUFFICIENT_CREDITS|VALIDATION_FAILED)|MODELSCOPE_(?:IMAGE_GENERATION_FAILED|TASK_FAILED|TASK_TIMEOUT|AUTH_FAILED)|IMAGE_QA_REJECTED)/i.test(message);
 }
@@ -310,8 +320,21 @@ function orderedImageCandidates(rows = [], retryFailed = true) {
 
 async function executeImageCandidate(env, jobId, image, index, options, callHubFn, bucket, baseUrl, pacingMs) {
   if (index > 0 && pacingMs > 0) await sleep(pacingMs * index);
+  let executionImage = image;
+  const selectedMode = imageProviderMode(env);
+  if ((selectedMode === 'puter' || selectedMode === 'auto') && puterImageConfigured(env) && Number(image?.puter_attempted || 0) !== 1) {
+    const taskId = puterCheckpointTaskId(jobId, image);
+    await markImagePuterAttempted(env, image.id, { taskId, state: 'checkpointed' });
+    executionImage = {
+      ...image,
+      puter_attempted: 1,
+      provider: 'puter',
+      provider_task_id: taskId,
+      provider_status: 'checkpointed'
+    };
+  }
   try {
-    const generated = await generateSourceImage(env, image, options, callHubFn);
+    const generated = await generateSourceImage(env, jobId, executionImage, options, callHubFn);
     if (generated?.pending === true || generated?.complete === false) {
       const taskId = String(generated?.taskId || image?.provider_task_id || '').trim();
       if (!taskId) throw new Error('IMAGE_PROVIDER_TASK_ID_MISSING');
@@ -337,7 +360,9 @@ async function executeImageCandidate(env, jobId, image, index, options, callHubF
     }
 
     const sourceMimeType = sourceImageMimeType(generated.mimeType);
-    const sourceBytes = decodeBase64(generated.imageBase64);
+    const sourceBytes = generated.imageBytes instanceof Uint8Array
+      ? generated.imageBytes
+      : decodeBase64(generated.imageBase64);
     await markImageGenerated(env, image.id, { ...generated, mimeType: sourceMimeType });
 
     const raw = await storeImageBytes(env, bucket, baseUrl, jobId, image, sourceBytes, sourceMimeType, generated, {
@@ -391,18 +416,25 @@ async function executeImageCandidate(env, jobId, image, index, options, callHubF
       fallbackReason: generated.fallbackReason || null
     };
   } catch (error) {
-    if (shouldPreserveImageTask(image, error)) {
+    const errorMessage = String(error?.message || error || '');
+    if (/PUTER_OUTCOME_UNKNOWN(?:$|:|_WAIT)/i.test(errorMessage) && !/EXPIRED/i.test(errorMessage)) {
+      await markImageProviderProgress(env, image.id, { state: 'outcome_unknown' });
+      return { imageId: image.id, status: 'pending', taskId: executionImage.provider_task_id || puterCheckpointTaskId(jobId, image),
+        provider: 'puter', providerState: 'outcome_unknown', error: errorMessage };
+    }
+    if (shouldPreserveImageTask(executionImage, error)) {
       await markImageProviderProgress(env, image.id, { state: 'query_retry' });
-      return { imageId: image.id, status: 'pending', taskId: image.provider_task_id,
-        provider: image.provider || 'kie-ai', providerState: 'query_retry',
+      return { imageId: image.id, status: 'pending', taskId: executionImage.provider_task_id,
+        provider: executionImage.provider || 'kie-ai', providerState: 'query_retry',
         error: String(error?.message || 'IMAGE_TASK_RESUME_RETRY') };
     }
     const rejectedPreviewUrl = await preserveRejectedPreview(env, bucket, baseUrl, jobId, image, error).catch(() => null);
     const mode = imageProviderMode(env);
-    const countAttempt = !String(image?.provider_task_id || '').trim() && mode !== 'cloudflare';
+    const countAttempt = !String(executionImage?.provider_task_id || '').trim() && (mode === 'kie' || mode === 'modelscope');
+    const retryProvider = mode === 'puter' ? 'puter' : (countAttempt ? (mode === 'modelscope' ? 'modelscope' : 'kie-ai') : null);
     await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY', {
       countAttempt,
-      provider: countAttempt ? (mode === 'modelscope' ? 'modelscope' : 'kie-ai') : null
+      provider: retryProvider
     });
     return { imageId: image.id, status: 'retrying', error: String(error?.message || 'IMAGE_GENERATION_RETRY'), rejectedPreviewUrl };
   }

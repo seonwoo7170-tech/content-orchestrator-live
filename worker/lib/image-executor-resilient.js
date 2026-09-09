@@ -1,5 +1,6 @@
 import { generatePlannedImages as generateBaseImages, imageExecutionPriority, isResumableImageStatus } from './image-executor.js';
 import { listJobImages } from './image-store.js';
+import { puterImageConfigured } from './puter-image-provider.js';
 
 export function kieGenerationRetryMax(env = {}) {
   const configured = Number(env?.KIE_IMAGE_GENERATION_RETRY_MAX ?? 3);
@@ -41,7 +42,13 @@ export function isSuccessfulPaidImageCheckpoint(image = {}) {
 export function scheduledProviderModeForImage(image = {}, env = {}) {
   const taskId = String(image?.provider_task_id || '').trim();
   const provider = normalizedProvider(image);
-  if (taskId) return provider === 'modelscope' ? 'modelscope' : 'kie';
+  const providerStatus = String(image?.provider_status || '').trim().toLowerCase();
+  if (taskId) {
+    if (provider === 'puter') return 'puter';
+    return provider === 'modelscope' ? 'modelscope' : 'kie';
+  }
+
+  if (provider === 'puter' && providerStatus === 'success') return 'puter';
 
   // Never submit another paid task after KIE has already reported success.
   // A missing taskId here is a recovery/data-integrity problem, not a reason to charge again.
@@ -51,6 +58,8 @@ export function scheduledProviderModeForImage(image = {}, env = {}) {
   if (provider === 'modelscope') return 'kie';
 
   const attempts = Math.max(0, Math.trunc(Number(image?.provider_attempt_count || 0) || 0));
+  const puterAttempted = Number(image?.puter_attempted || 0) === 1;
+  if (!puterAttempted && puterImageConfigured(env)) return 'puter';
   if (attempts === 0 && modelScopeImageEnabled(env)) return 'modelscope';
 
   // provider_attempt_count is shared across async providers. Reserve one slot for
@@ -116,6 +125,21 @@ async function runOneImage(env, jobId, image, options = {}) {
 
   const firstOutcome = Array.isArray(first?.outcomes) ? first.outcomes[0] : null;
 
+  if (providerMode === 'puter' && firstOutcome?.status === 'pending') {
+    return first;
+  }
+
+  if (providerMode === 'puter' && firstOutcome?.status === 'retrying') {
+    const current = await refreshedImage(env, jobId, image.id);
+    const attempts = Math.max(0, Math.trunc(Number((current || image)?.provider_attempt_count || 0) || 0));
+    const nextMode = attempts < kieGenerationRetryMax(env) ? 'kie' : 'cloudflare';
+    return generateBaseImages(
+      { ...env, IMAGE_PROVIDER_MODE: nextMode },
+      jobId,
+      imageOptions
+    );
+  }
+
   if (providerMode === 'modelscope' && firstOutcome?.status === 'retrying') {
     return generateBaseImages(
       { ...env, IMAGE_PROVIDER_MODE: 'kie' },
@@ -163,7 +187,8 @@ function combineExecutionResults(results = [], images = []) {
 
 /**
  * Scheduled publishing policy:
- * - ModelScope Z-Image Turbo is the free-first provider when explicitly enabled;
+ * - Puter is the free/user-allowance-first provider when configured;
+ * - ModelScope Z-Image Turbo remains optional when explicitly enabled;
  * - an active async task always resumes on the provider that created it;
  * - a successful KIE checkpoint is never regenerated or replaced;
  * - ModelScope terminal failure hands off immediately to KIE;
