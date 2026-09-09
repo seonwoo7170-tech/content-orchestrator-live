@@ -1,0 +1,24 @@
+name: inspect-puter-test-drift
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/inspect-puter-test-drift-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate old KIE-first test assumptions
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '--- KIE FIRST PHRASES ---'
+          grep -RniE "KIE first|kie.*cloudflare|cloudflare.*kie|providerMode.*kie|\['kie', 'cloudflare'\]" tests | head -n 120 || true
+          echo '--- IMAGE DURABLE MIGRATIONS ---'
+          grep -n "002[678]_" tests/image-durable-retry.test.mjs || true
