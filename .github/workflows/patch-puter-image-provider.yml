@@ -1,0 +1,82 @@
+name: patch-puter-image-provider
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/patch-puter-image-provider-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch image executor and resilient routing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('worker/lib/image-executor.js')
+          s = p.read_text()
+          s = s.replace("  markImageGenerated,\n  markImageProviderPending,", "  markImageGenerated,\n  markImagePuterAttempted,\n  markImageProviderPending,", 1)
+          s = s.replace("import { generateLocalFallbackImage } from './local-image-fallback.js';", "import { generateLocalFallbackImage } from './local-image-fallback.js';\nimport { generatePuterImage, puterCheckpointTaskId, puterImageConfigured } from './puter-image-provider.js';", 1)
+          s = s.replace("const IMAGE_PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie', 'modelscope']);", "const IMAGE_PROVIDER_MODES = new Set(['auto', 'puter', 'cloudflare', 'kie', 'modelscope']);", 1)
+          s = s.replace("  if (mode === 'auto') return ['kie', 'cloudflare'];", "  if (mode === 'auto') return ['puter', 'kie', 'cloudflare'];", 1)
+          s = s.replace("async function callImageProvider(env, image, prompt, providerMode, callHubFn) {\n  const payload = {", "async function callImageProvider(env, jobId, image, prompt, providerMode, callHubFn) {\n  if (providerMode === 'puter') {\n    return generatePuterImage(env, jobId, image, prompt);\n  }\n  const payload = {", 1)
+          s = s.replace("async function restartKieAfterQa(env, image, callHubFn) {", "async function restartKieAfterQa(env, jobId, image, callHubFn) {", 1)
+          s = s.replace("  return callImageProvider(env, retryImage, prompt, 'kie', callHubFn);", "  return callImageProvider(env, jobId, retryImage, prompt, 'kie', callHubFn);", 1)
+          s = s.replace("async function generateSourceImage(env, image, options, callHubFn) {", "async function generateSourceImage(env, jobId, image, options, callHubFn) {", 1)
+          s = s.replace("      const generated = await callImageProvider(env, image, prompt, provider, callHubFn);", "      const generated = await callImageProvider(env, jobId, image, prompt, provider, callHubFn);", 1)
+          s = s.replace("          const regenerated = await restartKieAfterQa(env, image, callHubFn);", "          const regenerated = await restartKieAfterQa(env, jobId, image, callHubFn);", 1)
+          old = """async function executeImageCandidate(env, jobId, image, index, options, callHubFn, bucket, baseUrl, pacingMs) {\n  if (index > 0 && pacingMs > 0) await sleep(pacingMs * index);\n  try {\n    const generated = await generateSourceImage(env, image, options, callHubFn);\n"""
+          new = """async function executeImageCandidate(env, jobId, image, index, options, callHubFn, bucket, baseUrl, pacingMs) {\n  if (index > 0 && pacingMs > 0) await sleep(pacingMs * index);\n  let executionImage = image;\n  const selectedMode = imageProviderMode(env);\n  if ((selectedMode === 'puter' || selectedMode === 'auto') && puterImageConfigured(env) && Number(image?.puter_attempted || 0) !== 1) {\n    const taskId = puterCheckpointTaskId(jobId, image);\n    await markImagePuterAttempted(env, image.id, { taskId, state: 'checkpointed' });\n    executionImage = {\n      ...image,\n      puter_attempted: 1,\n      provider: 'puter',\n      provider_task_id: taskId,\n      provider_status: 'checkpointed'\n    };\n  }\n  try {\n    const generated = await generateSourceImage(env, jobId, executionImage, options, callHubFn);\n"""
+          assert old in s, 'executeImageCandidate header not found'
+          s = s.replace(old, new, 1)
+          s = s.replace("    const sourceBytes = decodeBase64(generated.imageBase64);", "    const sourceBytes = generated.imageBytes instanceof Uint8Array\n      ? generated.imageBytes\n      : decodeBase64(generated.imageBase64);", 1)
+          old = """  } catch (error) {\n    if (shouldPreserveImageTask(image, error)) {\n      await markImageProviderProgress(env, image.id, { state: 'query_retry' });\n      return { imageId: image.id, status: 'pending', taskId: image.provider_task_id,\n        provider: image.provider || 'kie-ai', providerState: 'query_retry',\n        error: String(error?.message || 'IMAGE_TASK_RESUME_RETRY') };\n    }\n"""
+          new = """  } catch (error) {\n    const errorMessage = String(error?.message || error || '');\n    if (/PUTER_OUTCOME_UNKNOWN(?:$|:|_WAIT)/i.test(errorMessage) && !/EXPIRED/i.test(errorMessage)) {\n      await markImageProviderProgress(env, image.id, { state: 'outcome_unknown' });\n      return { imageId: image.id, status: 'pending', taskId: executionImage.provider_task_id || puterCheckpointTaskId(jobId, image),\n        provider: 'puter', providerState: 'outcome_unknown', error: errorMessage };\n    }\n    if (shouldPreserveImageTask(executionImage, error)) {\n      await markImageProviderProgress(env, image.id, { state: 'query_retry' });\n      return { imageId: image.id, status: 'pending', taskId: executionImage.provider_task_id,\n        provider: executionImage.provider || 'kie-ai', providerState: 'query_retry',\n        error: String(error?.message || 'IMAGE_TASK_RESUME_RETRY') };\n    }\n"""
+          assert old in s, 'catch preserve block not found'
+          s = s.replace(old, new, 1)
+          old = """    const mode = imageProviderMode(env);\n    const countAttempt = !String(image?.provider_task_id || '').trim() && mode !== 'cloudflare';\n    await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY', {\n      countAttempt,\n      provider: countAttempt ? (mode === 'modelscope' ? 'modelscope' : 'kie-ai') : null\n    });\n"""
+          new = """    const mode = imageProviderMode(env);\n    const countAttempt = !String(executionImage?.provider_task_id || '').trim() && (mode === 'kie' || mode === 'modelscope');\n    const retryProvider = mode === 'puter' ? 'puter' : (countAttempt ? (mode === 'modelscope' ? 'modelscope' : 'kie-ai') : null);\n    await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY', {\n      countAttempt,\n      provider: retryProvider\n    });\n"""
+          assert old in s, 'retry accounting block not found'
+          s = s.replace(old, new, 1)
+          old = """export function shouldPreserveImageTask(image, error) {\n  if (!String(image?.provider_task_id || '').trim()) return false;\n  const message = String(error?.message || error || '');\n  // Only explicit terminal provider outcomes or a genuine QA rejection retire a task.\n  return !/(?:KIE_(?:TASK_TIMEOUT|IMAGE_GENERATION_FAILED|PROVIDER_GENERATION_FAILED|CONTENT_REJECTED|AUTH_FAILED|INSUFFICIENT_CREDITS|VALIDATION_FAILED)|MODELSCOPE_(?:IMAGE_GENERATION_FAILED|TASK_FAILED|TASK_TIMEOUT|AUTH_FAILED)|IMAGE_QA_REJECTED)/i.test(message);\n}\n"""
+          new = """export function shouldPreserveImageTask(image, error) {\n  if (!String(image?.provider_task_id || '').trim()) return false;\n  const message = String(error?.message || error || '');\n  const provider = String(image?.provider || '').trim().toLowerCase();\n  if (provider === 'puter') {\n    if (/PUTER_OUTCOME_UNKNOWN(?:$|:|_WAIT)/i.test(message) && !/EXPIRED/i.test(message)) return true;\n    return !/(?:PUTER_(?:AUTH_FAILED|INSUFFICIENT_FUNDS|CONTENT_REJECTED|MODEL_UNAVAILABLE|UPSTREAM_FAILED|RATE_LIMITED|OUTCOME_UNKNOWN_EXPIRED|NOT_CONFIGURED|PROVIDER_ERROR)|IMAGE_QA_REJECTED)/i.test(message);\n  }\n  // Only explicit terminal provider outcomes or a genuine QA rejection retire a task.\n  return !/(?:KIE_(?:TASK_TIMEOUT|IMAGE_GENERATION_FAILED|PROVIDER_GENERATION_FAILED|CONTENT_REJECTED|AUTH_FAILED|INSUFFICIENT_CREDITS|VALIDATION_FAILED)|MODELSCOPE_(?:IMAGE_GENERATION_FAILED|TASK_FAILED|TASK_TIMEOUT|AUTH_FAILED)|IMAGE_QA_REJECTED)/i.test(message);\n}\n"""
+          assert old in s, 'shouldPreserveImageTask block not found'
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('worker/lib/image-executor-resilient.js')
+          s = p.read_text()
+          s = s.replace("import { listJobImages } from './image-store.js';", "import { listJobImages } from './image-store.js';\nimport { puterImageConfigured } from './puter-image-provider.js';", 1)
+          old = """export function scheduledProviderModeForImage(image = {}, env = {}) {\n  const taskId = String(image?.provider_task_id || '').trim();\n  const provider = normalizedProvider(image);\n  if (taskId) return provider === 'modelscope' ? 'modelscope' : 'kie';\n\n  // Never submit another paid task after KIE has already reported success.\n"""
+          new = """export function scheduledProviderModeForImage(image = {}, env = {}) {\n  const taskId = String(image?.provider_task_id || '').trim();\n  const provider = normalizedProvider(image);\n  const providerStatus = String(image?.provider_status || '').trim().toLowerCase();\n  if (taskId) {\n    if (provider === 'puter') return 'puter';\n    return provider === 'modelscope' ? 'modelscope' : 'kie';\n  }\n\n  if (provider === 'puter' && providerStatus === 'success') return 'puter';\n\n  // Never submit another paid task after KIE has already reported success.\n"""
+          assert old in s, 'scheduled provider header not found'
+          s = s.replace(old, new, 1)
+          old = """  // A finished/failed ModelScope task gets one immediate handoff to KIE.\n  if (provider === 'modelscope') return 'kie';\n\n  const attempts = Math.max(0, Math.trunc(Number(image?.provider_attempt_count || 0) || 0));\n  if (attempts === 0 && modelScopeImageEnabled(env)) return 'modelscope';\n"""
+          new = """  // A finished/failed ModelScope task gets one immediate handoff to KIE.\n  if (provider === 'modelscope') return 'kie';\n\n  const attempts = Math.max(0, Math.trunc(Number(image?.provider_attempt_count || 0) || 0));\n  const puterAttempted = Number(image?.puter_attempted || 0) === 1;\n  if (!puterAttempted && puterImageConfigured(env)) return 'puter';\n  if (attempts === 0 && modelScopeImageEnabled(env)) return 'modelscope';\n"""
+          assert old in s, 'puter-first insertion point not found'
+          s = s.replace(old, new, 1)
+          old = """  if (providerMode === 'modelscope' && firstOutcome?.status === 'retrying') {\n    return generateBaseImages(\n      { ...env, IMAGE_PROVIDER_MODE: 'kie' },\n      jobId,\n      imageOptions\n    );\n  }\n\n  if (providerMode === 'kie' && firstOutcome?.status === 'retrying') {\n"""
+          new = """  if (providerMode === 'puter' && firstOutcome?.status === 'pending') {\n    return first;\n  }\n\n  if (providerMode === 'puter' && firstOutcome?.status === 'retrying') {\n    const current = await refreshedImage(env, jobId, image.id);\n    const attempts = Math.max(0, Math.trunc(Number((current || image)?.provider_attempt_count || 0) || 0));\n    const nextMode = attempts < kieGenerationRetryMax(env) ? 'kie' : 'cloudflare';\n    return generateBaseImages(\n      { ...env, IMAGE_PROVIDER_MODE: nextMode },\n      jobId,\n      imageOptions\n    );\n  }\n\n  if (providerMode === 'modelscope' && firstOutcome?.status === 'retrying') {\n    return generateBaseImages(\n      { ...env, IMAGE_PROVIDER_MODE: 'kie' },\n      jobId,\n      imageOptions\n    );\n  }\n\n  if (providerMode === 'kie' && firstOutcome?.status === 'retrying') {\n"""
+          assert old in s, 'runOneImage fallback point not found'
+          s = s.replace(old, new, 1)
+          s = s.replace(" * - ModelScope Z-Image Turbo is the free-first provider when explicitly enabled;", " * - Puter is the free/user-allowance-first provider when configured;\n * - ModelScope Z-Image Turbo remains optional when explicitly enabled;", 1)
+          p.write_text(s)
+          PY
+
+          git diff --check
+          git diff -- worker/lib/image-executor.js worker/lib/image-executor-resilient.js
+          git config user.name "smileseon-ops"
+          git config user.email "actions@users.noreply.github.com"
+          git add worker/lib/image-executor.js worker/lib/image-executor-resilient.js
+          git commit -m "feat: route images Puter first with durable recovery"
+          git push origin HEAD:main
