@@ -1,0 +1,57 @@
+name: patch-image-completion-free
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/patch-image-completion-free-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch image completion for free cron budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('worker/lib/image-completion.js')
+          s = p.read_text()
+
+          old = """  if (!state.complete) {\n    generated = await generatePlannedImages(env, jobId, {\n"""
+          new = """  const storedBeforeGeneration = images.some((image) => String(image.status) === 'stored');\n\n  // Finish durable stored -> attached work before asking another provider for more bytes.\n  // This keeps each free-plan cron invocation small and makes partial progress durable.\n  if (!state.complete && !storedBeforeGeneration) {\n    generated = await generatePlannedImages(env, jobId, {\n"""
+          assert old in s, 'stored-before-generation insertion point not found'
+          s = s.replace(old, new, 1)
+
+          old = """        complete: verification.ok,\n        generated: visibleImages.length,\n"""
+          new = """        complete: verification.ok && state.complete,\n        generated: visibleImages.length,\n"""
+          assert old in s, 'imagePipeline complete assignment not found'
+          s = s.replace(old, new, 1)
+
+          old = """        item = await completeReadyJobImages(env, candidate, effective, { ...options, maxImages: 3 });\n"""
+          new = """        item = await completeReadyJobImages(env, candidate, effective, {\n          ...options,\n          maxImages: positiveLimit(options.maxImages, 1, 3)\n        });\n"""
+          assert old in s, 'maxImages override not found'
+          s = s.replace(old, new, 1)
+
+          old = """        if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) continue;\n        break;\n"""
+          new = """        if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) {\n          // The serial watchdog intentionally asks for one image. Persist that one image\n          // completely, release the runtime lock, and let the next cron continue.\n          if (positiveLimit(options.maxImages, 1, 3) === 1) break;\n          continue;\n        }\n        break;\n"""
+          assert old in s, 'single-image progress break point not found'
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+
+          git diff --check
+          git diff -- worker/lib/image-completion.js
+          git config user.name "smileseon-ops"
+          git config user.email "actions@users.noreply.github.com"
+          git add worker/lib/image-completion.js
+          git commit -m "fix: make scheduled image completion durable one image at a time"
+          git push origin HEAD:main
