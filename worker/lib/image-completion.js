@@ -220,7 +220,11 @@ export async function completeReadyJobImages(env, candidate, effective, options 
   let state = imageCompletionState(images, plan.generatedCount);
   let generated = { requested: 0, stored: 0, pending: 0, failed: 0, outcomes: [] };
 
-  if (!state.complete) {
+  const storedBeforeGeneration = images.some((image) => String(image.status) === 'stored');
+
+  // Finish durable stored -> attached work before asking another provider for more bytes.
+  // This keeps each free-plan cron invocation small and makes partial progress durable.
+  if (!state.complete && !storedBeforeGeneration) {
     generated = await generatePlannedImages(env, jobId, {
       retryFailed: true,
       maxImages: positiveLimit(options.maxImages, 3, 3),
@@ -249,7 +253,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
         provider: image.provider || null
       })),
       imagePipeline: imagePipelineMeta(candidate, plan, images, verification, {
-        complete: verification.ok,
+        complete: verification.ok && state.complete,
         generated: visibleImages.length,
         attachedThisRun: attachableImages.length,
         reusedExisting: plan.existingCount > 0,
@@ -326,7 +330,10 @@ export async function runScheduledImageCompletion(env, options = {}) {
     let item = null;
     try {
       while (Date.now() - jobStartedAt < jobBudgetMs && Date.now() - chainStartedAt < chainBudgetMs) {
-        item = await completeReadyJobImages(env, candidate, effective, { ...options, maxImages: 3 });
+        item = await completeReadyJobImages(env, candidate, effective, {
+          ...options,
+          maxImages: positiveLimit(options.maxImages, 1, 3)
+        });
         if (item?.complete || Number(item?.failed || 0) > 0) break;
         if (Number(item?.pending || 0) > 0) {
           if (callbackMode && String(item?.pendingProvider || '') === 'kie-ai') {
@@ -336,7 +343,12 @@ export async function runScheduledImageCompletion(env, options = {}) {
           await sleep(pollIntervalMs);
           continue;
         }
-        if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) continue;
+        if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) {
+          // The serial watchdog intentionally asks for one image. Persist that one image
+          // completely, release the runtime lock, and let the next cron continue.
+          if (positiveLimit(options.maxImages, 1, 3) === 1) break;
+          continue;
+        }
         break;
       }
 
