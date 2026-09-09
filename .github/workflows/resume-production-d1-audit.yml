@@ -52,7 +52,7 @@ jobs:
             const [counts,recent,slots,images]=await Promise.all([
               q(`SELECT status, COUNT(*) AS n FROM jobs WHERE archived_at IS NULL GROUP BY status ORDER BY status`),
               q(`SELECT id,mode,blog_id,status,last_error_code,recovery_state,retry_count,updated_at FROM jobs WHERE archived_at IS NULL AND status<>'completed' ORDER BY datetime(updated_at) DESC,id DESC LIMIT 30`),
-              q(`SELECT id,plan_date,blog_id,slot_type,status,job_id,recovery_state,last_error_code,updated_at FROM daily_plan_slots WHERE plan_date=date('now','+9 hours') ORDER BY id`),
+              q(`SELECT id,plan_date,blog_id,kind,status,job_id,recovery_state,last_error_code,updated_at FROM daily_plan_slots WHERE plan_date=date('now','+9 hours') ORDER BY id`),
               q(`SELECT status,provider,provider_status,COUNT(*) AS n FROM job_images GROUP BY status,provider,provider_status ORDER BY status,provider,provider_status`)
             ]);
             console.log(`${label}_COUNTS ${JSON.stringify(counts)}`);
