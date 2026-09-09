@@ -3,6 +3,7 @@ import { processStoredJob } from './stored-job-executor.js';
 import { cleanupSupersededLegacyRouteFailures } from './legacy-route-cleanup.js';
 import { cleanupReadyDuplicateNewArticles } from './topic-dedupe.js';
 import { primeAutomaticJobRescue } from './job-auto-rescue.js';
+import { recoverAmbiguousPublications } from './publication-ambiguity-recovery.js';
 import { reconcilePendingPublicationReadbacks } from './publication-readback-recovery.js';
 import {
   listDueRetryJobs,
@@ -51,9 +52,18 @@ export async function runDueJobRecoveries(env, options = {}) {
   const cleanupLegacyFn = options.cleanupLegacyFn || cleanupSupersededLegacyRouteFailures;
   const cleanupDuplicateFn = options.cleanupDuplicateFn || cleanupReadyDuplicateNewArticles;
   const autoRescueFn = options.autoRescueFn || primeAutomaticJobRescue;
+  const ambiguityRecoveryFn = options.ambiguityRecoveryFn || recoverAmbiguousPublications;
   const readbackRecoveryFn = options.readbackRecoveryFn || reconcilePendingPublicationReadbacks;
   const effectiveByBlog = settingsByBlog(options.automation);
 
+  // Unknown Blogger write outcomes are reconciled first. A confirmed existing post is
+  // adopted before exact-ID read-back runs; a confirmed no-match is returned to the
+  // ready/publish lane with its final article and attached images untouched.
+  const ambiguityRecovery = await ambiguityRecoveryFn(env, {
+    now,
+    limit: maxItems,
+    ...(options.callHubFn ? { callHubFn: options.callHubFn } : {})
+  });
   const readbackRecovery = await readbackRecoveryFn(env, {
     limit: maxItems,
     ...(options.callHubFn ? { callHubFn: options.callHubFn } : {})
@@ -120,12 +130,14 @@ export async function runDueJobRecoveries(env, options = {}) {
   }
 
   const attentionRequired = items.filter((item) => ['failed', 'held'].includes(item.status)).length
-    + Number(readbackRecovery?.failed || 0);
+    + Number(readbackRecovery?.failed || 0)
+    + Number(ambiguityRecovery?.held || 0);
   return {
     ok: attentionRequired === 0,
     health: attentionRequired > 0 ? 'attention_required' : 'ok',
     attentionRequired,
     enabled: true,
+    ambiguityRecovery,
     readbackRecovery,
     legacyCleanup,
     duplicateCleanup,
