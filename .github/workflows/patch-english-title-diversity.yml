@@ -1,0 +1,80 @@
+name: Patch English title diversity
+
+on:
+  push:
+    paths:
+      - '.github/english-title-diversity-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Patch English title diversity rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          topic_path = Path('api-hub-v2/src/lib/topic-planner.js')
+          topic = topic_path.read_text()
+          old = "Avoid exact or near duplicates of the recent titles. Prefer practical search-intent topics a normal reader can act on. Do not choose breaking news, current prices, unsupported product claims, medical/legal/financial high-stakes advice, or a topic that would require invented first-hand experience. Do not mention automation or AI unless the blog itself is about AI."
+          new = "Avoid exact or near duplicates of the recent titles. Prefer practical search-intent topics a normal reader can act on. For language=en, preserve title-pattern diversity as well as topic diversity: inspect the openings of recent English titles and do not default every English topic to \"How to\". Use \"How to\" only when the search intent is genuinely procedural or step-by-step. For explanation, diagnosis, comparison, selection, timing, cost, suitability, definition, or troubleshooting intent, prefer the most natural form for the query, including Why, What, Which, When, Can, Should, Is/Are, Does/Do, How Much, How Long, How Often, or a concise natural non-question title. Do not force an awkward question word merely for variety, and avoid repeating a dominant recent opening pattern when another natural search-oriented form fits. Do not choose breaking news, current prices, unsupported product claims, medical/legal/financial high-stakes advice, or a topic that would require invented first-hand experience. Do not mention automation or AI unless the blog itself is about AI."
+          if old not in topic:
+              raise SystemExit('TOPIC_PROMPT_PATCH_TARGET_MISSING')
+          topic = topic.replace(old, new, 1)
+          topic_path.write_text(topic)
+
+          routes_path = Path('api-hub-v2/src/lib/ai-routes.js')
+          routes = routes_path.read_text()
+          needle = "The title field is the Blogger post title and the Blogger theme/page template supplies the page-level heading; do not duplicate the title as an <h1> inside html. "
+          rule = "For language=en, write a natural search-oriented English title and do not default to \"How to\". Use \"How to\" only when the reader is genuinely looking for a procedural or step-by-step task. For explanation, diagnosis, comparison, selection, timing, cost, suitability, definition, or troubleshooting intent, choose the most natural title form for the query, including Why, What, Which, When, Can, Should, Is/Are, Does/Do, How Much, How Long, How Often, or a concise non-question title. Avoid formulaic repetition and preserve the supplied topic/search intent rather than forcing an awkward question word. "
+          if needle not in routes:
+              raise SystemExit('WRITER_TITLE_PATCH_TARGET_MISSING')
+          routes = routes.replace(needle, needle + rule, 1)
+          routes_path.write_text(routes)
+
+          test_path = Path('api-hub-v2/tests/topic-planner.test.mjs')
+          tests = test_path.read_text()
+          marker = "      assert.match(body.messages[0].content, /conservative blog topic planner/);\n"
+          addition = "      assert.match(body.messages[0].content, /do not default every English topic to \\\"How to\\\"/i);\n"
+          if marker not in tests:
+              raise SystemExit('TOPIC_TEST_PATCH_TARGET_MISSING')
+          tests = tests.replace(marker, marker + addition, 1)
+          test_path.write_text(tests)
+
+          if 'do not default every English topic to "How to"' not in topic:
+              raise SystemExit('TOPIC_DIVERSITY_RULE_NOT_WRITTEN')
+          if 'For language=en, write a natural search-oriented English title and do not default to "How to"' not in routes:
+              raise SystemExit('WRITER_DIVERSITY_RULE_NOT_WRITTEN')
+          PY
+
+      - name: Verify API Hub v2
+        run: npm install --no-audit --no-fund && npm run verify
+        working-directory: api-hub-v2
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No patch changes required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api-hub-v2/src/lib/topic-planner.js api-hub-v2/src/lib/ai-routes.js api-hub-v2/tests/topic-planner.test.mjs
+          git commit -m 'fix: diversify English article titles'
+          git push origin HEAD:main
