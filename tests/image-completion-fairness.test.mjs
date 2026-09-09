@@ -14,21 +14,23 @@ test('recent failed image jobs rotate behind healthy work but become priority ag
   assert.match(source, /CASE WHEN has_failed_images = 1 THEN image_activity_at ELSE j\.updated_at END/);
 });
 
-test('failed image work remains retryable within a three-image article batch', () => {
+test('failed image work remains retryable within a bounded article batch', () => {
   assert.match(source, /retryFailed:\s*true/);
   assert.match(source, /maxImages:\s*positiveLimit\(options\.maxImages, 3, 3\)/);
   assert.match(source, /const maxJobs = positiveLimit\(options\.maxJobs, env\?\.IMAGE_COMPLETION_MAX_ITEMS \|\| 1\)/);
   assert.match(source, /Math\.max\(3, Math\.min\(60, Number\(options\.failedRetryCooldownMinutes \?\? 10\)/);
 });
 
-test('scheduled image lane stays on one article, resumes async work, and cools down only between articles', () => {
+test('scheduled image lane persists one image durably and cools down only between completed articles', () => {
   assert.match(source, /SERIAL_IMAGE_POLL_INTERVAL_MS/);
   assert.match(source, /SERIAL_ARTICLE_IMAGE_COOLDOWN_MS/);
-  assert.match(source, /completeReadyJobImages\(env, candidate, effective, \{ \.\.\.options, maxImages: 3 \}\)/);
+  assert.match(source, /storedBeforeGeneration/);
+  assert.match(source, /maxImages:\s*positiveLimit\(options\.maxImages, 1, 3\)/);
   assert.match(source, /if \(Number\(item\?\.pending \|\| 0\) > 0\) \{/);
   assert.match(source, /if \(callbackMode && String\(item\?\.pendingProvider \|\| ''\) === 'kie-ai'\)/);
   assert.match(source, /AWAITING_KIE_CALLBACK/);
   assert.match(source, /await sleep\(pollIntervalMs\)/);
+  assert.match(source, /positiveLimit\(options\.maxImages, 1, 3\) === 1/);
   assert.match(source, /if \(!item\?\.complete\) break/);
   assert.match(source, /await sleep\(articleCooldownMs\)/);
 });
