@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { generatePlannedImages, imageExecutionPriority, retryPromptForImage } from '../worker/lib/image-executor.js';
-import { generatePlannedImages as generateResilient } from '../worker/lib/image-executor-resilient.js';
+import { generatePlannedImages as generateResilient, isSuccessfulPaidImageCheckpoint } from '../worker/lib/image-executor-resilient.js';
 import { handleKieImageCallback } from '../worker/lib/kie-image-callback.js';
 
 function fixture(t, active = false) {
@@ -47,6 +47,49 @@ test('a transient poll failure retains the paid task and never calls a fallback 
   assert.equal(row().provider_task_id, 'paid-task');
   assert.equal(row().provider_attempt_count, 1);
   assert.equal(imageExecutionPriority(row()), 0);
+});
+
+test('successful KIE generated checkpoint reuses the exact paid task and never creates a replacement task', async (t) => {
+  const { env, db, row } = fixture(t);
+  db.exec("UPDATE job_images SET status='generated', provider='kie-ai', provider_task_id='paid-task', provider_status='success', provider_attempt_count=1, mime_type='image/png'");
+  assert.equal(isSuccessfulPaidImageCheckpoint(row()), true);
+  const calls = [];
+  const result = await generateResilient(env, 1, { callHubFn: async (_, __, payload) => {
+    calls.push(payload);
+    assert.equal(payload.providerMode, 'kie');
+    assert.equal(payload.taskId, 'paid-task');
+    return { provider: 'kie-ai', model: 'z-image', mimeType: 'image/png', imageBase64: btoa('same-paid-image') };
+  } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].taskId, 'paid-task');
+  assert.equal(result.stored, 1);
+  assert.equal(row().provider_task_id, 'paid-task');
+  assert.equal(row().status, 'stored');
+});
+
+test('successful KIE checkpoint without task id is protected instead of generating another image', async (t) => {
+  const { env, db, row } = fixture(t);
+  db.exec("UPDATE job_images SET status='generated', provider='kie-ai', provider_task_id=NULL, provider_status='success', provider_attempt_count=3, mime_type='image/png'");
+  let calls = 0;
+  const result = await generateResilient(env, 1, { callHubFn: async () => {
+    calls++;
+    throw new Error('PROVIDER_MUST_NOT_BE_CALLED');
+  } });
+  assert.equal(calls, 0);
+  assert.equal(result.pending, 1);
+  assert.equal(result.outcomes[0].error, 'KIE_SUCCESS_CHECKPOINT_TASK_ID_MISSING_NO_REGEN');
+  assert.equal(row().status, 'generated');
+  assert.equal(row().provider_status, 'success');
+});
+
+test('stored successful image never enters generation again', async (t) => {
+  const { env, db, row } = fixture(t);
+  db.exec("UPDATE job_images SET status='stored', provider='kie-ai', provider_task_id='paid-task', provider_status='success', storage_key='jobs/1/body-1.png', public_url='https://images.example.com/media/jobs/1/body-1.png'");
+  let calls = 0;
+  const result = await generateResilient(env, 1, { callHubFn: async () => { calls++; throw new Error('MUST_NOT_CALL_PROVIDER'); } });
+  assert.equal(calls, 0);
+  assert.equal(result.requested, 0);
+  assert.equal(row().status, 'stored');
 });
 
 test('final failed KIE submission hands off to Cloudflare in the same invocation', async (t) => {
