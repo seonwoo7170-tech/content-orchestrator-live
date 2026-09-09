@@ -29,8 +29,8 @@ jobs:
           node --input-type=module - <<'NODE'
           const token = process.env.CLOUDFLARE_API_TOKEN;
           const account = process.env.CLOUDFLARE_ACCOUNT_ID;
-          const hubKey = process.env.HUB_API_KEY;
-          if (!token || !account || !hubKey) throw new Error('REQUIRED_SECRET_MISSING');
+          const hubKey = process.env.HUB_API_KEY || '';
+          if (!token || !account) throw new Error('CF_CREDENTIALS_MISSING');
           const cfHeaders = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
           async function cf(url, init = {}) {
             const r = await fetch(url, { ...init, headers: { ...cfHeaders, ...(init.headers || {}) } });
@@ -60,8 +60,8 @@ jobs:
             let result = null;
             try { result = row.result_json ? JSON.parse(row.result_json) : null; } catch {}
             const candidatePostId = String(pub?.blogger_post_id || result?.publication?.bloggerPostId || row.blogger_post_id || '').trim();
-            let readback = null;
-            if (candidatePostId) {
+            let readback = hubKey ? null : { skipped: true, reason: 'HUB_API_KEY_NOT_AVAILABLE_TO_WORKFLOW' };
+            if (candidatePostId && hubKey) {
               const r = await fetch(`${process.env.API_HUB_BASE_URL}/api/blogger/post/get`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json', 'x-hub-api-key': hubKey },
