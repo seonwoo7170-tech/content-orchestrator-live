@@ -1,0 +1,47 @@
+name: image-candidate-diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/image-candidate-diagnostic-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Read image candidate order from D1
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const token=process.env.CLOUDFLARE_API_TOKEN, account=process.env.CLOUDFLARE_ACCOUNT_ID;
+          if(!token||!account) throw new Error('CF_CREDENTIALS_MISSING');
+          const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+          async function cf(url,init={}){const r=await fetch(url,{...init,headers:{...headers,...(init.headers||{})},signal:AbortSignal.timeout(45000)});const d=await r.json().catch(()=>({}));if(!r.ok||d.success===false)throw new Error(`CF:${r.status}:${JSON.stringify(d.errors||d).slice(0,500)}`);return d;}
+          const list=await cf(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database`);
+          const db=(list.result||[]).find(x=>x.name==='content-orchestrator'); if(!db?.uuid)throw new Error('D1_DATABASE_NOT_FOUND');
+          const url=`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db.uuid}/query`;
+          async function q(sql){const d=await cf(url,{method:'POST',body:JSON.stringify({sql})});return ((Array.isArray(d.result)?d.result[0]:d.result)||{}).results||[];}
+          const candidates=await q(`SELECT DISTINCT j.id AS job_id,j.mode,j.blog_id,j.updated_at,
+            EXISTS(SELECT 1 FROM job_images fi WHERE fi.job_id=j.id AND fi.status='failed') AS has_failed_images,
+            COALESCE((SELECT MAX(ai.updated_at) FROM job_images ai WHERE ai.job_id=j.id),j.updated_at) AS image_activity_at,
+            (SELECT COUNT(*) FROM job_images x WHERE x.job_id=j.id AND x.status='failed') AS failed_count,
+            (SELECT COUNT(*) FROM job_images x WHERE x.job_id=j.id AND x.status='planned' AND x.provider_status='retrying' AND x.provider_task_id IS NULL) AS retrying_no_task,
+            (SELECT COUNT(*) FROM job_images x WHERE x.job_id=j.id AND x.provider_task_id IS NOT NULL AND x.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry')) AS active_tasks
+            FROM jobs j LEFT JOIN daily_plan_slots s ON s.job_id=j.id
+            WHERE j.status='ready' AND j.archived_at IS NULL AND j.mode IN ('new_article','repair_existing')
+              AND (j.mode='repair_existing' OR (j.mode='new_article' AND (s.job_id IS NULL OR (s.kind='new_article' AND s.status='resolved'))))
+            ORDER BY CASE WHEN has_failed_images=1 AND image_activity_at <= datetime('now','-10 minutes') THEN 0 WHEN has_failed_images=0 THEN 1 ELSE 2 END,
+              CASE WHEN has_failed_images=1 THEN image_activity_at ELSE j.updated_at END,j.id LIMIT 20`);
+          const images=await q(`SELECT id,job_id,role,position,status,provider,provider_status,provider_task_id,provider_attempt_count,provider_error_code,provider_error_message,error,updated_at FROM job_images WHERE job_id IN (95,96,98,100,112,83,93,105) ORDER BY job_id,id`);
+          console.log('CANDIDATES '+JSON.stringify(candidates));
+          console.log('DETAIL_IMAGES '+JSON.stringify(images));
+          NODE
