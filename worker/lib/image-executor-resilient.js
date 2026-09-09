@@ -29,10 +29,23 @@ function batchLimit(value, fallback = 3) {
   return Math.min(3, number);
 }
 
+export function isSuccessfulPaidImageCheckpoint(image = {}) {
+  const provider = normalizedProvider(image);
+  const status = String(image?.status || '').trim().toLowerCase();
+  const providerStatus = String(image?.provider_status || '').trim().toLowerCase();
+  return (provider === 'kie' || provider === 'kie-ai')
+    && (status === 'generated' || status === 'stored' || status === 'attached')
+    && providerStatus === 'success';
+}
+
 export function scheduledProviderModeForImage(image = {}, env = {}) {
   const taskId = String(image?.provider_task_id || '').trim();
   const provider = normalizedProvider(image);
   if (taskId) return provider === 'modelscope' ? 'modelscope' : 'kie';
+
+  // Never submit another paid task after KIE has already reported success.
+  // A missing taskId here is a recovery/data-integrity problem, not a reason to charge again.
+  if (isSuccessfulPaidImageCheckpoint(image)) return 'paid-success-checkpoint';
 
   // A finished/failed ModelScope task gets one immediate handoff to KIE.
   if (provider === 'modelscope') return 'kie';
@@ -59,8 +72,35 @@ async function refreshedImage(env, jobId, imageId) {
   return rows.find((row) => Number(row?.id) === Number(imageId)) || null;
 }
 
+function protectedCheckpointResult(image) {
+  return {
+    requested: 1,
+    stored: 0,
+    pending: 1,
+    retrying: 0,
+    failed: 0,
+    outcomes: [{
+      imageId: image.id,
+      status: 'pending',
+      provider: image.provider || 'kie-ai',
+      providerState: 'success_checkpoint',
+      taskId: null,
+      error: 'KIE_SUCCESS_CHECKPOINT_TASK_ID_MISSING_NO_REGEN'
+    }],
+    images: [image]
+  };
+}
+
 async function runOneImage(env, jobId, image, options = {}) {
   const providerMode = scheduledProviderModeForImage(image, env);
+
+  // Credit-safety invariant: once KIE succeeded, never create a replacement image.
+  // If the durable task id exists, generateBaseImages will only poll that same task.
+  // If it is missing, stop here and preserve the checkpoint for operator/data recovery.
+  if (providerMode === 'paid-success-checkpoint') {
+    return protectedCheckpointResult(image);
+  }
+
   const imageOptions = {
     ...options,
     imageIds: [image.id],
@@ -86,6 +126,15 @@ async function runOneImage(env, jobId, image, options = {}) {
 
   if (providerMode === 'kie' && firstOutcome?.status === 'retrying') {
     const current = await refreshedImage(env, jobId, image.id);
+
+    // If the KIE task actually reached success during this invocation, never fall
+    // through into another generation provider. Resume/store/attach that exact image.
+    if (isSuccessfulPaidImageCheckpoint(current || image)) {
+      const taskId = String((current || image)?.provider_task_id || '').trim();
+      if (!taskId) return protectedCheckpointResult(current || image);
+      return first;
+    }
+
     const retryBudgetExhausted = scheduledProviderModeForImage(current || image, env) === 'cloudflare';
     if (needsImmediateCloudflareFallback(firstOutcome) || retryBudgetExhausted) {
       return generateBaseImages(
@@ -116,10 +165,11 @@ function combineExecutionResults(results = [], images = []) {
  * Scheduled publishing policy:
  * - ModelScope Z-Image Turbo is the free-first provider when explicitly enabled;
  * - an active async task always resumes on the provider that created it;
+ * - a successful KIE checkpoint is never regenerated or replaced;
  * - ModelScope terminal failure hands off immediately to KIE;
  * - KIE keeps its bounded retry budget, then Cloudflare is the final provider;
  * - once the final KIE retry is persisted, Cloudflare runs in the same invocation;
- * - up to three images for the same post are submitted/polled concurrently;
+ * - up to three images for the same post may be selected, while the scheduled watchdog can cap this to one;
  * - provider-chain failure stays retryable/planned;
  * - the local renderer is never enabled here.
  */
