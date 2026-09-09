@@ -42,6 +42,10 @@ jobs:
             ORDER BY CASE WHEN has_failed_images=1 AND image_activity_at <= datetime('now','-10 minutes') THEN 0 WHEN has_failed_images=0 THEN 1 ELSE 2 END,
               CASE WHEN has_failed_images=1 THEN image_activity_at ELSE j.updated_at END,j.id LIMIT 20`);
           const images=await q(`SELECT id,job_id,role,position,status,provider,provider_status,provider_task_id,provider_attempt_count,provider_error_code,provider_error_message,error,updated_at FROM job_images WHERE job_id IN (95,96,98,100,112,83,93,105) ORDER BY job_id,id`);
+          const jobs=await q(`SELECT id,mode,blog_id,status,json_extract(result_json,'$.status') AS result_status,json_extract(result_json,'$.imagePipeline.complete') AS image_complete,json_extract(result_json,'$.imagePipeline.qa') AS image_qa,updated_at FROM jobs WHERE id IN (95,96,98,100,112,83,93,105) ORDER BY id`);
+          const settings=await q(`SELECT scope_key,blog_id,inherit_global,settings_json,updated_at FROM automation_settings WHERE blog_id IS NULL OR blog_id IN ('7741529904469657049','2028653002689012296','3842750331568707733','5540565797560833468') ORDER BY CASE WHEN blog_id IS NULL THEN 0 ELSE 1 END,blog_id`);
           console.log('CANDIDATES '+JSON.stringify(candidates));
           console.log('DETAIL_IMAGES '+JSON.stringify(images));
+          console.log('JOB_RESULTS '+JSON.stringify(jobs));
+          console.log('AUTOMATION_SETTINGS '+JSON.stringify(settings));
           NODE
