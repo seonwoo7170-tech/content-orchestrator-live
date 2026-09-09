@@ -5,7 +5,6 @@ import { readFileSync } from 'node:fs';
 const helper = readFileSync(new URL('../worker/lib/hub-writer-transport-diagnostic.js', import.meta.url), 'utf8');
 const phase6Entry = readFileSync(new URL('../worker/phase6-trends-entry.js', import.meta.url), 'utf8');
 const mcpEntry = readFileSync(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');
-const maintenanceEntry = readFileSync(new URL('../worker/maintenance-entry.js', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.example.jsonc', import.meta.url), 'utf8');
 
 test('runtime Writer transport diagnostic is admin-only and never calls Blogger writes', () => {
@@ -32,10 +31,8 @@ test('Phase 6 entry exposes the diagnostic without replacing normal routing', ()
   assert.match(phase6Entry, /return phase6Entry\.scheduled\(event, env, ctx\)/);
 });
 
-test('production maintenance wrapper preserves MCP and Phase 6 while globally paused', () => {
-  assert.match(wrangler, /"main":\s*"worker\/maintenance-entry\.js"/);
-  assert.match(wrangler, /"SYSTEM_PAUSED":\s*"true"/);
-  assert.match(maintenanceEntry, /import app from '\.\/mcp-entry\.js'/);
+test('MCP deployment wrapper preserves Phase 6 while serializing AI-writing lanes', () => {
+  assert.match(wrangler, /"main":\s*"worker\/mcp-entry\.js"/);
   assert.match(mcpEntry, /import app from '\.\/phase6-trends-entry\.js'/);
   assert.match(mcpEntry, /return app\.fetch\(request, env, ctx\)/);
   assert.match(mcpEntry, /DAILY_WORK_EXECUTION_ENABLED:\s*'false'/);
