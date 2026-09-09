@@ -181,8 +181,9 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('api-hub-v2/src/lib/ai-routes.js')
-          text = path.read_text()
+
+          ai_path = Path('api-hub-v2/src/lib/ai-routes.js')
+          text = ai_path.read_text()
           replacements = {
             'Treat the entire preceding Master v4.5 Critic role prompt as the governing publication requirements and as a reference checklist. Do NOT execute a writer workflow. Audit the supplied Article against every applicable requirement in the Critic role prompt, not merely broad writing quality.':
             'Treat the entire preceding full integrated Master v4.5 as the governing publication requirements and reference checklist. This route selects the Critic role and overrides any conflicting Writer, platform-selection, questioning, or interactive execution flow from the integrated Master. Do NOT execute a writer workflow. Audit the supplied Article against every applicable publication-quality requirement in the integrated Master, not merely broad writing quality.',
@@ -195,7 +196,38 @@ jobs:
             if old not in text:
               raise SystemExit('AI_ROUTE_INTEGRATED_MASTER_PATCH_TARGET_MISSING')
             text = text.replace(old, new, 1)
-          path.write_text(text)
+          ai_path.write_text(text)
+
+          fallback_path = Path('api-hub-v2/tests/ai-routes-gemini-fallback.test.mjs')
+          text = fallback_path.read_text()
+          for old, new in [
+            ('result.rolePrompt.size, 60075', 'result.rolePrompt.size, 93282'),
+            ('result.rolePrompt.size, 65993', 'result.rolePrompt.size, 93282'),
+            ('result.rolePrompt.size, 64451', 'result.rolePrompt.size, 93282'),
+            ("assert.ok(!requestBody.systemInstruction.parts[0].text.includes('# 4. 최초 플랫폼 선택'));", "assert.ok(requestBody.systemInstruction.parts[0].text.includes('# 4. 최초 플랫폼 선택'));")
+          ]:
+            if old not in text:
+              raise SystemExit(f'FALLBACK_TEST_PATCH_TARGET_MISSING: {old}')
+            text = text.replace(old, new, 1)
+          fallback_path.write_text(text)
+
+          budget_path = Path('api-hub-v2/tests/output-token-budget.test.mjs')
+          text = budget_path.read_text()
+          replacements = [
+            ("test('AI routes use verified role-specific Master v4.5 prompts with dedicated Gemini granular critic'", "test('AI routes use the full integrated Master v4.5 with role adapters and dedicated Gemini granular critic'"),
+            ('assert.ok(writerPromptBytes > 60075 && writerPromptBytes < 93282);', 'assert.ok(writerPromptBytes > 93282);'),
+            ('assert.ok(criticPromptBytes > 65993 && criticPromptBytes < 93282);', 'assert.ok(criticPromptBytes > 93282);'),
+            ('assert.ok(repairPromptBytes > 64451 && repairPromptBytes < 93282);', 'assert.ok(repairPromptBytes > 93282);'),
+            ('assert.equal(writerResult.rolePrompt.size, 60075);', 'assert.equal(writerResult.rolePrompt.size, 93282);'),
+            ("assert.equal(writerResult.rolePrompt.sha256, 'd72c959ba73cfaffff6582889d522201bfb55de2a81f461585c0dc352251609e');", "assert.equal(writerResult.rolePrompt.sha256, '0df7c83bb3874c4802ca7c02306beee7cd7032366930d66abfc7fa1bdb6cda66');"),
+            ('assert.equal(criticResult.rolePrompt.size, 65993);', 'assert.equal(criticResult.rolePrompt.size, 93282);'),
+            ('assert.equal(repairResult.rolePrompt.size, 64451);', 'assert.equal(repairResult.rolePrompt.size, 93282);')
+          ]
+          for old, new in replacements:
+            if old not in text:
+              raise SystemExit(f'BUDGET_TEST_PATCH_TARGET_MISSING: {old}')
+            text = text.replace(old, new, 1)
+          budget_path.write_text(text)
           PY
 
       - name: Verify API Hub v2
@@ -212,6 +244,11 @@ jobs:
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add api-hub-v2/src/lib/master-v45-role-prompts.js api-hub-v2/tests/master-v45-role-prompts.test.mjs api-hub-v2/src/lib/ai-routes.js
+          git add \
+            api-hub-v2/src/lib/master-v45-role-prompts.js \
+            api-hub-v2/src/lib/ai-routes.js \
+            api-hub-v2/tests/master-v45-role-prompts.test.mjs \
+            api-hub-v2/tests/ai-routes-gemini-fallback.test.mjs \
+            api-hub-v2/tests/output-token-budget.test.mjs
           git commit -m 'restore: use integrated Master v4.5 for all roles'
           git push origin HEAD:main
