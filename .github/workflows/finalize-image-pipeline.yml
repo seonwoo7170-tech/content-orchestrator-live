@@ -1,0 +1,176 @@
+name: Finalize image pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/finalize-image-pipeline-trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-image-pipeline
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Harden image pipeline end to end
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # 1) Dedicated 3-minute watchdog owns the image lane and dispatches all 3 slots together.
+          p = Path('worker/mcp-entry.js')
+          s = p.read_text()
+          old = "imageWork = await runScheduledImageCompletion(env, { maxJobs: maxItems, maxImages: 1, staleMinutes: 0, executionContext: ctx });"
+          new = "imageWork = await runScheduledImageCompletion(env, { maxJobs: maxItems, maxImages: 3, staleMinutes: 0, executionContext: ctx });"
+          if old not in s:
+              raise SystemExit('MCP_IMAGE_BATCH_PATCH_TARGET_MISSING')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 2) Disable the duplicate legacy 5-minute image dispatcher. Manual resume remains available.
+          p = Path('worker/phase5-entry.js')
+          s = p.read_text()
+          old = """      ctx.waitUntil(runScheduledImageCompletion(env, {\n        maxJobs: env?.IMAGE_COMPLETION_MAX_ITEMS || 1,\n        maxImages: 1,\n        staleMinutes: 2,\n        executionContext: ctx\n      }));\n"""
+          if old not in s:
+              raise SystemExit('LEGACY_IMAGE_DISPATCH_PATCH_TARGET_MISSING')
+          s = s.replace(old, "      // Image execution is owned exclusively by the 3-minute serial watchdog in mcp-entry.\n      // Keeping a second legacy dispatcher here can race the same D1 image rows and duplicate provider calls.\n", 1)
+          p.write_text(s)
+
+          # 3) Stale paid async KIE tasks must never block the lane forever.
+          p = Path('worker/lib/image-executor-resilient.js')
+          s = p.read_text()
+          marker = """function normalizedProvider(image = {}) {\n  return String(image?.provider || '').trim().toLowerCase();\n}\n\n"""
+          insert = marker + """const ACTIVE_ASYNC_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry']);\n\nexport function asyncTaskStaleMinutes(env = {}) {\n  const configured = Number(env?.IMAGE_ASYNC_TASK_STALE_MINUTES ?? 15);\n  if (!Number.isFinite(configured)) return 15;\n  return Math.max(5, Math.min(60, Math.trunc(configured)));\n}\n\nfunction sqliteUtcMs(value) {\n  const raw = String(value || '').trim();\n  if (!raw) return NaN;\n  const normalized = /(?:Z|[+-]\\d\\d:\\d\\d)$/i.test(raw) ? raw : `${raw.replace(' ', 'T')}Z`;\n  return Date.parse(normalized);\n}\n\nexport function isStaleKieTask(image = {}, env = {}, nowMs = Date.now()) {\n  const provider = normalizedProvider(image);\n  const taskId = String(image?.provider_task_id || '').trim();\n  const state = String(image?.provider_status || '').trim().toLowerCase();\n  if (!taskId || !['kie', 'kie-ai'].includes(provider) || !ACTIVE_ASYNC_STATES.has(state)) return false;\n  const checkedAt = sqliteUtcMs(image?.provider_checked_at || image?.updated_at);\n  if (!Number.isFinite(checkedAt)) return true;\n  return nowMs - checkedAt >= asyncTaskStaleMinutes(env) * 60_000;\n}\n\n"""
+          if marker not in s:
+              raise SystemExit('STALE_KIE_HELPER_INSERT_TARGET_MISSING')
+          s = s.replace(marker, insert, 1)
+
+          old = """async function runOneImage(env, jobId, image, options = {}) {\n  const providerMode = scheduledProviderModeForImage(image, env);\n\n  // Credit-safety invariant: once KIE succeeded, never create a replacement image.\n"""
+          new = """async function runOneImage(env, jobId, image, options = {}) {\n  const staleKieTask = isStaleKieTask(image, env);\n  const providerMode = scheduledProviderModeForImage(image, env);\n\n  // A KIE task still marked active long after the normal async window is treated as orphaned.\n  // Do not submit another paid KIE task. Route this slot straight to the free Cloudflare fallback.\n  // The old task id remains in D1 until the fallback succeeds, preserving auditability if fallback fails.\n  if (staleKieTask) {\n    return generateBaseImages(\n      { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },\n      jobId,\n      { ...options, imageIds: [image.id], maxImages: 1, localFallback: false }\n    );\n  }\n\n  // Credit-safety invariant: once KIE succeeded, never create a replacement image.\n"""
+          if old not in s:
+              raise SystemExit('STALE_KIE_RUNNER_PATCH_TARGET_MISSING')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 4) If a synchronous fallback succeeds, do not leave an obsolete async task id attached to that row.
+          p = Path('worker/lib/image-store.js')
+          s = p.read_text()
+          old = """     SET status = 'generated', provider = ?, model = ?, mime_type = ?,\n         provider_status = 'success',\n"""
+          new = """     SET status = 'generated', provider = ?, model = ?, mime_type = ?,\n         provider_task_id = CASE WHEN lower(?) IN ('cloudflare', 'cloudflare-workers-ai') THEN NULL ELSE provider_task_id END,\n         provider_status = 'success',\n"""
+          if old not in s:
+              raise SystemExit('CLEAR_STALE_TASK_SQL_TARGET_MISSING')
+          s = s.replace(old, new, 1)
+          old_bind = """    String(meta.provider || ''),\n    String(meta.model || ''),\n    String(meta.mimeType || 'image/jpeg'),\n    fallbackCode,\n"""
+          new_bind = """    String(meta.provider || ''),\n    String(meta.model || ''),\n    String(meta.mimeType || 'image/jpeg'),\n    String(meta.provider || ''),\n    fallbackCode,\n"""
+          if old_bind not in s:
+              raise SystemExit('CLEAR_STALE_TASK_BIND_TARGET_MISSING')
+          s = s.replace(old_bind, new_bind, 1)
+          p.write_text(s)
+
+          # 5) Ready jobs must survive date rollover long enough to finish images -> Blogger.
+          for file, old, new in [
+              ('worker/lib/auto-repair-updater.js', 'const REPAIR_CARRYOVER_LOOKBACK_DAYS = 2;', 'const REPAIR_CARRYOVER_LOOKBACK_DAYS = 30;'),
+              ('worker/lib/auto-publisher.js', 'const CARRYOVER_LOOKBACK_DAYS = 2;', 'const CARRYOVER_LOOKBACK_DAYS = 30;')
+          ]:
+              p = Path(file)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'CARRYOVER_PATCH_TARGET_MISSING:{file}')
+              p.write_text(s.replace(old, new, 1))
+
+          # 6) Make the stale async threshold explicit in production config.
+          p = Path('wrangler.example.jsonc')
+          s = p.read_text()
+          old = '    "SERIAL_IMAGE_POLL_INTERVAL_MS": "3000",\n'
+          new = old + '    "IMAGE_ASYNC_TASK_STALE_MINUTES": "15",\n'
+          if old not in s:
+              raise SystemExit('WRANGLER_STALE_THRESHOLD_TARGET_MISSING')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          # 7) Deployment gate must protect these invariants.
+          p = Path('.github/workflows/deploy-cloudflare.yml')
+          s = p.read_text()
+          old = "            '\"SERIAL_IMAGE_POLL_INTERVAL_MS\": \"3000\"',\n"
+          new = old + "            '\"IMAGE_ASYNC_TASK_STALE_MINUTES\": \"15\"',\n"
+          if old not in s:
+              raise SystemExit('DEPLOY_GATE_STALE_THRESHOLD_TARGET_MISSING')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+      - name: Add focused regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > tests/image-pipeline-final-hardening.test.mjs <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { asyncTaskStaleMinutes, isStaleKieTask } from '../worker/lib/image-executor-resilient.js';
+          import { readFileSync } from 'node:fs';
+
+          test('stale KIE async tasks are detected after the bounded safety window', () => {
+            const now = Date.parse('2026-09-10T00:00:00Z');
+            const image = {
+              provider: 'kie-ai',
+              provider_task_id: 'existing-paid-task',
+              provider_status: 'waiting',
+              provider_checked_at: '2026-09-09 23:40:00'
+            };
+            assert.equal(asyncTaskStaleMinutes({}), 15);
+            assert.equal(isStaleKieTask(image, {}, now), true);
+            assert.equal(isStaleKieTask({ ...image, provider_checked_at: '2026-09-09 23:50:00' }, {}, now), false);
+          });
+
+          test('production watchdog owns one image lane and requests up to three image slots together', () => {
+            const mcp = readFileSync('worker/mcp-entry.js', 'utf8');
+            const legacy = readFileSync('worker/phase5-entry.js', 'utf8');
+            assert.match(mcp, /runScheduledImageCompletion\(env, \{ maxJobs: maxItems, maxImages: 3/);
+            const scheduledBody = legacy.split('scheduled(event, env, ctx)')[1] || '';
+            assert.doesNotMatch(scheduledBody, /ctx\.waitUntil\(runScheduledImageCompletion/);
+          });
+
+          test('carryover windows protect image-complete jobs from midnight/date rollover stalls', () => {
+            const repair = readFileSync('worker/lib/auto-repair-updater.js', 'utf8');
+            const publish = readFileSync('worker/lib/auto-publisher.js', 'utf8');
+            assert.match(repair, /REPAIR_CARRYOVER_LOOKBACK_DAYS = 30/);
+            assert.match(publish, /CARRYOVER_LOOKBACK_DAYS = 30/);
+          });
+          EOF
+
+      - name: Verify all orchestrator tests
+        run: npm install --no-audit --no-fund && npm run verify
+
+      - name: Verify API Hub regression suite
+        working-directory: api-hub-v2
+        run: npm install --no-audit --no-fund && npm run verify
+
+      - name: Commit verified hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No changes required.'
+            exit 0
+          fi
+          git config user.name 'smileseon-automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add worker/mcp-entry.js worker/phase5-entry.js worker/lib/image-executor-resilient.js worker/lib/image-store.js worker/lib/auto-repair-updater.js worker/lib/auto-publisher.js wrangler.example.jsonc .github/workflows/deploy-cloudflare.yml tests/image-pipeline-final-hardening.test.mjs
+          git commit -m 'fix: harden concurrent image pipeline end to end'
+          git pull --rebase origin main
+          git push origin HEAD:main
