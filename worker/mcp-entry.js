@@ -161,11 +161,15 @@ function compactWork(value, errorCode = null) {
 
 function compactImageWork(value, errorCode = null) {
   const items = Array.isArray(value?.items) ? value.items : [];
+  const codes = items
+    .map((item) => String(item?.errorCode || '').replace(/[^A-Za-z0-9_:-]/g, '_').slice(0, 96))
+    .filter(Boolean);
   return {
     attempted: Number(value?.attempted || 0),
     completed: Number(value?.completed || 0),
     failed: items.reduce((sum, item) => sum + Number(item?.failed || 0), 0),
     errorCode: errorCode || value?.errorCode || null,
+    codes,
     jobIds: items.map((item) => Number(item?.jobId || 0)).filter(Boolean)
   };
 }
