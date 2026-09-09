@@ -1,0 +1,35 @@
+name: image-lock-snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/image-lock-snapshot-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Read runtime image lock and recent activity
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const token=process.env.CLOUDFLARE_API_TOKEN, account=process.env.CLOUDFLARE_ACCOUNT_ID;
+          const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+          async function cf(url,init={}){const r=await fetch(url,{...init,headers:{...headers,...(init.headers||{})},signal:AbortSignal.timeout(45000)});const d=await r.json().catch(()=>({}));if(!r.ok||d.success===false)throw new Error(`CF:${r.status}:${JSON.stringify(d.errors||d).slice(0,500)}`);return d;}
+          const list=await cf(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database`);
+          const db=(list.result||[]).find(x=>x.name==='content-orchestrator'); if(!db?.uuid)throw new Error('D1_DATABASE_NOT_FOUND');
+          const url=`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db.uuid}/query`;
+          async function q(sql){const d=await cf(url,{method:'POST',body:JSON.stringify({sql})});return ((Array.isArray(d.result)?d.result[0]:d.result)||{}).results||[];}
+          console.log('NOW '+JSON.stringify(await q(`SELECT datetime('now') AS utc_now, datetime('now','+9 hours') AS kst_now`)));
+          console.log('LOCKS '+JSON.stringify(await q(`SELECT lock_key,owner_token,expires_at,updated_at FROM runtime_locks ORDER BY lock_key`)));
+          console.log('RECENT_IMAGES '+JSON.stringify(await q(`SELECT id,job_id,role,position,status,provider,provider_status,provider_attempt_count,updated_at FROM job_images ORDER BY datetime(updated_at) DESC,id DESC LIMIT 20`)));
+          NODE
