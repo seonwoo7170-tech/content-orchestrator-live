@@ -19,7 +19,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: Read job 105 from production D1
+      - name: Diagnose job 105 in production D1
         shell: bash
         run: |
           set -euo pipefail
@@ -43,12 +43,80 @@ jobs:
           }
           const tables = query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('jobs','job_images','daily_plan_slots','runtime_locks','job_publications','automation_settings') ORDER BY name").map(r=>r.name);
           console.log('TABLES', JSON.stringify(tables));
-          const jobs = safeSelect('jobs', ['id','mode','status','blog_id','blogger_post_id','daily_slot_id','retry_count','recovery_state','next_retry_at','hold_reason','last_error_code','error','last_failure_at','created_at','updated_at'], 'id=105');
-          console.log('JOB105', JSON.stringify(jobs.rows));
+
+          const jobs = safeSelect('jobs', ['id','mode','status','blog_id','blogger_post_id','daily_slot_id','retry_count','recovery_state','next_retry_at','hold_reason','last_error_code','error','last_failure_at','result_json','created_at','updated_at'], 'id=105');
+          const job105 = jobs.rows[0] || null;
+          const safeJob = job105 ? {...job105, result_json: undefined} : null;
+          console.log('JOB105', JSON.stringify(safeJob));
+          if (job105?.result_json) {
+            let r = null; try { r = JSON.parse(job105.result_json); } catch {}
+            console.log('JOB105_RESULT_SUMMARY', JSON.stringify({ parsed:!!r, status:r?.status||null, hasArticle:!!r?.article, articleTitle:r?.article?.title||null, hasHtml:!!r?.article?.html, imagePipeline:r?.imagePipeline ? {complete:r.imagePipeline.complete, qa:r.imagePipeline.qa, generated:r.imagePipeline.generated, currentCount:r.imagePipeline.currentCount, targetTotal:r.imagePipeline.targetTotal} : null }));
+          }
+
           if (tables.includes('job_images')) {
             const images = safeSelect('job_images', ['id','job_id','role','position','status','provider','model','provider_task_id','provider_status','provider_checked_at','provider_attempt_count','puter_attempted','error','public_url','storage_key','created_at','updated_at'], 'job_id=105', 'ORDER BY position,id');
             console.log('JOB105_IMAGES', JSON.stringify(images.rows));
           }
+
+          console.log('SAME_BLOG_ACTIVE_JOBS', JSON.stringify(query(`
+            SELECT id,mode,status,blogger_post_id,recovery_state,next_retry_at,hold_reason,last_error_code,created_at,updated_at
+              FROM jobs
+             WHERE blog_id='7741529904469657049'
+               AND archived_at IS NULL
+               AND status NOT IN ('completed','cancelled')
+             ORDER BY updated_at DESC,id DESC
+             LIMIT 30
+          `)));
+
+          console.log('READY_IMAGE_CANDIDATES', JSON.stringify(query(`
+            SELECT DISTINCT j.id AS job_id, j.mode, j.blog_id, j.status, j.updated_at,
+                   COALESCE(s.plan_date, date('now')) AS plan_date,
+                   EXISTS(
+                     SELECT 1 FROM job_images fi
+                      WHERE fi.job_id=j.id AND fi.status='failed'
+                   ) AS has_failed_images,
+                   EXISTS(
+                     SELECT 1 FROM job_images pi
+                      WHERE pi.job_id=j.id
+                        AND pi.provider_task_id IS NOT NULL
+                        AND pi.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry')
+                   ) AS has_active_provider_task,
+                   COALESCE((SELECT MAX(ai.updated_at) FROM job_images ai WHERE ai.job_id=j.id),j.updated_at) AS image_activity_at
+              FROM jobs j
+              LEFT JOIN daily_plan_slots s ON s.job_id=j.id
+             WHERE j.status='ready'
+               AND j.archived_at IS NULL
+               AND j.mode IN ('new_article','repair_existing')
+               AND j.updated_at <= datetime('now')
+               AND (
+                 j.mode='repair_existing'
+                 OR (j.mode='new_article' AND (s.job_id IS NULL OR (s.kind='new_article' AND s.status='resolved')))
+               )
+             ORDER BY CASE
+                        WHEN has_active_provider_task=1 THEN 0
+                        WHEN has_failed_images=1 AND image_activity_at <= datetime('now','-10 minutes') THEN 1
+                        WHEN has_failed_images=0 THEN 2
+                        ELSE 3
+                      END,
+                      CASE WHEN has_failed_images=1 THEN image_activity_at ELSE j.updated_at END,
+                      j.id
+             LIMIT 30
+          `)));
+
+          const candidate105 = query(`
+            SELECT j.id,
+                   j.status='ready' AS ready_ok,
+                   j.archived_at IS NULL AS archive_ok,
+                   j.mode IN ('new_article','repair_existing') AS mode_ok,
+                   j.updated_at <= datetime('now') AS stale_ok,
+                   EXISTS(SELECT 1 FROM job_images pi WHERE pi.job_id=j.id AND pi.provider_task_id IS NOT NULL AND pi.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry')) AS active_provider,
+                   (SELECT COUNT(*) FROM job_images WHERE job_id=j.id) AS image_rows,
+                   (SELECT COUNT(*) FROM job_images WHERE job_id=j.id AND status IN ('stored','attached')) AS durable_images,
+                   (SELECT COUNT(*) FROM job_images WHERE job_id=j.id AND status='failed') AS failed_images
+              FROM jobs j WHERE j.id=105
+          `);
+          console.log('JOB105_CANDIDATE_FLAGS', JSON.stringify(candidate105));
+
           if (tables.includes('daily_plan_slots')) {
             const slots = safeSelect('daily_plan_slots', ['id','plan_date','blog_id','kind','slot_no','status','job_id','recovery_state','next_retry_at','hold_reason','last_error_code','created_at','updated_at'], 'job_id=105');
             console.log('JOB105_SLOTS', JSON.stringify(slots.rows));
@@ -68,4 +136,3 @@ jobs:
           }
           console.log('DB_NOW', JSON.stringify(query("SELECT datetime('now') AS utc_now")));
           NODE
-# post-deploy first-cron check 2026-09-09T13:45Z
