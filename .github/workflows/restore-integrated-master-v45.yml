@@ -1,0 +1,217 @@
+name: Restore integrated Master v4.5
+
+on:
+  push:
+    paths:
+      - '.github/restore-integrated-master-v45-trigger'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore full integrated Master v4.5 for all roles
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > api-hub-v2/src/lib/master-v45-role-prompts.js <<'EOF'
+          import { MASTER_V45 } from './contracts.js';
+          import { loadMasterV45 } from './master-v45-bundle.js';
+
+          const ROLES = Object.freeze(['writer', 'critic', 'repair']);
+          const ROLE_SET = new Set(ROLES);
+          const cache = new Map();
+
+          function utf8Bytes(value) {
+            return new TextEncoder().encode(String(value || ''));
+          }
+
+          async function sha256Hex(bytes) {
+            const digest = await crypto.subtle.digest('SHA-256', bytes);
+            return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+          }
+
+          function topLevelSectionCount(text) {
+            return [...String(text || '').matchAll(/^# .+$/gm)].length;
+          }
+
+          export function rolePromptDefinition(role) {
+            const key = String(role || '').trim();
+            if (!ROLE_SET.has(key)) {
+              throw Object.assign(new Error('MASTER_V45_ROLE_INVALID'), { status: 500 });
+            }
+            return Object.freeze({
+              role: key,
+              fileName: MASTER_V45.fileName,
+              size: MASTER_V45.size,
+              sha256: MASTER_V45.sha256,
+              integratedMaster: true,
+              exactFullMaster: true
+            });
+          }
+
+          export async function loadMasterV45RolePrompt(role) {
+            const key = String(role || '').trim();
+            if (cache.has(key)) return cache.get(key);
+
+            const definition = rolePromptDefinition(key);
+            const sourceText = await loadMasterV45();
+            const sourceBytes = utf8Bytes(sourceText);
+            if (sourceBytes.byteLength !== MASTER_V45.size) {
+              throw Object.assign(new Error('MASTER_V45_ROLE_SIZE_MISMATCH'), {
+                status: 500,
+                meta: { role: key, expected: MASTER_V45.size, actual: sourceBytes.byteLength }
+              });
+            }
+            const sourceDigest = await sha256Hex(sourceBytes);
+            if (sourceDigest !== MASTER_V45.sha256) {
+              throw Object.assign(new Error('MASTER_V45_ROLE_SHA256_MISMATCH'), {
+                status: 500,
+                meta: { role: key }
+              });
+            }
+
+            const result = Object.freeze({
+              text: sourceText,
+              sourceText,
+              meta: Object.freeze({
+                role: key,
+                fileName: definition.fileName,
+                size: MASTER_V45.size,
+                sha256: MASTER_V45.sha256,
+                sectionCount: topLevelSectionCount(sourceText),
+                exactSourceSections: true,
+                exactFullMaster: true,
+                integratedMaster: true,
+                sourceMasterSha256: MASTER_V45.sha256,
+                sourceMasterSize: MASTER_V45.size,
+                runtimeClarification: null,
+                effectiveSize: MASTER_V45.size,
+                effectiveSha256: MASTER_V45.sha256
+              })
+            });
+            cache.set(key, result);
+            return result;
+          }
+
+          export async function masterV45RolePromptRuntimeStatus() {
+            const output = {};
+            for (const role of ROLES) {
+              output[role] = (await loadMasterV45RolePrompt(role)).meta;
+            }
+            return output;
+          }
+          EOF
+
+          cat > api-hub-v2/tests/master-v45-role-prompts.test.mjs <<'EOF'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { MASTER_V45 } from '../src/lib/contracts.js';
+          import { loadMasterV45 } from '../src/lib/master-v45-bundle.js';
+          import { loadMasterV45RolePrompt, rolePromptDefinition } from '../src/lib/master-v45-role-prompts.js';
+
+          function utf8Size(value) {
+            return new TextEncoder().encode(String(value || '')).byteLength;
+          }
+
+          function topLevelSectionCount(text) {
+            return [...String(text || '').matchAll(/^# .+$/gm)].length;
+          }
+
+          for (const role of ['writer', 'critic', 'repair']) {
+            test(`${role} uses the exact full integrated Master v4.5`, async () => {
+              const master = await loadMasterV45();
+              const result = await loadMasterV45RolePrompt(role);
+              const definition = rolePromptDefinition(role);
+
+              assert.equal(result.sourceText, master);
+              assert.equal(result.text, master);
+              assert.equal(utf8Size(result.text), MASTER_V45.size);
+              assert.equal(result.meta.size, MASTER_V45.size);
+              assert.equal(result.meta.sha256, MASTER_V45.sha256);
+              assert.equal(result.meta.effectiveSize, MASTER_V45.size);
+              assert.equal(result.meta.effectiveSha256, MASTER_V45.sha256);
+              assert.equal(result.meta.sourceMasterSize, MASTER_V45.size);
+              assert.equal(result.meta.sourceMasterSha256, MASTER_V45.sha256);
+              assert.equal(result.meta.sectionCount, topLevelSectionCount(master));
+              assert.equal(result.meta.exactSourceSections, true);
+              assert.equal(result.meta.exactFullMaster, true);
+              assert.equal(result.meta.integratedMaster, true);
+              assert.equal(result.meta.runtimeClarification, null);
+              assert.equal(definition.fileName, MASTER_V45.fileName);
+              assert.equal(definition.size, MASTER_V45.size);
+              assert.equal(definition.sha256, MASTER_V45.sha256);
+              assert.equal(definition.exactFullMaster, true);
+              assert.equal(definition.integratedMaster, true);
+            });
+          }
+
+          test('all three automation roles share one byte-identical integrated Master source', async () => {
+            const writer = await loadMasterV45RolePrompt('writer');
+            const critic = await loadMasterV45RolePrompt('critic');
+            const repair = await loadMasterV45RolePrompt('repair');
+            assert.equal(writer.text, critic.text);
+            assert.equal(critic.text, repair.text);
+            assert.equal(writer.meta.sha256, MASTER_V45.sha256);
+          });
+
+          test('integrated prompt restores the platform and common-mode sections that role pruning removed', async () => {
+            const { text } = await loadMasterV45RolePrompt('writer');
+            assert.ok(text.includes('# 4. 최초 플랫폼 선택'));
+            assert.ok(text.includes('# 5. 플랫폼 명령'));
+            assert.ok(text.includes('# 64. 플랫폼별 최종 출력 — 티스토리'));
+            assert.ok(text.includes('# 66. 플랫폼별 최종 출력 — 공통 모드'));
+          });
+
+          test('invalid automation role still fails closed', () => {
+            assert.throws(() => rolePromptDefinition('publisher'), /MASTER_V45_ROLE_INVALID/);
+          });
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('api-hub-v2/src/lib/ai-routes.js')
+          text = path.read_text()
+          replacements = {
+            'Treat the entire preceding Master v4.5 Critic role prompt as the governing publication requirements and as a reference checklist. Do NOT execute a writer workflow. Audit the supplied Article against every applicable requirement in the Critic role prompt, not merely broad writing quality.':
+            'Treat the entire preceding full integrated Master v4.5 as the governing publication requirements and reference checklist. This route selects the Critic role and overrides any conflicting Writer, platform-selection, questioning, or interactive execution flow from the integrated Master. Do NOT execute a writer workflow. Audit the supplied Article against every applicable publication-quality requirement in the integrated Master, not merely broad writing quality.',
+            'Perform a strict compliance pass across all applicable areas, including article purpose and search intent, answer-first usefulness, factual reliability and unsupported claims, source/citation integrity, title and description quality, heading/section logic, readability and sentence density, repetition and filler, AI-like or overly academic/manual-like prose, practical usefulness, substantive completeness, tables/lists where appropriate, Blogger-safe HTML, labels, language consistency, prohibited fabrication, and every other applicable rule stated in the Critic role prompt.':
+            'Perform a strict compliance pass across all applicable areas, including article purpose and search intent, answer-first usefulness, factual reliability and unsupported claims, source/citation integrity, title and description quality, heading/section logic, readability and sentence density, repetition and filler, AI-like or overly academic/manual-like prose, practical usefulness, substantive completeness, tables/lists where appropriate, Blogger-safe HTML, labels, language consistency, prohibited fabrication, and every other applicable publication rule stated in the integrated Master v4.5.',
+            'Treat the entire preceding Master v4.5 Repair role prompt as governing constraints while repairing the supplied Article. Apply every supplied critic issue, but change only the smallest affected sections necessary. Do not rewrite clean sections merely for style preference. A repair must not introduce a new Master v4.5 violation elsewhere.':
+            'Treat the entire preceding full integrated Master v4.5 as governing publication constraints. This route selects the targeted Repair role and overrides any conflicting Writer, platform-selection, questioning, or interactive execution flow from the integrated Master. Apply every supplied critic issue, but change only the smallest affected sections necessary. Do not rewrite clean sections merely for style preference. A repair must not introduce a new Master v4.5 violation elsewhere.'
+          }
+          for old, new in replacements.items():
+            if old not in text:
+              raise SystemExit('AI_ROUTE_INTEGRATED_MASTER_PATCH_TARGET_MISSING')
+            text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+
+      - name: Verify API Hub v2
+        working-directory: api-hub-v2
+        run: npm install --no-audit --no-fund && npm run verify
+
+      - name: Commit integrated Master restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No changes required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api-hub-v2/src/lib/master-v45-role-prompts.js api-hub-v2/tests/master-v45-role-prompts.test.mjs api-hub-v2/src/lib/ai-routes.js
+          git commit -m 'restore: use integrated Master v4.5 for all roles'
+          git push origin HEAD:main
