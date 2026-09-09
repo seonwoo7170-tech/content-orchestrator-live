@@ -40,13 +40,35 @@ export async function listJobImages(env, jobId) {
   const rows = await db.prepare(
     `SELECT id, job_id, role, position, status, prompt, alt_text, hook_text, provider, model, mime_type,
             storage_key, public_url, error, provider_task_id, provider_status, provider_attempt_count,
-            provider_error_code, provider_error_message, provider_checked_at,
+            provider_error_code, provider_error_message, provider_checked_at, puter_attempted,
             created_at, updated_at
      FROM job_images
      WHERE job_id = ?
      ORDER BY CASE role WHEN 'thumbnail' THEN 0 ELSE 1 END, position, id`
   ).bind(normalizeId(jobId, 'JOB_ID_INVALID')).all();
   return rows.results || [];
+}
+
+export async function markImagePuterAttempted(env, imageId, meta = {}) {
+  const db = requireDb(env);
+  const result = await db.prepare(
+    `UPDATE job_images
+        SET puter_attempted = 1,
+            provider = 'puter',
+            provider_task_id = COALESCE(NULLIF(?, ''), provider_task_id),
+            provider_status = ?,
+            provider_error_code = NULL,
+            provider_error_message = NULL,
+            error = NULL,
+            provider_checked_at = datetime('now'),
+            updated_at = datetime('now')
+      WHERE id = ?`
+  ).bind(
+    String(meta.taskId || ''),
+    String(meta.state || 'checkpointed'),
+    normalizeId(imageId, 'IMAGE_ID_INVALID')
+  ).run();
+  if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_STATE_WRITE_FAILED');
 }
 
 export async function markImageProviderPending(env, imageId, meta = {}) {
