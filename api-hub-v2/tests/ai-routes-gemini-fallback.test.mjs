@@ -63,11 +63,11 @@ test('writer falls back to Gemini with the verified writer role prompt', async (
   assert.equal(result.fallbackUsed, true);
   assert.equal(result.primaryError, 'CLOUDFLARE_AI_ACCOUNT_LIMITED');
   assert.equal(result.model, 'gemini-3.5-flash-lite');
-  assert.equal(result.rolePrompt.size, 60075);
+  assert.equal(result.rolePrompt.size, 93282);
   assert.equal(result.article.title, '테스트 글');
   assert.equal(requestBody.generationConfig.thinkingConfig.thinkingLevel, 'minimal');
   assert.match(requestBody.systemInstruction.parts[0].text, /# 91\. 자연스러운 문체 및 자동 생성 흔적 방지/);
-  assert.ok(!requestBody.systemInstruction.parts[0].text.includes('# 4. 최초 플랫폼 선택'));
+  assert.ok(requestBody.systemInstruction.parts[0].text.includes('# 4. 최초 플랫폼 선택'));
 });
 
 test('critic uses Gemini only with granular audit instructions, medium thinking and structured output', async () => {
@@ -107,7 +107,7 @@ test('critic uses Gemini only with granular audit instructions, medium thinking 
   assert.equal(result.fallbackUsed, false);
   assert.equal(result.primaryError, null);
   assert.equal(result.auditMode, 'master-v4.5-role-critic-gemini-granular');
-  assert.equal(result.rolePrompt.size, 65993);
+  assert.equal(result.rolePrompt.size, 93282);
   assert.equal(result.status, 'FAIL');
   assert.equal(result.issues.length, 1);
   assert.equal(requestBody.generationConfig.thinkingConfig.thinkingLevel, 'medium');
@@ -177,7 +177,7 @@ test('repair falls back to Gemini and preserves targeted repair contract', async
   assert.equal(result.provider, 'google-gemini');
   assert.equal(result.fallbackUsed, true);
   assert.equal(result.repairMode, 'master-v4.5-role-targeted');
-  assert.equal(result.rolePrompt.size, 64451);
+  assert.equal(result.rolePrompt.size, 93282);
   assert.equal(result.article.html, '<p>Short sentence.</p>');
   assert.equal(requestBody.generationConfig.thinkingConfig.thinkingLevel, 'medium');
   assert.equal(JSON.parse(requestBody.contents[0].parts[0].text).strategy, 'targeted_sections_only');

@@ -92,7 +92,7 @@ test('runWorkersAi serializes structured response objects for existing JSON pars
   assert.equal(result.response, '{"status":"PASS"}');
 });
 
-test('AI routes use verified role-specific Master v4.5 prompts with dedicated Gemini granular critic', async () => {
+test('AI routes use the full integrated Master v4.5 with role adapters and dedicated Gemini granular critic', async () => {
   const workersSeen = [];
   let geminiBody = null;
   const binding = aiMock((model, body) => {
@@ -160,14 +160,14 @@ test('AI routes use verified role-specific Master v4.5 prompts with dedicated Ge
   const writerPromptBytes = utf8Bytes(workersSeen[1].body.messages[0].content);
   const criticPromptBytes = utf8Bytes(geminiBody.systemInstruction.parts[0].text);
   const repairPromptBytes = utf8Bytes(workersSeen[2].body.messages[0].content);
-  assert.ok(writerPromptBytes > 60075 && writerPromptBytes < 93282);
-  assert.ok(criticPromptBytes > 65993 && criticPromptBytes < 93282);
-  assert.ok(repairPromptBytes > 64451 && repairPromptBytes < 93282);
+  assert.ok(writerPromptBytes > 93282);
+  assert.ok(criticPromptBytes > 93282);
+  assert.ok(repairPromptBytes > 93282);
 
   assert.equal(writerResult.provider, 'cloudflare-workers-ai');
   assert.equal(writerResult.fallbackUsed, false);
-  assert.equal(writerResult.rolePrompt.size, 60075);
-  assert.equal(writerResult.rolePrompt.sha256, 'd72c959ba73cfaffff6582889d522201bfb55de2a81f461585c0dc352251609e');
+  assert.equal(writerResult.rolePrompt.size, 93282);
+  assert.equal(writerResult.rolePrompt.sha256, '0df7c83bb3874c4802ca7c02306beee7cd7032366930d66abfc7fa1bdb6cda66');
 
   assert.equal(geminiBody.generationConfig.maxOutputTokens, 12288);
   assert.equal(geminiBody.generationConfig.thinkingConfig.thinkingLevel, 'medium');
@@ -185,14 +185,14 @@ test('AI routes use verified role-specific Master v4.5 prompts with dedicated Ge
   assert.match(geminiBody.systemInstruction.parts[0].text, /A distinct repair action must receive a distinct issue/);
   assert.equal(criticResult.auditMode, 'master-v4.5-role-critic-gemini-granular');
   assert.equal(criticResult.masterV45.size, 93282);
-  assert.equal(criticResult.rolePrompt.size, 65993);
+  assert.equal(criticResult.rolePrompt.size, 93282);
   assert.equal(criticResult.provider, 'google-gemini');
   assert.equal(criticResult.fallbackUsed, false);
 
   assert.match(workersSeen[2].body.messages[0].content, /MASTER V4\.5 TARGETED REPAIR ADAPTER/);
   assert.equal(repairResult.repairMode, 'master-v4.5-role-targeted');
   assert.equal(repairResult.masterV45.size, 93282);
-  assert.equal(repairResult.rolePrompt.size, 64451);
+  assert.equal(repairResult.rolePrompt.size, 93282);
   assert.equal(repairResult.provider, 'cloudflare-workers-ai');
   assert.equal(repairResult.fallbackUsed, false);
 });
