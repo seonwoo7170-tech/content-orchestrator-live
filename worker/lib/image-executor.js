@@ -71,7 +71,7 @@ function isComputerTechPrompt(prompt) {
 
 export function retryPromptForImage(image) {
   const prompt = String(image?.prompt || '').trim();
-  const error = String(image?.error || '');
+  const error = String(image?.error || image?.provider_error_message || image?.provider_error_code || '');
   if (!prompt || !/IMAGE_QA_REJECTED/i.test(error)) return prompt;
 
   const recoveryLevel = kieRecoveryLevelForImage(image);
@@ -185,6 +185,7 @@ async function generateSourceImage(env, image, options, callHubFn) {
         fallbackReason: String(firstError?.message || 'PRIMARY_IMAGE_FAILED')
       };
     } catch (error) {
+      if (shouldPreserveImageTask(image, error)) throw error;
       if (provider === 'kie' && shouldRestartKieAfterQa(image, error, env)) {
         try {
           const regenerated = await restartKieAfterQa(env, image, callHubFn);
@@ -228,6 +229,14 @@ function positiveLimit(value, fallback = Number.MAX_SAFE_INTEGER) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 1) throw new Error('IMAGE_EXECUTION_LIMIT_INVALID');
   return number;
+}
+
+function requestedImageIdSet(options = {}) {
+  if (!Array.isArray(options.imageIds) || options.imageIds.length === 0) return null;
+  const ids = new Set(options.imageIds
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0));
+  return ids.size > 0 ? ids : null;
 }
 
 async function storeImageBytes(env, bucket, baseUrl, jobId, image, bytes, mimeType, generated, metadata = {}) {
@@ -274,7 +283,14 @@ export function isResumableImageStatus(status, retryFailed = true) {
     || (retryFailed && value === 'failed');
 }
 
-const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running']);
+const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry']);
+
+export function shouldPreserveImageTask(image, error) {
+  if (!String(image?.provider_task_id || '').trim()) return false;
+  const message = String(error?.message || error || '');
+  // Only explicit terminal provider outcomes or a genuine QA rejection retire a task.
+  return !/(?:KIE_(?:TASK_TIMEOUT|IMAGE_GENERATION_FAILED|PROVIDER_GENERATION_FAILED|CONTENT_REJECTED|AUTH_FAILED|INSUFFICIENT_CREDITS|VALIDATION_FAILED)|MODELSCOPE_(?:IMAGE_GENERATION_FAILED|TASK_FAILED|TASK_TIMEOUT|AUTH_FAILED)|IMAGE_QA_REJECTED)/i.test(message);
+}
 
 export function imageExecutionPriority(image = {}) {
   const status = String(image?.status || '');
@@ -292,6 +308,106 @@ function orderedImageCandidates(rows = [], retryFailed = true) {
   return rows.filter((row) => isResumableImageStatus(row.status, retryFailed)).map((row, index) => ({ row, index })).sort((a, b) => imageExecutionPriority(a.row) - imageExecutionPriority(b.row) || a.index - b.index).map((item) => item.row);
 }
 
+async function executeImageCandidate(env, jobId, image, index, options, callHubFn, bucket, baseUrl, pacingMs) {
+  if (index > 0 && pacingMs > 0) await sleep(pacingMs * index);
+  try {
+    const generated = await generateSourceImage(env, image, options, callHubFn);
+    if (generated?.pending === true || generated?.complete === false) {
+      const taskId = String(generated?.taskId || image?.provider_task_id || '').trim();
+      if (!taskId) throw new Error('IMAGE_PROVIDER_TASK_ID_MISSING');
+      const previousTaskId = String(image?.provider_task_id || '').trim();
+      if (previousTaskId && previousTaskId === taskId) {
+        await markImageProviderProgress(env, image.id, { state: generated?.state || 'generating' });
+      } else {
+        await markImageProviderPending(env, image.id, {
+          provider: generated?.provider || 'kie-ai',
+          model: generated?.model || 'z-image',
+          taskId,
+          state: generated?.state || 'waiting'
+        });
+      }
+      return {
+        imageId: image.id,
+        status: 'pending',
+        provider: generated?.provider || 'kie-ai',
+        model: generated?.model || 'z-image',
+        taskId,
+        providerState: generated?.state || 'generating'
+      };
+    }
+
+    const sourceMimeType = sourceImageMimeType(generated.mimeType);
+    const sourceBytes = decodeBase64(generated.imageBase64);
+    await markImageGenerated(env, image.id, { ...generated, mimeType: sourceMimeType });
+
+    const raw = await storeImageBytes(env, bucket, baseUrl, jobId, image, sourceBytes, sourceMimeType, generated, {
+      sourceMimeType,
+      postprocessed: 'source-checkpoint'
+    });
+
+    let finalMimeType = sourceMimeType;
+    let finalUrl = raw.url;
+    let hookText = null;
+    let postprocessed = false;
+    let postprocessFallback = false;
+
+    if (image.role === 'thumbnail') {
+      try {
+        const processed = await postprocessThumbnail(
+          image,
+          { ...generated, mimeType: sourceMimeType },
+          {
+            executionContext: options.executionContext,
+            imageResponse: options.imageResponse,
+            fontClass: options.fontClass
+          }
+        );
+        const stored = await storeImageBytes(env, bucket, baseUrl, jobId, image, processed.bytes, processed.mimeType, generated, {
+          sourceMimeType,
+          postprocessed: 'thumbnail-hook-png',
+          hookText: processed.hookText || ''
+        });
+        finalMimeType = processed.mimeType;
+        finalUrl = stored.url;
+        hookText = processed.hookText;
+        postprocessed = true;
+      } catch {
+        postprocessFallback = true;
+      }
+    }
+
+    return {
+      imageId: image.id,
+      status: 'stored',
+      publicUrl: finalUrl,
+      provider: generated.provider,
+      model: generated.model,
+      mimeType: finalMimeType,
+      sourceMimeType,
+      postprocessed,
+      postprocessFallback,
+      hookText,
+      fallbackFrom: generated.fallbackFrom || null,
+      fallbackReason: generated.fallbackReason || null
+    };
+  } catch (error) {
+    if (shouldPreserveImageTask(image, error)) {
+      await markImageProviderProgress(env, image.id, { state: 'query_retry' });
+      return { imageId: image.id, status: 'pending', taskId: image.provider_task_id,
+        provider: image.provider || 'kie-ai', providerState: 'query_retry',
+        error: String(error?.message || 'IMAGE_TASK_RESUME_RETRY') };
+    }
+    const rejectedPreviewUrl = await preserveRejectedPreview(env, bucket, baseUrl, jobId, image, error).catch(() => null);
+    const mode = imageProviderMode(env);
+    const countAttempt = !String(image?.provider_task_id || '').trim() && mode !== 'cloudflare';
+    await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY', {
+      countAttempt,
+      provider: countAttempt ? (mode === 'modelscope' ? 'modelscope' : 'kie-ai') : null
+    });
+    return { imageId: image.id, status: 'retrying', error: String(error?.message || 'IMAGE_GENERATION_RETRY'), rejectedPreviewUrl };
+  }
+}
+
 export async function generatePlannedImages(env, jobId, options = {}) {
   const callHubFn = options.callHubFn || callHub;
   const bucket = requireBucket(env, options.bucket);
@@ -299,100 +415,26 @@ export async function generatePlannedImages(env, jobId, options = {}) {
   const retryFailed = options.retryFailed !== false;
   const maxImages = positiveLimit(options.maxImages);
   const rows = await listJobImages(env, jobId);
-  const candidates = orderedImageCandidates(rows, retryFailed).slice(0, maxImages);
-  const outcomes = [];
+  const requestedIds = requestedImageIdSet(options);
+  const candidates = orderedImageCandidates(rows, retryFailed)
+    .filter((row) => !requestedIds || requestedIds.has(Number(row.id)))
+    .slice(0, maxImages);
   const pacingMs = imageStagePacingMs(env);
 
-  for (let index = 0; index < candidates.length; index += 1) {
-    const image = candidates[index];
-    if (index > 0 && pacingMs > 0) await sleep(pacingMs);
-    try {
-      const generated = await generateSourceImage(env, image, options, callHubFn);
-      if (generated?.pending === true || generated?.complete === false) {
-        const taskId = String(generated?.taskId || image?.provider_task_id || '').trim();
-        if (!taskId) throw new Error('IMAGE_PROVIDER_TASK_ID_MISSING');
-        const previousTaskId = String(image?.provider_task_id || '').trim();
-        if (previousTaskId && previousTaskId === taskId) {
-          await markImageProviderProgress(env, image.id, { state: generated?.state || 'generating' });
-        } else {
-          await markImageProviderPending(env, image.id, {
-            provider: generated?.provider || 'kie-ai',
-            model: generated?.model || 'z-image',
-            taskId,
-            state: generated?.state || 'waiting'
-          });
-        }
-        outcomes.push({
-          imageId: image.id,
-          status: 'pending',
-          provider: generated?.provider || 'kie-ai',
-          model: generated?.model || 'z-image',
-          taskId,
-          providerState: generated?.state || 'generating'
-        });
-        continue;
-      }
-
-      const sourceMimeType = sourceImageMimeType(generated.mimeType);
-      const sourceBytes = decodeBase64(generated.imageBase64);
-      await markImageGenerated(env, image.id, { ...generated, mimeType: sourceMimeType });
-
-      const raw = await storeImageBytes(env, bucket, baseUrl, jobId, image, sourceBytes, sourceMimeType, generated, {
-        sourceMimeType,
-        postprocessed: 'source-checkpoint'
-      });
-
-      let finalMimeType = sourceMimeType;
-      let finalUrl = raw.url;
-      let hookText = null;
-      let postprocessed = false;
-      let postprocessFallback = false;
-
-      if (image.role === 'thumbnail') {
-        try {
-          const processed = await postprocessThumbnail(
-            image,
-            { ...generated, mimeType: sourceMimeType },
-            {
-              executionContext: options.executionContext,
-              imageResponse: options.imageResponse,
-              fontClass: options.fontClass
-            }
-          );
-          const stored = await storeImageBytes(env, bucket, baseUrl, jobId, image, processed.bytes, processed.mimeType, generated, {
-            sourceMimeType,
-            postprocessed: 'thumbnail-hook-png',
-            hookText: processed.hookText || ''
-          });
-          finalMimeType = processed.mimeType;
-          finalUrl = stored.url;
-          hookText = processed.hookText;
-          postprocessed = true;
-        } catch {
-          postprocessFallback = true;
-        }
-      }
-
-      outcomes.push({
-        imageId: image.id,
-        status: 'stored',
-        publicUrl: finalUrl,
-        provider: generated.provider,
-        model: generated.model,
-        mimeType: finalMimeType,
-        sourceMimeType,
-        postprocessed,
-        postprocessFallback,
-        hookText,
-        fallbackFrom: generated.fallbackFrom || null,
-        fallbackReason: generated.fallbackReason || null
-      });
-    } catch (error) {
-      const rejectedPreviewUrl = await preserveRejectedPreview(env, bucket, baseUrl, jobId, image, error).catch(() => null);
-      await markImageProviderRetry(env, image.id, error?.message || 'IMAGE_GENERATION_RETRY');
-      outcomes.push({ imageId: image.id, status: 'retrying', error: String(error?.message || 'IMAGE_GENERATION_RETRY'), rejectedPreviewUrl });
-    }
-  }
+  // When IMAGE_STAGE_PACING_MS is 0 (the production default), every image in the
+  // batch is submitted/polled concurrently. A non-zero value remains an explicit
+  // safety override that staggers starts without reverting to a serial loop.
+  const outcomes = await Promise.all(candidates.map((image, index) => executeImageCandidate(
+    env,
+    jobId,
+    image,
+    index,
+    options,
+    callHubFn,
+    bucket,
+    baseUrl,
+    pacingMs
+  )));
 
   const finalRows = await listJobImages(env, jobId);
   return {

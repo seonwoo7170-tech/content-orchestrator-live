@@ -92,7 +92,7 @@ export async function markImageProviderProgress(env, imageId, meta = {}) {
   if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_STATE_WRITE_FAILED');
 }
 
-export async function markImageProviderRetry(env, imageId, error) {
+export async function markImageProviderRetry(env, imageId, error, meta = {}) {
   const db = requireDb(env);
   const safeError = String(error || 'IMAGE_PROVIDER_RETRY').slice(0, 300);
   const providerCode = safeProviderError(safeError);
@@ -101,6 +101,8 @@ export async function markImageProviderRetry(env, imageId, error) {
         SET status = 'planned',
             provider_task_id = NULL,
             provider_status = 'retrying',
+            provider_attempt_count = COALESCE(provider_attempt_count, 0) + ?,
+            provider = COALESCE(?, provider),
             provider_error_code = ?,
             provider_error_message = ?,
             error = NULL,
@@ -108,6 +110,8 @@ export async function markImageProviderRetry(env, imageId, error) {
             updated_at = datetime('now')
       WHERE id = ?`
   ).bind(
+    meta.countAttempt === true ? 1 : 0,
+    meta.provider || null,
     providerCode,
     safeError,
     normalizeId(imageId, 'IMAGE_ID_INVALID')

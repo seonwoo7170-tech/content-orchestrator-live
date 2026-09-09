@@ -18,7 +18,7 @@ test('legacy production maintenance mode disables remote image starts while pres
   assert.equal(Number(config.vars.IMAGE_STAGE_PACING_MS), 0);
   assert.equal(Number(config.vars.IMAGE_COMPLETION_MAX_ITEMS), 1);
   assert.equal(Number(config.vars.SERIAL_IMAGE_COOLDOWN_MS), 0);
-  assert.equal(Number(config.vars.SERIAL_IMAGE_POLL_INTERVAL_MS), 5000);
+  assert.equal(Number(config.vars.SERIAL_IMAGE_POLL_INTERVAL_MS), 3000);
   assert.equal(Number(config.vars.SERIAL_ARTICLE_IMAGE_COOLDOWN_MS), 10000);
   assert.equal(Number(config.vars.SERIAL_IMAGE_JOB_BUDGET_MS), 120000);
   assert.equal(Number(config.vars.SERIAL_IMAGE_CHAIN_BUDGET_MS), 130000);
@@ -26,7 +26,7 @@ test('legacy production maintenance mode disables remote image starts while pres
   assert.equal(Number(config.vars.SERIAL_IMAGE_CHAIN_MAX_ITEMS), 8);
   assert.equal(Number(config.vars.SERIAL_IMAGE_LEASE_TTL_SECONDS), 210);
   assert.match(imageCompletion, /localFallback:\s*false/);
-  assert.match(imageCompletion, /maxImages:\s*1/);
+  assert.match(imageCompletion, /maxImages:\s*3/);
   assert.match(resilientImageExecutor, /attempts === 0 && modelScopeImageEnabled\(env\)\) return 'modelscope'/);
   assert.match(resilientImageExecutor, /provider === 'modelscope'\) return 'kie'/);
   assert.match(resilientImageExecutor, /IMAGE_PROVIDER_MODE: 'cloudflare'/);
