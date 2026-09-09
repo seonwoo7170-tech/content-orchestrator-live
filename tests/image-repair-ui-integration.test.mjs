@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('3-minute watchdog runs a leased KIE-first image lane without fixed serial pacing', async () => {
+test('3-minute watchdog runs a leased Puter-first image lane without fixed serial pacing', async () => {
   const [entry, lock, migration] = await Promise.all([
     readFile(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8'),
     readFile(new URL('../worker/lib/runtime-lock.js', import.meta.url), 'utf8'),
@@ -15,7 +15,7 @@ test('3-minute watchdog runs a leased KIE-first image lane without fixed serial 
   assert.match(entry, /maxJobs:\s*maxItems/);
   assert.match(entry, /maxImages:\s*1/);
   assert.match(entry, /cooldownMs:\s*0/);
-  assert.match(entry, /providerPriority:\s*'kie->cloudflare'/);
+  assert.match(entry, /providerPriority:\s*'puter->kie->cloudflare'/);
   assert.match(entry, /acquireRuntimeLock/);
   assert.match(entry, /renewRuntimeLock/);
   assert.match(entry, /releaseRuntimeLock/);
