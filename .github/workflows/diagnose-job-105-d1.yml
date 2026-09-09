@@ -68,3 +68,4 @@ jobs:
           }
           console.log('DB_NOW', JSON.stringify(query("SELECT datetime('now') AS utc_now")));
           NODE
+# post-deploy check 2026-09-09T13:41Z
