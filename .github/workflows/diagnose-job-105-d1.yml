@@ -1,0 +1,74 @@
+name: diagnose-job-105-d1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-job-105-d1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Read job 105 from production D1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID missing'; exit 1; }
+          node <<'NODE'
+          const { execFileSync } = require('node:child_process');
+          const db = 'content-orchestrator';
+          function query(sql) {
+            const out = execFileSync('npx', ['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'], { encoding:'utf8', env:process.env, maxBuffer:10*1024*1024 });
+            const parsed = JSON.parse(out);
+            const groups = Array.isArray(parsed) ? parsed : [parsed];
+            return groups.flatMap(g => Array.isArray(g?.results) ? g.results : []);
+          }
+          function columns(table) {
+            return query(`PRAGMA table_info(${table})`).map(r => String(r.name));
+          }
+          function safeSelect(table, wanted, where='1=1', order='') {
+            const cols = columns(table);
+            const selected = wanted.filter(c => cols.includes(c));
+            if (!selected.length) return { columns: cols, rows: [] };
+            const sql = `SELECT ${selected.join(',')} FROM ${table} WHERE ${where}${order ? ' '+order : ''}`;
+            return { columns: cols, selected, rows: query(sql) };
+          }
+          const tables = query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('jobs','job_images','daily_plan_slots','runtime_locks','job_publications') ORDER BY name").map(r=>r.name);
+          console.log('TABLES', JSON.stringify(tables));
+          const jobs = safeSelect('jobs', ['id','mode','status','blog_id','blogger_post_id','daily_slot_id','retry_count','recovery_state','next_retry_at','hold_reason','last_error_code','error','last_failure_at','created_at','updated_at'], 'id=105');
+          console.log('JOB105_SCHEMA', JSON.stringify(jobs.columns));
+          console.log('JOB105', JSON.stringify(jobs.rows));
+          if (tables.includes('job_images')) {
+            const images = safeSelect('job_images', ['id','job_id','role','position','status','provider','provider_model','provider_task_id','provider_status','provider_attempt_count','puter_attempted','error','public_url','storage_key','created_at','updated_at'], 'job_id=105', 'ORDER BY position,id');
+            console.log('JOB105_IMAGE_SCHEMA', JSON.stringify(images.columns));
+            console.log('JOB105_IMAGES', JSON.stringify(images.rows));
+          }
+          if (tables.includes('daily_plan_slots')) {
+            const slots = safeSelect('daily_plan_slots', ['id','plan_date','blog_id','kind','slot_no','status','job_id','recovery_state','next_retry_at','hold_reason','last_error_code','created_at','updated_at'], 'job_id=105');
+            console.log('JOB105_SLOTS', JSON.stringify(slots.rows));
+          }
+          if (tables.includes('job_publications')) {
+            const pubs = safeSelect('job_publications', ['id','job_id','status','blogger_post_id','blogger_url','scheduled_at','published_at','verified_at','created_at','updated_at'], 'job_id=105');
+            console.log('JOB105_PUBLICATIONS', JSON.stringify(pubs.rows));
+          }
+          if (tables.includes('runtime_locks')) {
+            const locks = safeSelect('runtime_locks', ['lock_key','owner_token','expires_at','created_at','updated_at'], "lock_key LIKE '%image%' OR lock_key LIKE '%IMAGE%'");
+            console.log('IMAGE_LOCKS', JSON.stringify(locks.rows.map(r=>({...r,owner_token:r.owner_token?'present':null}))));
+          }
+          if (tables.includes('job_images')) {
+            const recent = safeSelect('job_images', ['id','job_id','role','position','status','provider','provider_status','provider_task_id','updated_at'], '1=1', 'ORDER BY updated_at DESC LIMIT 12');
+            console.log('RECENT_IMAGES', JSON.stringify(recent.rows.map(r=>({...r,provider_task_id:r.provider_task_id?'present':null}))));
+          }
+          console.log('DB_NOW', JSON.stringify(query("SELECT datetime('now') AS utc_now")));
+          NODE
