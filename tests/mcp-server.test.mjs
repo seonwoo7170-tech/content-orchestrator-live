@@ -152,18 +152,16 @@ test('modern header mismatch is rejected before tool execution', async () => {
   const downstream = fakeDownstream();
   const { response, data } = await rpc({
     jsonrpc: '2.0', id: 13, method: 'tools/call',
-    params: { name: 'smileseon_list_blogs', arguments: {} }
+    params: { name: 'smileseon_list_blogs', arguments: { } }
   }, { headers: { 'MCP-Protocol-Version': MCP_PROTOCOL_MODERN, 'Mcp-Method': 'tools/list', 'Mcp-Name': 'smileseon_list_blogs' } }, downstream);
   assert.equal(response.status, 400);
   assert.equal(data.error.code, -32020);
   assert.equal(downstream.calls.length, 0);
 });
 
-test('worker config routes /mcp through the production maintenance wrapper to the MCP entrypoint', () => {
+test('worker config routes /mcp to the MCP entrypoint', () => {
   const wrangler = readFileSync(new URL('../wrangler.example.jsonc', import.meta.url), 'utf8');
-  const maintenanceEntry = readFileSync(new URL('../worker/maintenance-entry.js', import.meta.url), 'utf8');
-  assert.match(wrangler, /"main": "worker\/maintenance-entry\.js"/);
-  assert.match(maintenanceEntry, /import app from '\.\/mcp-entry\.js'/);
+  assert.match(wrangler, /"main": "worker\/mcp-entry\.js"/);
   assert.match(wrangler, /"\/mcp"/);
   assert.ok(MCP_TOOLS.length >= 10);
 });
