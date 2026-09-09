@@ -87,7 +87,7 @@ async function listAmbiguousRows(env, options) {
   const limit = positiveLimit(options?.limit, jobId > 0 ? 1 : DEFAULT_LIMIT);
   const whereJob = jobId > 0 ? 'AND j.id = ?' : '';
   const statement = db.prepare(
-    `SELECT j.id, j.mode, j.blog_id, j.topic, j.status, j.result_json, j.updated_at,
+    `SELECT j.id, j.mode, j.blog_id, j.topic, j.status, j.result_json, j.error, j.last_error_code, j.updated_at,
             p.status AS publication_status, p.blogger_post_id, p.url AS publication_url,
             p.error AS publication_error, p.scheduled_time, p.updated_at AS publication_updated_at
        FROM jobs j
@@ -261,7 +261,12 @@ async function inspectRow(env, row, options) {
 
   const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
   const attemptedAt = dbTime(row.publication_updated_at || row.updated_at);
-  if (!attemptedAt || now.getTime() - attemptedAt < NO_MATCH_GRACE_MS) {
+  const scheduledAt = dbTime(row.scheduled_time);
+  const safeNoMatchAt = Math.max(
+    attemptedAt ? attemptedAt + NO_MATCH_GRACE_MS : 0,
+    scheduledAt ? scheduledAt + NO_MATCH_GRACE_MS : 0
+  );
+  if (!safeNoMatchAt || now.getTime() < safeNoMatchAt) {
     return { jobId: Number(row.id), status: 'pending', action: 'grace_period', reason: 'BLOGGER_PUBLICATION_REVIEW_GRACE_PERIOD' };
   }
   return requeuePublishOnly(env, row);
