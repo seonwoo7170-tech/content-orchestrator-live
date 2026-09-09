@@ -151,9 +151,14 @@ async function callImageProvider(env, jobId, image, prompt, providerMode, callHu
     prompt,
     providerMode
   };
-  if ((providerMode === 'kie' || providerMode === 'modelscope') && String(image?.provider_task_id || '').trim()) {
-    payload.taskId = String(image.provider_task_id).trim();
-  }
+  const existingProvider = String(image?.provider || '').trim().toLowerCase();
+  const existingTaskId = String(image?.provider_task_id || '').trim();
+  const sameAsyncProvider = providerMode === 'kie'
+    ? ['kie', 'kie-ai'].includes(existingProvider)
+    : providerMode === 'modelscope'
+      ? existingProvider === 'modelscope'
+      : false;
+  if (sameAsyncProvider && existingTaskId) payload.taskId = existingTaskId;
   return callHubFn(env, env.HUB_IMAGE_GENERATE_PATH || '/api/hub/image/generate', payload);
 }
 
