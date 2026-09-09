@@ -31,9 +31,9 @@ test('local fallback renders a no-text deterministic visual without external AI'
   assert.equal(result.imageQa.pass, true);
 });
 
-test('worker routes images KIE first, Cloudflare second, while local rendering stays explicit-only', async () => {
+test('worker routes images Puter first, KIE second, Cloudflare last, while local rendering stays explicit-only', async () => {
   const source = await import('node:fs/promises').then(({ readFile }) => readFile(new URL('../worker/lib/image-executor.js', import.meta.url), 'utf8'));
-  assert.match(source, /if \(mode === 'auto'\) return \['kie', 'cloudflare'\]/);
+  assert.match(source, /if \(mode === 'auto'\) return \['puter', 'kie', 'cloudflare'\]/);
   assert.match(source, /imageStagePacingMs/);
   assert.match(source, /if \(index > 0 && pacingMs > 0\) await sleep\(pacingMs \* index\)/);
   assert.match(source, /options\.localFallback !== true/);
