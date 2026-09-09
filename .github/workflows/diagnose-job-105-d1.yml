@@ -34,24 +34,19 @@ jobs:
             const groups = Array.isArray(parsed) ? parsed : [parsed];
             return groups.flatMap(g => Array.isArray(g?.results) ? g.results : []);
           }
-          function columns(table) {
-            return query(`PRAGMA table_info(${table})`).map(r => String(r.name));
-          }
+          function columns(table) { return query(`PRAGMA table_info(${table})`).map(r => String(r.name)); }
           function safeSelect(table, wanted, where='1=1', order='') {
             const cols = columns(table);
             const selected = wanted.filter(c => cols.includes(c));
             if (!selected.length) return { columns: cols, rows: [] };
-            const sql = `SELECT ${selected.join(',')} FROM ${table} WHERE ${where}${order ? ' '+order : ''}`;
-            return { columns: cols, selected, rows: query(sql) };
+            return { columns: cols, selected, rows: query(`SELECT ${selected.join(',')} FROM ${table} WHERE ${where}${order ? ' '+order : ''}`) };
           }
-          const tables = query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('jobs','job_images','daily_plan_slots','runtime_locks','job_publications') ORDER BY name").map(r=>r.name);
+          const tables = query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('jobs','job_images','daily_plan_slots','runtime_locks','job_publications','automation_settings') ORDER BY name").map(r=>r.name);
           console.log('TABLES', JSON.stringify(tables));
           const jobs = safeSelect('jobs', ['id','mode','status','blog_id','blogger_post_id','daily_slot_id','retry_count','recovery_state','next_retry_at','hold_reason','last_error_code','error','last_failure_at','created_at','updated_at'], 'id=105');
-          console.log('JOB105_SCHEMA', JSON.stringify(jobs.columns));
           console.log('JOB105', JSON.stringify(jobs.rows));
           if (tables.includes('job_images')) {
-            const images = safeSelect('job_images', ['id','job_id','role','position','status','provider','provider_model','provider_task_id','provider_status','provider_attempt_count','puter_attempted','error','public_url','storage_key','created_at','updated_at'], 'job_id=105', 'ORDER BY position,id');
-            console.log('JOB105_IMAGE_SCHEMA', JSON.stringify(images.columns));
+            const images = safeSelect('job_images', ['id','job_id','role','position','status','provider','model','provider_task_id','provider_status','provider_checked_at','provider_attempt_count','puter_attempted','error','public_url','storage_key','created_at','updated_at'], 'job_id=105', 'ORDER BY position,id');
             console.log('JOB105_IMAGES', JSON.stringify(images.rows));
           }
           if (tables.includes('daily_plan_slots')) {
@@ -62,13 +57,14 @@ jobs:
             const pubs = safeSelect('job_publications', ['id','job_id','status','blogger_post_id','blogger_url','scheduled_at','published_at','verified_at','created_at','updated_at'], 'job_id=105');
             console.log('JOB105_PUBLICATIONS', JSON.stringify(pubs.rows));
           }
+          if (tables.includes('automation_settings')) {
+            const rows = query("SELECT scope_key,blog_id,inherit_global,settings_json,updated_at FROM automation_settings WHERE scope_key='global' OR blog_id='7741529904469657049' ORDER BY CASE WHEN scope_key='global' THEN 0 ELSE 1 END");
+            const safe = rows.map(r => { let s={}; try{s=JSON.parse(r.settings_json||'{}')}catch{} return {scopeKey:r.scope_key,blogId:r.blog_id||null,inheritGlobal:Number(r.inherit_global)!==0,enabled:s.enabled,imagesEnabled:s.imagesEnabled,bodyImageCount:s.bodyImageCount,repairsEnabled:s.repairsEnabled,approvalMode:s.approvalMode,autoPublishEnabled:s.autoPublishEnabled,updatedAt:r.updated_at||null}; });
+            console.log('JOB105_AUTOMATION', JSON.stringify(safe));
+          }
           if (tables.includes('runtime_locks')) {
             const locks = safeSelect('runtime_locks', ['lock_key','owner_token','expires_at','created_at','updated_at'], "lock_key LIKE '%image%' OR lock_key LIKE '%IMAGE%'");
             console.log('IMAGE_LOCKS', JSON.stringify(locks.rows.map(r=>({...r,owner_token:r.owner_token?'present':null}))));
-          }
-          if (tables.includes('job_images')) {
-            const recent = safeSelect('job_images', ['id','job_id','role','position','status','provider','provider_status','provider_task_id','updated_at'], '1=1', 'ORDER BY updated_at DESC LIMIT 12');
-            console.log('RECENT_IMAGES', JSON.stringify(recent.rows.map(r=>({...r,provider_task_id:r.provider_task_id?'present':null}))));
           }
           console.log('DB_NOW', JSON.stringify(query("SELECT datetime('now') AS utc_now")));
           NODE
