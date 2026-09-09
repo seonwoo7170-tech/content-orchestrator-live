@@ -118,7 +118,14 @@ async function listReadyImageCandidates(env, options = {}) {
                WHERE pi.job_id = j.id
                  AND pi.provider_task_id IS NOT NULL
                  AND pi.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry')
-            ) AS has_active_provider_task
+            ) AS has_active_provider_task,
+            COALESCE((
+              SELECT MIN(COALESCE(pi.provider_checked_at, pi.updated_at))
+                FROM job_images pi
+               WHERE pi.job_id = j.id
+                 AND pi.provider_task_id IS NOT NULL
+                 AND pi.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry')
+            ), j.updated_at) AS active_provider_checked_at
        FROM jobs j
        LEFT JOIN daily_plan_slots s ON s.job_id = j.id
       WHERE j.status = 'ready'
@@ -153,7 +160,11 @@ async function listReadyImageCandidates(env, options = {}) {
                  WHEN has_failed_images = 0 THEN 2
                  ELSE 3
                END,
-               CASE WHEN has_failed_images = 1 THEN image_activity_at ELSE j.updated_at END,
+               CASE
+                 WHEN has_active_provider_task = 1 THEN active_provider_checked_at
+                 WHEN has_failed_images = 1 THEN image_activity_at
+                 ELSE j.updated_at
+               END,
                j.id
       LIMIT ?`
   ).bind(
@@ -335,6 +346,8 @@ export async function runScheduledImageCompletion(env, options = {}) {
     if (!effective?.enabled) continue;
 
     const jobStartedAt = Date.now();
+    const resumedActiveTask = Number(candidate?.has_active_provider_task || 0) === 1;
+    let rotateIncomplete = false;
     let item = null;
     try {
       while (Date.now() - jobStartedAt < jobBudgetMs && Date.now() - chainStartedAt < chainBudgetMs) {
@@ -346,6 +359,16 @@ export async function runScheduledImageCompletion(env, options = {}) {
         if (Number(item?.pending || 0) > 0) {
           if (callbackMode && String(item?.pendingProvider || '') === 'kie-ai') {
             item = { ...item, reason: 'AWAITING_KIE_CALLBACK' };
+            rotateIncomplete = resumedActiveTask;
+            break;
+          }
+          if (resumedActiveTask) {
+            // A durable task that already existed before this watchdog pass gets one
+            // status refresh only. Its provider_checked_at moves forward, so the next
+            // cron naturally rotates to the oldest unpolled task instead of allowing
+            // one slow provider task to monopolize the entire image lane.
+            item = { ...item, reason: 'AWAITING_PROVIDER_REPOLL' };
+            rotateIncomplete = true;
             break;
           }
           await sleep(pollIntervalMs);
@@ -354,7 +377,10 @@ export async function runScheduledImageCompletion(env, options = {}) {
         if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) {
           // The serial watchdog intentionally asks for one image. Persist that one image
           // completely, release the runtime lock, and let the next cron continue.
-          if (positiveLimit(options.maxImages, 1, 3) === 1) break;
+          if (positiveLimit(options.maxImages, 1, 3) === 1) {
+            rotateIncomplete = resumedActiveTask && !item?.complete;
+            break;
+          }
           continue;
         }
         break;
@@ -375,8 +401,9 @@ export async function runScheduledImageCompletion(env, options = {}) {
       items.push(item);
     }
 
-    if (!item?.complete) break;
+    if (!item?.complete && !rotateIncomplete) break;
     if (items.length >= maxJobs) break;
+    if (rotateIncomplete) continue;
 
     // Keep the requested 10-second gap between completed posts, not between
     // individual images inside the same post.
