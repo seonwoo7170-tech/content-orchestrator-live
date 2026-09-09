@@ -342,7 +342,7 @@ async function runSerialImageWatchdog(env, ctx) {
   const startedAt = Date.now();
   const steps = [];
   const lease = await acquireRuntimeLock(env, IMAGE_LANE_LOCK_KEY, { ttlSeconds: leaseTtlSeconds });
-  if (!lease.acquired) return { ok: true, watchdogCron: WATCHDOG_CRON, providerPriority: 'kie->cloudflare', cooldownMs: 0, maxItems, stopReason: 'IMAGE_LANE_BUSY', durationMs: Date.now() - startedAt, steps };
+  if (!lease.acquired) return { ok: true, watchdogCron: WATCHDOG_CRON, providerPriority: 'puter->kie->cloudflare', cooldownMs: 0, maxItems, stopReason: 'IMAGE_LANE_BUSY', durationMs: Date.now() - startedAt, steps };
   let stopReason = 'NO_ELIGIBLE_IMAGES';
   try {
     if (!await renewRuntimeLock(env, lease, { ttlSeconds: leaseTtlSeconds })) {
@@ -367,7 +367,7 @@ async function runSerialImageWatchdog(env, ctx) {
   } finally {
     await releaseRuntimeLock(env, lease).catch((error) => console.error('SERIAL_IMAGE_LEASE_RELEASE_FAILED', safeScheduledError(error)));
   }
-  return { ok: !['IMAGE_WORK_ERROR', 'IMAGE_LANE_LEASE_LOST'].includes(stopReason), watchdogCron: WATCHDOG_CRON, providerPriority: 'kie->cloudflare', cooldownMs: 0, maxItems, leaseTtlSeconds, stopReason, durationMs: Date.now() - startedAt, steps };
+  return { ok: !['IMAGE_WORK_ERROR', 'IMAGE_LANE_LEASE_LOST'].includes(stopReason), watchdogCron: WATCHDOG_CRON, providerPriority: 'puter->kie->cloudflare', cooldownMs: 0, maxItems, leaseTtlSeconds, stopReason, durationMs: Date.now() - startedAt, steps };
 }
 
 async function runLegacyMaintenance(event, env, ctx) {
