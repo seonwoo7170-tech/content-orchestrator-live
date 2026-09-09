@@ -8,10 +8,16 @@ const phase5Entry = fs.readFileSync(new URL('../worker/phase5-entry.js', import.
 const phase5OpsTick = fs.readFileSync(new URL('../worker/phase5-ops-tick.js', import.meta.url), 'utf8');
 const imageCompletion = fs.readFileSync(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
 const resilientImageExecutor = fs.readFileSync(new URL('../worker/lib/image-executor-resilient.js', import.meta.url), 'utf8');
+const puterProvider = fs.readFileSync(new URL('../worker/lib/puter-image-provider.js', import.meta.url), 'utf8');
 
-test('active production uses resumable durable image polling without fixed per-image cooldown', () => {
+test('active production uses Puter-first resumable durable image completion without fixed per-image cooldown', () => {
   assert.equal(config.vars.SYSTEM_PAUSED, 'false');
   assert.equal(config.vars.IMAGE_PROVIDER_MODE, 'auto');
+  assert.equal(config.vars.PUTER_IMAGE_ENABLED, 'true');
+  assert.equal(config.vars.PUTER_IMAGE_MODELS, 'gemini-3.1-flash-lite-image,gemini-2.5-flash-image');
+  assert.equal(config.vars.PUTER_IMAGE_QUALITY, '1K');
+  assert.equal(Number(config.vars.PUTER_IMAGE_TIMEOUT_MS), 120000);
+  assert.equal(Number(config.vars.PUTER_OUTCOME_UNKNOWN_GRACE_MS), 600000);
   assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'false');
   assert.equal(config.vars.KIE_IMAGE_CALLBACK_ENABLED, 'false');
   assert.equal(config.vars.KIE_IMAGE_FALLBACK_ENABLED, 'false');
@@ -30,11 +36,15 @@ test('active production uses resumable durable image polling without fixed per-i
   assert.match(imageCompletion, /maxImages:\s*positiveLimit\(options\.maxImages, 1, 3\)/);
   assert.match(imageCompletion, /storedBeforeGeneration/);
   assert.match(resilientImageExecutor, /Math\.min\(3, number\)/);
+  assert.match(resilientImageExecutor, /!puterAttempted && puterImageConfigured\(env\)\) return 'puter'/);
   assert.match(resilientImageExecutor, /attempts === 0 && modelScopeImageEnabled\(env\)\) return 'modelscope'/);
   assert.match(resilientImageExecutor, /provider === 'modelscope'\) return 'kie'/);
   assert.match(resilientImageExecutor, /IMAGE_PROVIDER_MODE: 'cloudflare'/);
   assert.match(resilientImageExecutor, /isSuccessfulPaidImageCheckpoint/);
   assert.doesNotMatch(resilientImageExecutor, /localFallback:\s*true/);
+  assert.match(puterProvider, /puter_output_path/);
+  assert.match(puterProvider, /PUTER_OUTCOME_UNKNOWN/);
+  assert.match(puterProvider, /readPuterCheckpoint/);
 });
 
 test('text AI stages retain a four-second pacing interval in preserved code', () => {
