@@ -69,12 +69,12 @@ test('trend refresh runs only at configured KST slots', () => {
   assert.equal(isTrendRefreshDue(env, new Date('2026-09-03T04:40:00.000Z')), false);
 });
 
-test('runtime and UI preserve Trends code behind a globally paused maintenance wrapper', () => {
-  assert.match(wrangler, /"main": "worker\/maintenance-entry\.js"/);
-  assert.match(wrangler, /"SYSTEM_PAUSED": "true"/);
+test('runtime and UI enable Trends through the active MCP entry while retaining maintenance safety code', () => {
+  assert.match(wrangler, /"main": "worker\/mcp-entry\.js"/);
+  assert.match(wrangler, /"SYSTEM_PAUSED": "false"/);
   assert.match(maintenanceEntry, /import app from '\.\/mcp-entry\.js'/);
   assert.match(mcpEntry, /import app from '\.\/phase6-trends-entry\.js'/);
-  assert.match(wrangler, /"TREND_KEYWORDS_ENABLED": "false"/);
+  assert.match(wrangler, /"TREND_KEYWORDS_ENABLED": "true"/);
   assert.match(ui, /Google Trends/);
   assert.match(ui, /Google Ads 경쟁률이 아닌 Smileseon 내부 추정치/);
   assert.match(ui, /평균/);
