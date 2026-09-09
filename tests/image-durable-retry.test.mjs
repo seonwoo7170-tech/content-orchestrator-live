@@ -49,7 +49,7 @@ test('a transient poll failure retains the paid task and never calls a fallback 
   assert.equal(imageExecutionPriority(row()), 0);
 });
 
-test('failed KIE submissions consume the retry budget and hand off to Cloudflare', async (t) => {
+test('final failed KIE submission hands off to Cloudflare in the same invocation', async (t) => {
   const { env, row } = fixture(t);
   const modes = [];
   const callHubFn = async (_, __, payload) => {
@@ -57,9 +57,9 @@ test('failed KIE submissions consume the retry budget and hand off to Cloudflare
     if (payload.providerMode === 'kie') throw new Error('KIE_PROVIDER_ERROR');
     return { provider: 'cloudflare', model: 'flux', mimeType: 'image/png', imageBase64: btoa('image-bytes') };
   };
-  for (let n = 0; n < 3; n++) await generateResilient(env, 1, { callHubFn });
+  let result;
+  for (let n = 0; n < 3; n++) result = await generateResilient(env, 1, { callHubFn });
   assert.equal(row().provider_attempt_count, 3);
-  const result = await generateResilient(env, 1, { callHubFn });
   assert.deepEqual(modes, ['kie', 'kie', 'kie', 'cloudflare']);
   assert.equal(result.stored, 1);
 });
