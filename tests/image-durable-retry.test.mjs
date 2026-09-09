@@ -10,7 +10,7 @@ function fixture(t, active = false) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
   db.exec('CREATE TABLE jobs (id INTEGER PRIMARY KEY); INSERT INTO jobs VALUES (1);');
-  for (const file of ['0004_phase2_images.sql', '0026_kie_async_image_tasks.sql', '0027_kie_image_attempt_count.sql']) {
+  for (const file of ['0004_phase2_images.sql', '0026_kie_async_image_tasks.sql', '0027_kie_image_attempt_count.sql', '0028_puter_image_attempted.sql']) {
     db.exec(readFileSync(new URL(`../worker/migrations/${file}`, import.meta.url), 'utf8'));
   }
   db.exec("ALTER TABLE job_images ADD COLUMN hook_text TEXT; INSERT INTO job_images (job_id, role, position, prompt, alt_text) VALUES (1, 'body', 1, 'A plain wooden table', 'Table');");
