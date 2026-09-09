@@ -1,0 +1,22 @@
+name: inspect-image-watchdog-tail
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/inspect-image-watchdog-tail-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show watchdog tail
+        run: |
+          echo '--- MCP ENTRY TAIL ---'
+          tail -n 140 worker/mcp-entry.js
+          echo '--- IMAGE COMPLETION KEY LINES ---'
+          grep -nE 'runScheduledImageCompletion|retrying|pending|break;|listReadyImageCandidates' worker/lib/image-completion.js | tail -n 100
