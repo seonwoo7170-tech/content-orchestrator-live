@@ -8,7 +8,7 @@
     "crons": ["*/3 * * * *", "*/5 * * * *"]
   },
   "secrets": {
-    "required": ["HUB_API_KEY", "ADMIN_API_KEY"]
+    "required": ["HUB_API_KEY", "ADMIN_API_KEY", "PUTER_AUTH_TOKEN"]
   },
   "services": [
     {
@@ -53,6 +53,7 @@
     "KIE_IMAGE_CALLBACK_ENABLED": "false",
     "KIE_IMAGE_CALLBACK_RECOVERY_MINUTES": "3",
     "KIE_IMAGE_GENERATION_RETRY_MAX": "3",
+    "KIE_ACTIVE_TASK_STALE_MS": "1800000",
     "BLOGGER_WRITES_ENABLED": "true",
     "AUTO_PUBLISH_EXECUTION_ENABLED": "true",
     "DAILY_WORK_EXECUTION_ENABLED": "true",
