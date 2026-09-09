@@ -37,7 +37,7 @@ export function kieImageCallbackRecoveryMinutes(env = {}) {
 }
 
 export function imagePollIntervalMs(env = {}, options = {}) {
-  return boundedMs(options.pollIntervalMs ?? env?.SERIAL_IMAGE_POLL_INTERVAL_MS, 5000, 500, 5000);
+  return boundedMs(options.pollIntervalMs ?? env?.SERIAL_IMAGE_POLL_INTERVAL_MS, 3000, 500, 5000);
 }
 
 export function articleImageCooldownMs(env = {}, options = {}) {
@@ -188,6 +188,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
     return { jobId, blogId: String(candidate.blog_id), mode: String(candidate.mode), complete: true, skipped: true, reason: 'IMAGES_DISABLED', pending: 0 };
   }
 
+  // Only Final-Critic-ready results are allowed into the image lane.
   const result = readyResult(candidate);
   const plan = buildSupplementalImagePlan(candidate.mode, result.article, effective);
 
@@ -222,7 +223,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
   if (!state.complete) {
     generated = await generatePlannedImages(env, jobId, {
       retryFailed: true,
-      maxImages: positiveLimit(options.maxImages, 1, 3),
+      maxImages: positiveLimit(options.maxImages, 3, 3),
       localFallback: false,
       executionContext: options.executionContext
     });
@@ -325,7 +326,7 @@ export async function runScheduledImageCompletion(env, options = {}) {
     let item = null;
     try {
       while (Date.now() - jobStartedAt < jobBudgetMs && Date.now() - chainStartedAt < chainBudgetMs) {
-        item = await completeReadyJobImages(env, candidate, effective, { ...options, maxImages: 1 });
+        item = await completeReadyJobImages(env, candidate, effective, { ...options, maxImages: 3 });
         if (item?.complete || Number(item?.failed || 0) > 0) break;
         if (Number(item?.pending || 0) > 0) {
           if (callbackMode && String(item?.pendingProvider || '') === 'kie-ai') {
@@ -357,6 +358,8 @@ export async function runScheduledImageCompletion(env, options = {}) {
     if (!item?.complete) break;
     if (items.length >= maxJobs) break;
 
+    // Keep the requested 10-second gap between completed posts, not between
+    // individual images inside the same post.
     if (articleCooldownMs > 0) {
       if (Date.now() - chainStartedAt + articleCooldownMs >= chainBudgetMs) break;
       await sleep(articleCooldownMs);

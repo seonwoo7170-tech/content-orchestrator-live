@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { generatePlannedImages, imageExecutionPriority, retryPromptForImage } from '../worker/lib/image-executor.js';
 import { generatePlannedImages as generateResilient } from '../worker/lib/image-executor-resilient.js';
+import { handleKieImageCallback } from '../worker/lib/kie-image-callback.js';
 
 function fixture(t, active = false) {
   const db = new DatabaseSync(':memory:');
@@ -29,7 +30,7 @@ function fixture(t, active = false) {
       }
     }
   };
-  return { env, row: () => db.prepare('SELECT * FROM job_images').get() };
+  return { env, db, row: () => db.prepare('SELECT * FROM job_images').get() };
 }
 
 test('a transient poll failure retains the paid task and never calls a fallback provider', async (t) => {
@@ -85,4 +86,34 @@ test('pending result retrieval stays ahead of creating more images', () => {
   for (const provider_status of ['query_retry', 'result_pending', 'result_download_retry']) {
     assert.equal(imageExecutionPriority({ status: 'planned', provider_task_id: 'paid-task', provider_status }), 0);
   }
+});
+
+test('polling mode ignores callbacks without touching the database', async () => {
+  const response = await handleKieImageCallback(new Request('https://example.com/callback', {
+    method: 'POST', body: JSON.stringify({ data: { taskId: 'paid-task' } })
+  }), { KIE_IMAGE_CALLBACK_ENABLED: 'false' }, {});
+  const result = await response.json();
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, 'CALLBACK_DISABLED_POLLING_ACTIVE');
+});
+
+test('three parallel submissions persist a distinct task for each image', async (t) => {
+  const { env, db } = fixture(t);
+  db.exec("INSERT INTO job_images (job_id, role, position, prompt, alt_text) VALUES (1, 'body', 2, 'Second scene', 'Second'), (1, 'body', 3, 'Third scene', 'Third');");
+  let started = 0;
+  let release;
+  const barrier = new Promise(resolve => { release = resolve; });
+  const timeout = setTimeout(release, 1000);
+  t.after(() => clearTimeout(timeout));
+  const result = await generateResilient(env, 1, { callHubFn: async (_, __, payload) => {
+    started++;
+    if (started === 3) release();
+    await barrier;
+    assert.equal(started, 3, 'all three submissions must start before any completes');
+    return { pending: true, provider: 'kie-ai', taskId: `task-${payload.prompt}`, state: 'waiting' };
+  } });
+  assert.equal(result.pending, 3);
+  const rows = db.prepare('SELECT provider_task_id, provider_attempt_count FROM job_images').all();
+  assert.equal(new Set(rows.map(row => row.provider_task_id)).size, 3);
+  assert.ok(rows.every(row => row.provider_attempt_count === 1));
 });

@@ -17,6 +17,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function callbackEnabled(env = {}) {
+  return String(env?.KIE_IMAGE_CALLBACK_ENABLED || 'false').trim().toLowerCase() === 'true';
+}
+
 export function callbackTaskId(payload) {
   const data = payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object'
     ? payload.data
@@ -63,7 +67,7 @@ async function resumeCallbackJob(env, candidate, executionContext) {
   let item = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     item = await completeReadyJobImages(env, candidate, effective, {
-      maxImages: 1,
+      maxImages: 3,
       executionContext
     });
 
@@ -72,8 +76,6 @@ async function resumeCallbackJob(env, candidate, executionContext) {
     if (Number(item?.failed || 0) > 0) return { ok: false, item, reason: 'PROVIDER_FAILURE' };
     if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) continue;
 
-    // A terminal KIE failure is converted to retrying/planned, so one immediate
-    // second pass starts a fresh KIE task instead of waiting for the watchdog.
     if (attempt === 0) continue;
     return { ok: true, item, reason: 'NO_FURTHER_PROGRESS' };
   }
@@ -83,7 +85,7 @@ async function resumeCallbackJob(env, candidate, executionContext) {
 
 export async function handleKieImageCallback(request, env, ctx) {
   if (request.method === 'OPTIONS') return new Response(null, { status: 204 });
-  if (request.method === 'GET') return json({ ok: true, endpoint: 'kie-image-callback' }, 200);
+  if (request.method === 'GET') return json({ ok: true, endpoint: 'kie-image-callback', enabled: callbackEnabled(env) }, 200);
   if (request.method !== 'POST') return json({ ok: false, error: 'METHOD_NOT_ALLOWED' }, 405);
 
   let payload;
@@ -96,10 +98,15 @@ export async function handleKieImageCallback(request, env, ctx) {
   const taskId = callbackTaskId(payload);
   if (!taskId || taskId.length > 180) return json({ ok: false, error: 'CALLBACK_TASK_ID_INVALID' }, 400);
 
+  // Production polling mode intentionally treats provider callbacks as wake-up
+  // noise only. This prevents a callback and the three-second poller from
+  // concurrently mutating the same image task.
+  if (!callbackEnabled(env)) {
+    return json({ ok: true, accepted: false, taskId, reason: 'CALLBACK_DISABLED_POLLING_ACTIVE' }, 200);
+  }
+
   const candidate = await findCallbackCandidateWithRaceGuard(env, taskId);
   if (!candidate) {
-    // Callback input is treated only as a wake-up signal. Unknown task IDs cannot
-    // mutate state, and returning 200 avoids provider retry storms for stale callbacks.
     return json({ ok: true, accepted: false, reason: 'TASK_NOT_ACTIVE' }, 200);
   }
 

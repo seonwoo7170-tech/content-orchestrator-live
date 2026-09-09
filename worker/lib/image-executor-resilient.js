@@ -23,6 +23,12 @@ function normalizedProvider(image = {}) {
   return String(image?.provider || '').trim().toLowerCase();
 }
 
+function batchLimit(value, fallback = 3) {
+  const number = Number(value ?? fallback);
+  if (!Number.isInteger(number) || number < 1) return fallback;
+  return Math.min(3, number);
+}
+
 export function scheduledProviderModeForImage(image = {}, env = {}) {
   const taskId = String(image?.provider_task_id || '').trim();
   const provider = normalizedProvider(image);
@@ -48,26 +54,19 @@ function needsImmediateCloudflareFallback(outcome = {}) {
     || error.includes('KIE_CONTENT_REJECTED');
 }
 
-/**
- * Scheduled publishing policy:
- * - ModelScope Z-Image Turbo is the free-first provider when explicitly enabled;
- * - an active async task always resumes on the provider that created it;
- * - ModelScope terminal failure hands off immediately to KIE;
- * - KIE keeps its bounded retry budget, then Cloudflare is the final provider;
- * - provider-chain failure stays retryable/planned;
- * - the local renderer is never enabled here.
- */
-export async function generatePlannedImages(env, jobId, options = {}) {
-  const retryFailed = options.retryFailed !== false;
-  const rows = await listJobImages(env, jobId);
-  const image = orderedCandidates(rows, retryFailed)[0] || null;
-  if (!image) return generateBaseImages(env, jobId, { ...options, maxImages: 1, localFallback: false });
-
+async function runOneImage(env, jobId, image, options = {}) {
   const providerMode = scheduledProviderModeForImage(image, env);
+  const imageOptions = {
+    ...options,
+    imageIds: [image.id],
+    maxImages: 1,
+    localFallback: false
+  };
+
   const first = await generateBaseImages(
     { ...env, IMAGE_PROVIDER_MODE: providerMode },
     jobId,
-    { ...options, maxImages: 1, localFallback: false }
+    imageOptions
   );
 
   const firstOutcome = Array.isArray(first?.outcomes) ? first.outcomes[0] : null;
@@ -76,7 +75,7 @@ export async function generatePlannedImages(env, jobId, options = {}) {
     return generateBaseImages(
       { ...env, IMAGE_PROVIDER_MODE: 'kie' },
       jobId,
-      { ...options, maxImages: 1, localFallback: false }
+      imageOptions
     );
   }
 
@@ -84,9 +83,47 @@ export async function generatePlannedImages(env, jobId, options = {}) {
     return generateBaseImages(
       { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
       jobId,
-      { ...options, maxImages: 1, localFallback: false }
+      imageOptions
     );
   }
 
   return first;
+}
+
+function combineExecutionResults(results = [], images = []) {
+  const outcomes = results.flatMap((result) => Array.isArray(result?.outcomes) ? result.outcomes : []);
+  return {
+    requested: results.reduce((sum, result) => sum + Number(result?.requested || 0), 0),
+    stored: outcomes.filter((item) => item.status === 'stored').length,
+    pending: outcomes.filter((item) => item.status === 'pending').length,
+    retrying: outcomes.filter((item) => item.status === 'retrying').length,
+    failed: results.reduce((sum, result) => sum + Number(result?.failed || 0), 0),
+    outcomes,
+    images
+  };
+}
+
+/**
+ * Scheduled publishing policy:
+ * - ModelScope Z-Image Turbo is the free-first provider when explicitly enabled;
+ * - an active async task always resumes on the provider that created it;
+ * - ModelScope terminal failure hands off immediately to KIE;
+ * - KIE keeps its bounded retry budget, then Cloudflare is the final provider;
+ * - up to three images for the same post are submitted/polled concurrently;
+ * - provider-chain failure stays retryable/planned;
+ * - the local renderer is never enabled here.
+ */
+export async function generatePlannedImages(env, jobId, options = {}) {
+  const retryFailed = options.retryFailed !== false;
+  const rows = await listJobImages(env, jobId);
+  const maxImages = batchLimit(options.maxImages, 3);
+  const images = orderedCandidates(rows, retryFailed).slice(0, maxImages);
+
+  if (images.length === 0) {
+    return generateBaseImages(env, jobId, { ...options, maxImages, localFallback: false });
+  }
+
+  const results = await Promise.all(images.map((image) => runOneImage(env, jobId, image, options)));
+  const finalRows = await listJobImages(env, jobId);
+  return combineExecutionResults(results, finalRows);
 }
