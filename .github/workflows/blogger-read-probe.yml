@@ -1,0 +1,78 @@
+name: blogger-read-probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/blogger-read-probe-trigger'
+      - '.github/workflows/blogger-read-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      HUB_API_KEY: ${{ secrets.HUB_API_KEY }}
+      API_HUB_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      TARGET_BLOG_ID: '5540565797560833468'
+    steps:
+      - name: Probe read-only Blogger discovery routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          const base = process.env.API_HUB_BASE_URL;
+          const key = process.env.HUB_API_KEY;
+          const blogId = process.env.TARGET_BLOG_ID;
+          if (!base || !key || !blogId) throw new Error('PROBE_CONFIG_MISSING');
+          const routes = [
+            '/api/blogger/posts',
+            '/api/blogger/posts/list',
+            '/api/blogger/post/list',
+            '/api/blogger/posts/search',
+            '/api/blogger/post/search'
+          ];
+          function safeShape(data) {
+            if (!data || typeof data !== 'object') return { type: typeof data };
+            const out = { keys: Object.keys(data).slice(0, 20) };
+            for (const key of ['ok','error','message','count','nextPageToken']) if (key in data) out[key] = data[key];
+            for (const key of ['posts','items','results']) {
+              if (Array.isArray(data[key])) {
+                out[key] = data[key].slice(0, 5).map((item) => ({
+                  id: item?.id || item?.bloggerPostId || null,
+                  title: item?.title || item?.name || null,
+                  url: item?.url || item?.permalink || null,
+                  status: item?.status || null,
+                  published: item?.published || item?.publishedAt || null,
+                  updated: item?.updated || item?.updatedAt || null
+                }));
+              }
+            }
+            return out;
+          }
+          async function call(path, method) {
+            const url = new URL(base + path);
+            const init = { method, headers: { 'x-hub-api-key': key, accept: 'application/json' } };
+            if (method === 'GET') {
+              url.searchParams.set('blogId', blogId);
+              url.searchParams.set('maxResults', '20');
+            } else {
+              init.headers['content-type'] = 'application/json';
+              init.body = JSON.stringify({ blogId, maxResults: 20, status: ['draft','live','scheduled'] });
+            }
+            const r = await fetch(url, { ...init, signal: AbortSignal.timeout(15000) });
+            const text = await r.text();
+            let data = null;
+            try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 160) }; }
+            console.log('PROBE', JSON.stringify({ path, method, http: r.status, shape: safeShape(data) }));
+            return r.status;
+          }
+          for (const path of routes) {
+            const getStatus = await call(path, 'GET');
+            if (getStatus === 405) await call(path, 'POST');
+          }
+          NODE
