@@ -5,14 +5,11 @@ import fs from 'node:fs';
 const entry = fs.readFileSync(new URL('../worker/phase6-entry.js', import.meta.url), 'utf8');
 const wrapper = fs.readFileSync(new URL('../worker/phase6-trends-entry.js', import.meta.url), 'utf8');
 const mcpEntry = fs.readFileSync(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');
-const maintenanceEntry = fs.readFileSync(new URL('../worker/maintenance-entry.js', import.meta.url), 'utf8');
 const wrangler = fs.readFileSync(new URL('../wrangler.example.jsonc', import.meta.url), 'utf8');
 const ui = fs.readFileSync(new URL('../web/external-traffic.js', import.meta.url), 'utf8');
 
-test('production maintenance wrapper preserves MCP, trend and Phase 6 routing while paused', () => {
-  assert.match(wrangler, /"main": "worker\/maintenance-entry\.js"/);
-  assert.match(wrangler, /"SYSTEM_PAUSED": "true"/);
-  assert.match(maintenanceEntry, /import app from '\.\/mcp-entry\.js'/);
+test('MCP wrapper is deployed while trend and Phase 6 tracking still run through the Worker', () => {
+  assert.match(wrangler, /"main": "worker\/mcp-entry\.js"/);
   assert.match(wrangler, /"\/go\/\*"/);
   assert.match(wrangler, /"\/mcp"/);
   assert.match(mcpEntry, /import app from '\.\/phase6-trends-entry\.js'/);
