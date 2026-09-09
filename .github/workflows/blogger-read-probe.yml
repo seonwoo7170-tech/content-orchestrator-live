@@ -48,4 +48,14 @@ jobs:
           };
           console.log('BLOGGER_ROUTES', JSON.stringify(routes));
           console.log('BLOGGER_CAPABILITIES', JSON.stringify(capabilities));
+          const marker = '/api/blogger/posts';
+          const index = source.indexOf(marker);
+          if (index >= 0) {
+            const scrubbed = source.slice(Math.max(0, index - 1800), index + 4200)
+              .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer [REDACTED]')
+              .replace(/(client_secret|refresh_token|access_token|api[_-]?key)\s*[:=]\s*["'`][^"'`]+["'`]/gi, '$1:[REDACTED]');
+            console.log('BLOGGER_POSTS_ROUTE_CONTEXT_BEGIN');
+            console.log(scrubbed);
+            console.log('BLOGGER_POSTS_ROUTE_CONTEXT_END');
+          }
           NODE
