@@ -54,6 +54,11 @@ function needsImmediateCloudflareFallback(outcome = {}) {
     || error.includes('KIE_CONTENT_REJECTED');
 }
 
+async function refreshedImage(env, jobId, imageId) {
+  const rows = await listJobImages(env, jobId);
+  return rows.find((row) => Number(row?.id) === Number(imageId)) || null;
+}
+
 async function runOneImage(env, jobId, image, options = {}) {
   const providerMode = scheduledProviderModeForImage(image, env);
   const imageOptions = {
@@ -79,12 +84,16 @@ async function runOneImage(env, jobId, image, options = {}) {
     );
   }
 
-  if (providerMode === 'kie' && firstOutcome?.status === 'retrying' && needsImmediateCloudflareFallback(firstOutcome)) {
-    return generateBaseImages(
-      { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
-      jobId,
-      imageOptions
-    );
+  if (providerMode === 'kie' && firstOutcome?.status === 'retrying') {
+    const current = await refreshedImage(env, jobId, image.id);
+    const retryBudgetExhausted = scheduledProviderModeForImage(current || image, env) === 'cloudflare';
+    if (needsImmediateCloudflareFallback(firstOutcome) || retryBudgetExhausted) {
+      return generateBaseImages(
+        { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
+        jobId,
+        imageOptions
+      );
+    }
   }
 
   return first;
@@ -109,6 +118,7 @@ function combineExecutionResults(results = [], images = []) {
  * - an active async task always resumes on the provider that created it;
  * - ModelScope terminal failure hands off immediately to KIE;
  * - KIE keeps its bounded retry budget, then Cloudflare is the final provider;
+ * - once the final KIE retry is persisted, Cloudflare runs in the same invocation;
  * - up to three images for the same post are submitted/polled concurrently;
  * - provider-chain failure stays retryable/planned;
  * - the local renderer is never enabled here.
