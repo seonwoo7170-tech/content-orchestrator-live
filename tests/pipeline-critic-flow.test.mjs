@@ -29,6 +29,16 @@ function issue() {
   };
 }
 
+function coreIssue(location, reason) {
+  return {
+    code: 'CORE_INFORMATION_MISSING',
+    severity: 'HIGH',
+    location,
+    reason,
+    repairInstruction: 'Add the missing decision information.'
+  };
+}
+
 function makeFetch(responses, calls) {
   return async (url, init) => {
     const path = new URL(url).pathname;
@@ -102,6 +112,43 @@ test('new article pipeline runs targeted Repair and re-checks Critic after FAIL'
   assert.equal(calls[2].body.strategy, 'targeted_sections_only');
   assert.equal(calls[2].body.repairAttempt, 1);
   assert.deepEqual(stages, ['critic_review', 'repairing', 'final_critic']);
+});
+
+test('new article pipeline regenerates instead of patching when critic finds multiple core information gaps', async () => {
+  const calls = [];
+  const first = article('<p>Generic answer.</p><p>More generic advice.</p>');
+  const second = article('<p>Concrete decision criteria and actionable detail.</p>');
+
+  const result = await runNewArticlePipeline(
+    env,
+    { blogId: '11', topic: 'threshold repair', language: 'en', seoBrief: { planning: { recommendedDepth: 'deep-dive' } } },
+    makeFetch([
+      { article: first },
+      {
+        status: 'FAIL',
+        score: 78,
+        issues: [
+          coreIssue('html p 1', 'Repair-versus-replace criteria are missing.'),
+          coreIssue('html p 2', 'Stop conditions and failure signals are missing.')
+        ]
+      },
+      { article: second },
+      { status: 'PASS', score: 98, issues: [] }
+    ], calls)
+  );
+
+  assert.equal(result.status, 'READY');
+  assert.equal(result.candidateRegenerated, true);
+  assert.equal(result.candidateAttempt, 2);
+  assert.equal(result.candidateHistory[0].reviewReason, 'MASTER_REPLAN_REQUIRED');
+  assert.equal(calls.filter((call) => call.path === '/api/hub/ai/repair').length, 0);
+  assert.deepEqual(calls.map((call) => call.path), [
+    '/api/hub/ai/writer',
+    '/api/hub/ai/critic',
+    '/api/hub/ai/writer',
+    '/api/hub/ai/critic'
+  ]);
+  assert.match(calls[2].body.retryReason, /MASTER_REPLAN_REQUIRED/);
 });
 
 test('new article pipeline retries the currently flagged location before NEEDS_REVIEW', async () => {
