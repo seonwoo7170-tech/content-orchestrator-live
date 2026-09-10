@@ -1,0 +1,123 @@
+name: fix-job-claim-race
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-job-claim-race.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch AI lane overlap, stale timestamp, and claim recovery
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('worker/mcp-entry.js')
+          s = p.read_text()
+          old = "const IMAGE_LANE_LOCK_KEY = 'serial-image-kie';"
+          new = "const AI_LANE_LOCK_KEY = 'serial-ai-watchdog';\nconst IMAGE_LANE_LOCK_KEY = 'serial-image-kie';"
+          if old not in s:
+              raise SystemExit('AI lock constant target not found')
+          s = s.replace(old, new, 1)
+
+          marker = "async function runSerialImageWatchdog(env, ctx) {"
+          wrapper = """async function runLockedSerialAiWatchdog(env, ctx, eventNow) {
+  const leaseTtlSeconds = positiveBounded(env?.SERIAL_AI_LEASE_TTL_SECONDS, 900, 60, 900);
+  const lease = await acquireRuntimeLock(env, AI_LANE_LOCK_KEY, { ttlSeconds: leaseTtlSeconds });
+  if (!lease.acquired) {
+    return {
+      ok: true,
+      watchdogCron: WATCHDOG_CRON,
+      stopReason: 'AI_LANE_BUSY',
+      leaseTtlSeconds,
+      durationMs: 0,
+      steps: []
+    };
+  }
+  try {
+    const summary = await runSerialAiWatchdog(env, ctx, eventNow);
+    return { ...summary, leaseTtlSeconds };
+  } finally {
+    await releaseRuntimeLock(env, lease).catch((error) =>
+      console.error('SERIAL_AI_LEASE_RELEASE_FAILED', safeScheduledError(error))
+    );
+  }
+}
+
+"""
+          if marker not in s:
+              raise SystemExit('AI wrapper insertion target not found')
+          s = s.replace(marker, wrapper + marker, 1)
+
+          old_call = "runSerialAiWatchdog(env, ctx, scheduledTime(event)),"
+          new_call = "runLockedSerialAiWatchdog(env, ctx, scheduledTime(event)),"
+          if old_call not in s:
+              raise SystemExit('scheduled AI call target not found')
+          s = s.replace(old_call, new_call, 1)
+          p.write_text(s)
+
+          p = Path('worker/lib/job-auto-rescue.js')
+          s = p.read_text()
+          old = "OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND updated_at <= ?)"
+          new = "OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND datetime(updated_at) <= datetime(?))"
+          if old not in s:
+              raise SystemExit('stale timestamp target not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('worker/lib/job-recovery.js')
+          s = p.read_text()
+          old = "const transient = code === 'FETCH_FAILED'\n    || code === 'NETWORK_ERROR'"
+          new = "const transient = code === 'JOB_EXECUTION_ALREADY_CLAIMED'\n    || code === 'FETCH_FAILED'\n    || code === 'NETWORK_ERROR'"
+          if old not in s:
+              raise SystemExit('claim classification target not found')
+          p.write_text(s.replace(old, new, 1))
+
+          t = Path('tests/job-claim-race-guard.test.mjs')
+          t.write_text("""import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { classifyFailureCode } from '../worker/lib/job-recovery.js';
+
+test('scheduled AI watchdog is protected by a cross-cron runtime lease', async () => {
+  const source = await readFile(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');
+  assert.match(source, /AI_LANE_LOCK_KEY = 'serial-ai-watchdog'/);
+  assert.match(source, /acquireRuntimeLock\(env, AI_LANE_LOCK_KEY/);
+  assert.match(source, /runLockedSerialAiWatchdog\(env, ctx, scheduledTime\(event\)\)/);
+});
+
+test('fresh SQLite timestamps are not treated as stale against ISO cutoff text', async () => {
+  const source = await readFile(new URL('../worker/lib/job-auto-rescue.js', import.meta.url), 'utf8');
+  assert.match(source, /datetime\(updated_at\) <= datetime\(\?\)/);
+});
+
+test('execution claim contention is retryable backpressure, not a permanent hold', () => {
+  assert.equal(classifyFailureCode('JOB_EXECUTION_ALREADY_CLAIMED').classification, 'transient');
+});
+""")
+          PY
+      - name: Verify repository
+        run: |
+          npm install --no-audit --no-fund
+          npm run verify
+      - name: Commit claim-race fix
+        shell: bash
+        run: |
+          git config user.name smileseon-ops
+          git config user.email actions@users.noreply.github.com
+          git add worker/mcp-entry.js worker/lib/job-auto-rescue.js worker/lib/job-recovery.js tests/job-claim-race-guard.test.mjs
+          git diff --cached --check
+          git commit -m "fix: prevent scheduled AI claim races"
+          git push
