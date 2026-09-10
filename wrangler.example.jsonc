@@ -40,6 +40,7 @@
     "API_HUB_BASE_URL": "https://api-hub-v2.smileseon.workers.dev",
     "HUB_REQUEST_TIMEOUT_MS": "180000",
     "AI_STAGE_PACING_MS": "4000",
+    "TARGETED_REPAIR_MAX_ATTEMPTS": "2",
     "IMAGE_STAGE_PACING_MS": "0",
     "IMAGE_PROVIDER_MODE": "auto",
     "PUTER_IMAGE_ENABLED": "true",
