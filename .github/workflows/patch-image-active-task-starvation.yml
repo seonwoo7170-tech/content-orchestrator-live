@@ -14,41 +14,60 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Prioritize active provider tasks and preserve their provider
+      - name: Prevent stale AI row from blocking recovery
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          p = Path('worker/lib/image-executor.js')
+          p = Path('worker/mcp-entry.js')
           s = p.read_text()
-          old = """  const providerMode = imageProviderMode(env);\n  const providers = imageProviderSequence(providerMode);\n  const pacingMs = imageStagePacingMs(env);\n"""
-          new = """  const providerMode = imageProviderMode(env);\n  let providers = imageProviderSequence(providerMode);\n  const existingProvider = String(image?.provider || '').trim().toLowerCase();\n  const existingTaskId = String(image?.provider_task_id || '').trim();\n  if (providerMode === 'auto' && existingTaskId) {\n    if (existingProvider === 'puter') providers = ['puter', 'kie', 'cloudflare'];\n    else if (existingProvider === 'modelscope') providers = ['modelscope', 'kie', 'cloudflare'];\n    else if (existingProvider === 'kie' || existingProvider === 'kie-ai') providers = ['kie', 'cloudflare'];\n  }\n  const pacingMs = imageStagePacingMs(env);\n"""
+          old = """async function activeAiJob(env) {
+  if (!env?.ORCHESTRATOR_DB) return null;
+  const row = await env.ORCHESTRATOR_DB.prepare(
+    `SELECT id, status
+       FROM jobs
+      WHERE archived_at IS NULL
+        AND status IN ('writing', 'critic_review', 'repairing', 'final_critic')
+      ORDER BY updated_at, id
+      LIMIT 1`
+  ).first();
+  return row ? { id: Number(row.id), status: String(row.status || '') } : null;
+}
+"""
+          new = """async function activeAiJob(env) {
+  if (!env?.ORCHESTRATOR_DB) return null;
+  const staleMinutes = positiveBounded(env?.JOB_RECOVERY_STALE_MINUTES, 20, 5, 1440);
+  const row = await env.ORCHESTRATOR_DB.prepare(
+    `SELECT id, status
+       FROM jobs
+      WHERE archived_at IS NULL
+        AND status IN ('writing', 'critic_review', 'repairing', 'final_critic')
+        AND datetime(updated_at) > datetime('now', ?)
+      ORDER BY datetime(updated_at), id
+      LIMIT 1`
+  ).bind(`-${staleMinutes} minutes`).first();
+  return row ? { id: Number(row.id), status: String(row.status || '') } : null;
+}
+"""
           if old not in s:
-              raise SystemExit('image-executor target not found')
+              raise SystemExit('mcp-entry target not found')
           p.write_text(s.replace(old, new, 1))
 
-          p = Path('worker/lib/image-completion.js')
+          p = Path('worker/lib/job-auto-rescue.js')
           s = p.read_text()
-          old = """            COALESCE((\n              SELECT MAX(ai.updated_at)\n                FROM job_images ai\n               WHERE ai.job_id = j.id\n            ), j.updated_at) AS image_activity_at\n"""
-          new = """            COALESCE((\n              SELECT MAX(ai.updated_at)\n                FROM job_images ai\n               WHERE ai.job_id = j.id\n            ), j.updated_at) AS image_activity_at,\n            EXISTS(\n              SELECT 1\n                FROM job_images pi\n               WHERE pi.job_id = j.id\n                 AND pi.provider_task_id IS NOT NULL\n                 AND pi.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry')\n            ) AS has_active_provider_task\n"""
+          old = "OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND updated_at <= ?)"
+          new = "OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND datetime(updated_at) <= datetime(?))"
           if old not in s:
-              raise SystemExit('image-completion select target not found')
-          s = s.replace(old, new, 1)
-          old = """      ORDER BY CASE\n                 WHEN has_failed_images = 1 AND image_activity_at <= datetime('now', ?) THEN 0\n                 WHEN has_failed_images = 0 THEN 1\n                 ELSE 2\n               END,\n"""
-          new = """      ORDER BY CASE\n                 WHEN has_active_provider_task = 1 THEN 0\n                 WHEN has_failed_images = 1 AND image_activity_at <= datetime('now', ?) THEN 1\n                 WHEN has_failed_images = 0 THEN 2\n                 ELSE 3\n               END,\n"""
-          if old not in s:
-              raise SystemExit('image-completion order target not found')
+              raise SystemExit('job-auto-rescue target not found')
           p.write_text(s.replace(old, new, 1))
-
-          Path('tests/image-active-task-starvation.test.mjs').write_text("""import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFile } from 'node:fs/promises';\n\ntest('ready image scheduler prioritizes durable active provider tasks ahead of failed backlog', async () => {\n  const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');\n  assert.match(source, /AS has_active_provider_task/);\n  assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);\n  assert.match(source, /provider_task_id IS NOT NULL/);\n  assert.match(source, /provider_status IN \\('waiting', 'queuing', 'generating'/);\n});\n\ntest('auto image routing resumes the provider that owns an existing task before any new provider', async () => {\n  const source = await readFile(new URL('../worker/lib/image-executor.js', import.meta.url), 'utf8');\n  assert.match(source, /providerMode === 'auto' && existingTaskId/);\n  assert.match(source, /existingProvider === 'kie' \\|\\| existingProvider === 'kie-ai'\\) providers = \\['kie', 'cloudflare'\\]/);\n  assert.match(source, /existingProvider === 'modelscope'\\) providers = \\['modelscope', 'kie', 'cloudflare'\\]/);\n});\n""")
           PY
       - name: Commit fix
         shell: bash
         run: |
           git config user.name smileseon-ops
           git config user.email actions@users.noreply.github.com
-          git add worker/lib/image-executor.js worker/lib/image-completion.js tests/image-active-task-starvation.test.mjs
+          git add worker/mcp-entry.js worker/lib/job-auto-rescue.js
           git diff --cached --check
-          git commit -m "fix: prioritize active image tasks over backlog"
+          git commit -m "fix: prevent stale AI watchdog deadlock"
           git push
