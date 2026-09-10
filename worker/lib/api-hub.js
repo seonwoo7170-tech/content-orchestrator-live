@@ -22,7 +22,13 @@ export function hubHeaders(env, extra = {}) {
   };
 }
 
-export function hubRequestTimeoutMs(env) {
+export function hubRequestTimeoutMs(env, path = '', body = {}) {
+  const providerMode = String(body?.providerMode || '').trim().toLowerCase();
+  if (canonicalHubPath(path) === '/api/hub/image/generate' && providerMode === 'cloudflare') {
+    const imageTimeout = Number(env?.HUB_CLOUDFLARE_IMAGE_TIMEOUT_MS ?? 30000);
+    if (!Number.isFinite(imageTimeout)) return 30000;
+    return Math.max(5000, Math.min(60000, Math.trunc(imageTimeout)));
+  }
   const configured = Number(env?.HUB_REQUEST_TIMEOUT_MS ?? 60000);
   if (!Number.isFinite(configured)) return 60000;
   return Math.max(10, Math.min(180000, Math.trunc(configured)));
@@ -181,7 +187,7 @@ function bindingTransportError(cause) {
 
 async function callHubPath(env, path, body, fetchImpl) {
   const bindingFetch = serviceBindingFetch(env);
-  const timeoutMs = hubRequestTimeoutMs(env);
+  const timeoutMs = hubRequestTimeoutMs(env, path, body);
   const controller = new AbortController();
   let timeoutId;
   const timeout = new Promise((_, reject) => {
