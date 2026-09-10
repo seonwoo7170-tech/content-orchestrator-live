@@ -1,0 +1,71 @@
+name: carry-forward-sep10-backlog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/carry-forward-sep10-backlog.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  carry-forward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Move unresolved Sep 10 slots into Sep 11 plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const {execFileSync}=require('node:child_process');
+          const db='content-orchestrator';
+          function raw(sql){return execFileSync('npx',['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'],{encoding:'utf8',env:process.env,maxBuffer:10*1024*1024});}
+          function q(sql){const x=JSON.parse(raw(sql));return (Array.isArray(x)?x:[x]).flatMap(g=>Array.isArray(g?.results)?g.results:[]);}
+          const before=q("SELECT id,plan_date,blog_id,kind,slot_no,status,job_id FROM daily_plan_slots WHERE plan_date='2026-09-10' AND status='pending' AND job_id IS NULL ORDER BY id");
+          console.log('PENDING_BEFORE',JSON.stringify(before));
+          console.log('SEP11_BEFORE',JSON.stringify(q("SELECT id,plan_date,blog_id,kind,slot_no,status,job_id FROM daily_plan_slots WHERE plan_date='2026-09-11' ORDER BY id")));
+          raw(`UPDATE daily_plan_slots AS old
+                 SET plan_date='2026-09-11', updated_at=datetime('now')
+               WHERE old.plan_date='2026-09-10'
+                 AND old.status='pending'
+                 AND old.job_id IS NULL
+                 AND old.recovery_state='none'
+                 AND old.last_error_code IS NULL
+                 AND NOT EXISTS (
+                   SELECT 1 FROM daily_plan_slots AS n
+                    WHERE n.plan_date='2026-09-11'
+                      AND n.blog_id=old.blog_id
+                      AND n.kind=old.kind
+                      AND n.slot_no=old.slot_no
+                 )`);
+          const after=q("SELECT id,plan_date,blog_id,kind,slot_no,status,job_id,recovery_state,last_error_code,updated_at FROM daily_plan_slots WHERE plan_date='2026-09-11' ORDER BY id");
+          console.log('SEP11_AFTER',JSON.stringify(after));
+          console.log('SEP10_LEFT',JSON.stringify(q("SELECT id,blog_id,kind,slot_no,status,job_id,last_error_code FROM daily_plan_slots WHERE plan_date='2026-09-10' AND status='pending' ORDER BY id")));
+          if(before.length && after.length===0) throw new Error('BACKLOG_CARRY_FORWARD_FAILED');
+          NODE
+
+      - name: Wait for next core work tick
+        run: sleep 315
+
+      - name: Verify work claimed from carried plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const {execFileSync}=require('node:child_process');
+          const db='content-orchestrator';
+          function q(sql){
+            const out=execFileSync('npx',['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'],{encoding:'utf8',env:process.env,maxBuffer:10*1024*1024});
+            const x=JSON.parse(out);return (Array.isArray(x)?x:[x]).flatMap(g=>Array.isArray(g?.results)?g.results:[]);
+          }
+          console.log('SEP11_READBACK',JSON.stringify(q("SELECT id,blog_id,kind,slot_no,status,job_id,recovery_state,retry_count,last_error_code,updated_at FROM daily_plan_slots WHERE plan_date='2026-09-11' ORDER BY status,id")));
+          console.log('NEW_JOBS',JSON.stringify(q("SELECT id,status,mode,blog_id,topic,created_at,updated_at FROM jobs WHERE created_at >= datetime('now','-10 minutes') ORDER BY id DESC LIMIT 12")));
+          console.log('NOW',JSON.stringify(q("SELECT datetime('now') utc_now,datetime('now','+9 hours') kst_now")));
+          NODE
