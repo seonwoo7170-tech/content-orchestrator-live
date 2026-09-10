@@ -2,6 +2,7 @@ import phase6Entry from './phase6-entry.js';
 import { requireAdmin } from './lib/admin-auth.js';
 import { loadConnectedBlogs } from './lib/connected-blogs.js';
 import { readAutomationSettings } from './lib/automation-settings.js';
+import { listJobEvents } from './lib/job-events.js';
 import { listKeywordRankings, listTrendInsights, refreshTrendKeywords } from './lib/trend-keywords.js';
 import { handleHubWriterTransportDiagnostic, HUB_WRITER_TRANSPORT_DIAGNOSTIC_PATH } from './lib/hub-writer-transport-diagnostic.js';
 import { handleKieImageCallback, KIE_IMAGE_CALLBACK_PATH } from './lib/kie-image-callback.js';
@@ -69,6 +70,23 @@ async function rankings(request, env) {
   }));
 }
 
+async function jobEvents(request, env, url) {
+  const match = url.pathname.match(/^\/api\/jobs\/(\d+)\/events$/);
+  if (!match || request.method !== 'GET') return null;
+  if (!await requireAdmin(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+  const jobId = Number(match[1]);
+  const events = await listJobEvents(env, jobId, {
+    afterId: url.searchParams.get('after'),
+    limit: url.searchParams.get('limit')
+  });
+  return json({
+    jobId,
+    events,
+    count: events.length,
+    lastEventId: events.length ? Number(events[events.length - 1].id) : Number(url.searchParams.get('after') || 0)
+  });
+}
+
 async function scheduledTrendRefresh(env, now) {
   if (!isTrendRefreshDue(env, now)) return { ok: true, checked: false, reason: 'NOT_DUE' };
   return refreshTrendKeywords(env, await blogContexts(env), { now });
@@ -78,6 +96,8 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     try {
+      const eventResponse = await jobEvents(request, env, url);
+      if (eventResponse) return eventResponse;
       if (url.pathname === KIE_IMAGE_CALLBACK_PATH) {
         return await handleKieImageCallback(request, env, ctx);
       }
