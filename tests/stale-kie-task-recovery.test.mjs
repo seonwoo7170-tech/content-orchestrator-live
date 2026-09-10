@@ -48,6 +48,17 @@ test('legacy KIE task older than the stale window is detected before final poll'
   assert.equal(isStaleKieActiveTask(row(), env), true);
 });
 
+test('a newly persisted KIE task is fresh even when its image plan is hours old', () => {
+  const now = Date.now();
+  assert.equal(isStaleKieActiveTask({
+    provider: 'kie-ai',
+    provider_task_id: 'new-paid-task',
+    provider_status: 'waiting',
+    created_at: new Date(now - 3 * 60 * 60_000).toISOString(),
+    provider_checked_at: new Date(now - 5_000).toISOString()
+  }, { KIE_ACTIVE_TASK_STALE_MS: '1800000' }, now), false);
+});
+
 test('fresh KIE task is preserved and only polled', async (t) => {
   const { env, row } = fixture(t, { ageMinutes: 5 });
   const calls = [];
