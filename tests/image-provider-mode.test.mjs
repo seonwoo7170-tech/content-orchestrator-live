@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { imageProviderMode, imageProviderSequence, imageStagePacingMs } from '../worker/lib/image-executor.js';
-import { modelScopeAlreadyAttempted, scheduledProviderModeForImage } from '../worker/lib/image-executor-resilient.js';
+import { modelScopeAlreadyAttempted, orderedCandidates, scheduledProviderModeForImage } from '../worker/lib/image-executor-resilient.js';
 
 test('automatic image routing is always the default', () => {
   assert.equal(imageProviderMode({}), 'auto');
@@ -32,6 +32,14 @@ test('scheduled routing keeps optional ModelScope ahead of Cloudflare when expli
   assert.equal(scheduledProviderModeForImage({ provider: 'kie-ai', provider_attempt_count: 4, puter_attempted: 1 }, env), 'modelscope');
   assert.equal(scheduledProviderModeForImage({ provider: 'modelscope', provider_attempt_count: 1, puter_attempted: 1 }, env), 'cloudflare');
   assert.equal(modelScopeAlreadyAttempted({ provider: 'cloudflare', provider_attempt_count: 4, provider_error_code: 'IMAGE_FALLBACK_FAILED:MODELSCOPE_ATTEMPTED:CLOUDFLARE_AI_ACCOUNT_LIMITED' }), true);
+});
+
+test('scheduled retries rotate to the oldest waiting image instead of starving later positions', () => {
+  const rows = [
+    { id: 6076, status: 'planned', provider_attempt_count: 5, provider_checked_at: '2026-09-10 16:57:53' },
+    { id: 6077, status: 'planned', provider_attempt_count: 1, provider_checked_at: '2026-09-10 15:58:54' }
+  ];
+  assert.deepEqual(orderedCandidates(rows).map((row) => row.id), [6077, 6076]);
 });
 
 test('explicit provider mode is respected without inspecting provider secrets in the orchestrator', () => {
