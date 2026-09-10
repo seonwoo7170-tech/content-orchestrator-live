@@ -8,7 +8,7 @@ test('ready image scheduler prioritizes and rotates durable active provider task
   assert.match(source, /AS active_provider_checked_at/);
   assert.match(source, /MIN\(COALESCE\(pi\.provider_checked_at, pi\.updated_at\)\)/);
   assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);
-  assert.match(source, /WHEN has_active_provider_task = 1 THEN active_provider_checked_at/);
+  assert.match(source, /WHEN has_active_provider_task = 1 THEN datetime\(active_provider_checked_at\)/);
   assert.match(source, /provider_task_id IS NOT NULL/);
   assert.match(source, /provider_status IN \('waiting', 'queuing', 'generating'/);
 });

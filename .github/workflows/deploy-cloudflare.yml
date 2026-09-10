@@ -128,3 +128,7 @@ jobs:
           }
           throw new Error('PRODUCTION_PUBLIC_HEALTH_READBACK_FAILED');
           NODE
+
+      - name: Verify recovered Job 105 image progress
+        if: contains(github.event.head_commit.message, 'job105')
+        run: node scripts/check-image-job-progress.mjs 105

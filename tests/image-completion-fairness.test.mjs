@@ -11,12 +11,12 @@ test('active provider tasks win first and rotate by oldest provider check before
   assert.match(source, /AS image_activity_at/);
   assert.match(source, /failedRetryCooldownMinutes/);
   assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);
-  assert.match(source, /WHEN has_failed_images = 1 AND image_activity_at <= datetime\('now', \?\) THEN 1/);
+  assert.match(source, /WHEN has_failed_images = 1 AND datetime\(image_activity_at\) <= datetime\('now', \?\) THEN 1/);
   assert.match(source, /WHEN has_failed_images = 0 THEN 2/);
   assert.match(source, /ELSE 3/);
-  assert.match(source, /WHEN has_active_provider_task = 1 THEN active_provider_checked_at/);
-  assert.match(source, /WHEN has_failed_images = 1 THEN image_activity_at/);
-  assert.match(source, /ELSE j\.updated_at/);
+  assert.match(source, /WHEN has_active_provider_task = 1 THEN datetime\(active_provider_checked_at\)/);
+  assert.match(source, /WHEN has_failed_images = 1 THEN datetime\(image_activity_at\)/);
+  assert.match(source, /ELSE datetime\(j\.updated_at\)/);
 });
 
 test('failed image work remains retryable within a bounded article batch', () => {
