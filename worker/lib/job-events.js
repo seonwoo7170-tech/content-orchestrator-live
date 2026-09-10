@@ -1,6 +1,11 @@
+function optionalDb(env) {
+  return env?.ORCHESTRATOR_DB || null;
+}
+
 function requireDb(env) {
-  if (!env?.ORCHESTRATOR_DB) throw new Error('DB_NOT_BOUND');
-  return env.ORCHESTRATOR_DB;
+  const db = optionalDb(env);
+  if (!db) throw new Error('DB_NOT_BOUND');
+  return db;
 }
 
 function normalizeJobId(value) {
@@ -25,7 +30,8 @@ function isMissingTable(error) {
 }
 
 export async function appendJobEvent(env, jobIdValue, event = {}) {
-  const db = requireDb(env);
+  const db = optionalDb(env);
+  if (!db) return false;
   const jobId = normalizeJobId(jobIdValue);
   const eventType = String(event.eventType || 'status').trim().slice(0, 64) || 'status';
   const stage = String(event.stage || '').trim().slice(0, 64) || null;
