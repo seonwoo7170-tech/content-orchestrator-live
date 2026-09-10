@@ -19,6 +19,13 @@ test('API Hub timeout is bounded and configurable', () => {
   assert.equal(hubRequestTimeoutMs({ HUB_REQUEST_TIMEOUT_MS: '999999' }), 180000);
 });
 
+test('Cloudflare image requests use a short timeout so fallback can run in the same watchdog pass', () => {
+  const path = '/api/hub/image/generate';
+  assert.equal(hubRequestTimeoutMs({ HUB_REQUEST_TIMEOUT_MS: '180000' }, path, { providerMode: 'cloudflare' }), 30000);
+  assert.equal(hubRequestTimeoutMs({ HUB_CLOUDFLARE_IMAGE_TIMEOUT_MS: '20000' }, path, { providerMode: 'cloudflare' }), 20000);
+  assert.equal(hubRequestTimeoutMs({ HUB_REQUEST_TIMEOUT_MS: '180000' }, path, { providerMode: 'kie' }), 180000);
+});
+
 test('legacy public-fallback capability remains limited to side-effect-free/read routes', () => {
   for (const path of [
     '/api/hub/ai/topic', '/api/hub/ai/writer', '/api/hub/ai/critic', '/api/hub/ai/repair',
