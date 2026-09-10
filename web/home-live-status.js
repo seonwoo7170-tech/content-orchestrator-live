@@ -1,5 +1,6 @@
 import './work-live-progress.js';
 import './live-work-progress.js';
+import './job-log-panel.js';
 import { adminApi, isAdminConnected } from './admin-session.js';
 
 const homeView = document.querySelector('[data-view="home"]');
