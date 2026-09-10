@@ -48,6 +48,11 @@ jobs:
               const activity=await q(db,`SELECT status,COUNT(*) n FROM scheduled_posts WHERE updated_at>=datetime('now','-24 hours') GROUP BY status ORDER BY status`);
               console.log(prefix+'_RECENT_ACTIVITY '+JSON.stringify({rows:activity.rows,meta:activity.meta}));
             }
+            if(names.has('pickhub_products')){
+              const a=await q(db,`CREATE INDEX IF NOT EXISTS idx_pickhub_products_active_updated ON pickhub_products(active, updated_at)`);
+              const b=await q(db,`CREATE INDEX IF NOT EXISTS idx_pickhub_products_image_scope ON pickhub_products(user_id, threads_account_id, image_url)`);
+              console.log(prefix+'_PICKHUB_INDEX_APPLY '+JSON.stringify({a:a.meta,b:b.meta}));
+            }
             const idx=await q(db,`SELECT name,tbl_name FROM sqlite_master WHERE type='index' AND name IN ('idx_scheduled_posts_status_updated','idx_thread_insights_captured','idx_reply_actions_daily_updated','idx_pickhub_products_active_updated','idx_pickhub_products_image_scope') ORDER BY name`);
             console.log(prefix+'_INDEXES '+JSON.stringify({rows:idx.rows,meta:idx.meta}));
           }
@@ -55,8 +60,10 @@ jobs:
           if(orch){
             const job=await q(orch,`SELECT id,mode,blog_id,blogger_post_id,status,error,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,result_json,updated_at,archived_at FROM jobs WHERE id=?`,[105]);
             console.log('JOB105 '+JSON.stringify({rows:job.rows,meta:job.meta}));
-            const images=await q(orch,`SELECT id,job_id,role,position,status,provider,public_url,error,provider_task_id,provider_status,updated_at FROM job_images WHERE job_id=? ORDER BY position,id`,[105]);
+            const images=await q(orch,`SELECT id,job_id,role,position,status,provider,public_url,error,provider_task_id,provider_status,provider_checked_at,created_at,updated_at FROM job_images WHERE job_id=? ORDER BY position,id`,[105]);
             console.log('JOB105_IMAGES '+JSON.stringify({rows:images.rows,meta:images.meta}));
+            const active=await q(orch,`SELECT j.id job_id,j.mode,j.updated_at,MIN(COALESCE(i.provider_checked_at,i.updated_at)) oldest_checked FROM jobs j JOIN job_images i ON i.job_id=j.id WHERE j.status='ready' AND j.archived_at IS NULL AND i.provider_task_id IS NOT NULL AND i.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry') GROUP BY j.id,j.mode,j.updated_at ORDER BY oldest_checked,j.id LIMIT 8`);
+            console.log('ACTIVE_IMAGE_QUEUE '+JSON.stringify({rows:active.rows,meta:active.meta}));
             await threadsAudit(orch,'SHARED_ORCH_THREADS');
           }
           const threads=dbs.find(d=>d.name==='threads-automation-db');
