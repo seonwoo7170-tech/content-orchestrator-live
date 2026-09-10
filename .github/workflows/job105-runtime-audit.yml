@@ -1,0 +1,34 @@
+name: job105-runtime-audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/job105-runtime-audit-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check Job 105 runtime lock and image state
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const account=process.env.CLOUDFLARE_ACCOUNT_ID;
+          const headers={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
+          async function cf(path,init={}){const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}${path}`,{...init,headers});const d=await r.json();if(!r.ok||d.success===false)throw new Error(JSON.stringify(d.errors||d));return d;}
+          const dbs=(await cf('/d1/database')).result||[]; const db=dbs.find(d=>d.name==='content-orchestrator'); if(!db)throw new Error('DB_NOT_FOUND');
+          async function q(sql,params=[]){const d=await cf(`/d1/database/${db.uuid}/query`,{method:'POST',body:JSON.stringify({sql,params})});const x=Array.isArray(d.result)?d.result[0]:d.result;return {rows:x?.results||[],meta:x?.meta||{}};}
+          console.log('LOCK '+JSON.stringify(await q(`SELECT lock_key,expires_at,updated_at FROM runtime_locks WHERE lock_key='serial-image-kie'`)));
+          console.log('JOB '+JSON.stringify(await q(`SELECT id,status,updated_at,result_json FROM jobs WHERE id=105`)));
+          console.log('IMAGES '+JSON.stringify(await q(`SELECT id,status,provider,provider_task_id,provider_status,provider_checked_at,public_url,error,updated_at FROM job_images WHERE job_id=105 ORDER BY position,id`)));
+          NODE
