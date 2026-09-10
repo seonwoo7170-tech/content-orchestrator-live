@@ -35,13 +35,12 @@ test('stored job supports repeated Natural Writing targeted repairs before Criti
   assert.equal(out.result.repairAttempts,2);
 });
 
-test('stored new-article job regenerates only after three targeted repairs are exhausted', async () => {
+test('stored new-article job regenerates after two targeted repairs are exhausted', async () => {
   const states=[];
   const issue={code:'READABILITY',severity:'MEDIUM',location:'html p 1',reason:'still weak',repairInstruction:'repair only html p 1'};
   const first={...article,html:'<p>Problem.</p>'};
   const repair1={...article,html:'<p>Problem one.</p>'};
   const repair2={...article,html:'<p>Problem two.</p>'};
-  const repair3={...article,html:'<p>Problem three.</p>'};
   const fresh={...article,html:'<p>Fresh concise answer.</p>'};
   const fetchImpl=router([
     {article:first},
@@ -50,14 +49,12 @@ test('stored new-article job regenerates only after three targeted repairs are e
     {status:'FAIL',score:88,issues:[issue]},
     {article:repair2},
     {status:'FAIL',score:90,issues:[issue]},
-    {article:repair3},
-    {status:'FAIL',score:91,issues:[issue]},
     {article:fresh},
     {status:'PASS',score:98,issues:[]}
   ]);
   const out=await processStoredJob({API_HUB_BASE_URL:'https://hub',HUB_API_KEY:'k'}, {id:4,mode:'new_article',status:'queued',blog_id:'b',topic:'t',payload_json:'{"language":"ko"}'}, {fetchImpl,saveState:async(s)=>states.push(s)});
   assert.deepEqual(states,[
-    'writing','critic_review','repairing','final_critic','repairing','final_critic','repairing','final_critic','writing','critic_review','ready'
+    'writing','critic_review','repairing','final_critic','repairing','final_critic','writing','critic_review','ready'
   ]);
   assert.equal(out.state,'ready');
   assert.equal(out.result.candidateRegenerated,true);
