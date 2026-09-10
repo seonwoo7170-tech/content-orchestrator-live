@@ -1,10 +1,7 @@
 name: fix-stale-ai-deadlock
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/fix-stale-ai-deadlock.yml'
+  workflow_dispatch:
 
 permissions:
   contents: write
