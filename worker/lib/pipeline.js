@@ -2,11 +2,18 @@ import { validateArticle, validateCriticResult } from './contracts.js';
 import { callHub } from './api-hub.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { assertTargetedRepairPreserved, constrainTargetedRepair } from './targeted-repair-guard.js';
+import { stripWriterOwnedImages } from './article-image-sanitizer.js';
 
 const DEFAULT_MAX_TARGETED_REPAIRS = 2;
 const DEFAULT_MAX_NEW_ARTICLE_CANDIDATES = 2;
 const TARGETED_REPAIR = 'targeted_sections_only';
 const CONTINUATION_REWRITE = 'targeted_sections_rewrite';
+const STRUCTURAL_REPLAN_CODES = new Set([
+  'LOW_INFORMATION_GAIN',
+  'OUTLINE_REDESIGN_REQUIRED',
+  'STRUCTURAL_COMPLETENESS_GAP',
+  'ARTICLE_TOO_THIN'
+]);
 
 async function emitStage(hooks, stage) {
   if (typeof hooks?.onStage === 'function') await hooks.onStage(stage);
@@ -32,6 +39,21 @@ function isRepairGuardError(error) {
 
 function issueKey(issue) {
   return `${String(issue?.code || '').trim().toUpperCase()}|${String(issue?.location || '').trim().toLowerCase()}`;
+}
+
+function structuralReplanRequired(critic) {
+  const issues = Array.isArray(critic?.issues) ? critic.issues : [];
+  const codes = issues.map((issue) => String(issue?.code || '').trim().toUpperCase()).filter(Boolean);
+  if (codes.some((code) => STRUCTURAL_REPLAN_CODES.has(code))) return true;
+  return codes.filter((code) => code === 'CORE_INFORMATION_MISSING').length >= 2;
+}
+
+function retryReasonForEvaluation(evaluation) {
+  if (!evaluation) return null;
+  if (evaluation.reviewReason === 'MASTER_REPLAN_REQUIRED') {
+    return 'MASTER_REPLAN_REQUIRED: the previous candidate lacked information gain or multiple core decision/action details. Re-plan the outline from the seoBrief before drafting and add concrete decision criteria, exceptions, checkpoints, and practical depth instead of patching the previous structure.';
+  }
+  return evaluation.reviewReason || null;
 }
 
 function escalatedRepairIssues(issues, context = {}) {
@@ -118,6 +140,21 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
           repairStrategy,
           repairGuardViolations,
           styleLint: styleLintSummary(initialLint, lintHistory)
+        };
+      }
+      if (context.structuralReplanOnCritic === true && structuralReplanRequired(critic)) {
+        return {
+          status: 'FAIL',
+          article,
+          initialCritic,
+          finalCritic,
+          repairApplied,
+          styleRepairApplied,
+          repairAttempts,
+          repairStrategy,
+          repairGuardViolations,
+          styleLint: styleLintSummary(initialLint, lintHistory),
+          reviewReason: 'MASTER_REPLAN_REQUIRED'
         };
       }
       issueSource = 'critic';
@@ -298,17 +335,18 @@ export async function runNewArticlePipeline(env, request, fetchImpl = fetch, hoo
       {
         ...request,
         candidateAttempt,
-        ...(lastEvaluation ? { retryReason: lastEvaluation.reviewReason } : {})
+        ...(lastEvaluation ? { retryReason: retryReasonForEvaluation(lastEvaluation) } : {})
       },
       fetchImpl
     );
-    const writtenArticle = validateArticle(writer.article ?? writer);
+    const writtenArticle = stripWriterOwnedImages(validateArticle(writer.article ?? writer));
 
     const evaluation = await qualityLoop(env, writtenArticle, fetchImpl, hooks, {
       initialCriticStage: candidateAttempt === 1 ? 'initial' : 'regenerated_initial',
       retryCriticStage: candidateAttempt === 1 ? 'final' : 'regenerated_final',
       seoBrief,
-      repairStrategy: TARGETED_REPAIR
+      repairStrategy: TARGETED_REPAIR,
+      structuralReplanOnCritic: true
     });
     lastEvaluation = evaluation;
     candidateHistory.push({
