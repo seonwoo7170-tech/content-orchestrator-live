@@ -40,26 +40,27 @@ jobs:
             const x=Array.isArray(d.result)?d.result[0]:d.result;
             return {rows:x?.results||[],meta:x?.meta||{}};
           }
+          async function threadsAudit(db,prefix){
+            const tables=await q(db,`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('scheduled_posts','publish_logs','reply_actions','pickhub_products','thread_insight_snapshots') ORDER BY name`);
+            console.log(prefix+'_TABLES '+JSON.stringify({rows:tables.rows,meta:tables.meta}));
+            const names=new Set(tables.rows.map(r=>r.name));
+            if(names.has('scheduled_posts')){
+              const activity=await q(db,`SELECT status,COUNT(*) n FROM scheduled_posts WHERE updated_at>=datetime('now','-24 hours') GROUP BY status ORDER BY status`);
+              console.log(prefix+'_RECENT_ACTIVITY '+JSON.stringify({rows:activity.rows,meta:activity.meta}));
+            }
+            const idx=await q(db,`SELECT name,tbl_name FROM sqlite_master WHERE type='index' AND name IN ('idx_scheduled_posts_status_updated','idx_thread_insights_captured','idx_reply_actions_daily_updated','idx_pickhub_products_active_updated','idx_pickhub_products_image_scope') ORDER BY name`);
+            console.log(prefix+'_INDEXES '+JSON.stringify({rows:idx.rows,meta:idx.meta}));
+          }
           const orch=dbs.find(d=>d.name==='content-orchestrator');
           if(orch){
             const job=await q(orch,`SELECT id,mode,blog_id,blogger_post_id,status,error,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,result_json,updated_at,archived_at FROM jobs WHERE id=?`,[105]);
             console.log('JOB105 '+JSON.stringify({rows:job.rows,meta:job.meta}));
-            let images={rows:[],meta:{}};
-            try{images=await q(orch,`SELECT id,job_id,role,position,status,provider,public_url,error,provider_task_id,updated_at FROM job_images WHERE job_id=? ORDER BY position,id`,[105]);}catch(e){
-              try{images=await q(orch,`SELECT id,job_id,role,position,status,provider,public_url,error,updated_at FROM images WHERE job_id=? ORDER BY position,id`,[105]);}catch(e2){console.log('JOB105_IMAGES_READ_ERROR '+String(e2.message||e2));}
-            }
+            const images=await q(orch,`SELECT id,job_id,role,position,status,provider,public_url,error,provider_task_id,provider_status,updated_at FROM job_images WHERE job_id=? ORDER BY position,id`,[105]);
             console.log('JOB105_IMAGES '+JSON.stringify({rows:images.rows,meta:images.meta}));
+            await threadsAudit(orch,'SHARED_ORCH_THREADS');
           }
           const threads=dbs.find(d=>d.name==='threads-automation-db');
-          if(threads){
-            for(const [label,sql] of [
-              ['THREADS_TABLE_COUNTS',`SELECT 'scheduled_posts' t,COUNT(*) n FROM scheduled_posts UNION ALL SELECT 'publish_logs',COUNT(*) FROM publish_logs UNION ALL SELECT 'reply_actions',COUNT(*) FROM reply_actions UNION ALL SELECT 'pickhub_products',COUNT(*) FROM pickhub_products UNION ALL SELECT 'thread_insight_snapshots',COUNT(*) FROM thread_insight_snapshots`],
-              ['THREADS_INDEXES',`SELECT name,tbl_name FROM sqlite_master WHERE type='index' AND name IN ('idx_scheduled_posts_status_updated','idx_thread_insights_captured','idx_reply_actions_daily_updated','idx_pickhub_products_active_updated','idx_pickhub_products_image_scope') ORDER BY name`],
-              ['THREADS_RECENT_ACTIVITY',`SELECT status,COUNT(*) n FROM scheduled_posts WHERE updated_at>=datetime('now','-24 hours') GROUP BY status ORDER BY status`]
-            ]){
-              try{const out=await q(threads,sql);console.log(label+' '+JSON.stringify({rows:out.rows,meta:out.meta}));}catch(e){console.log(label+'_ERROR '+String(e.message||e));}
-            }
-          }
+          if(threads) await threadsAudit(threads,'DEDICATED_THREADS');
           const scripts=await cf('/workers/scripts');
           console.log('WORKER_SCRIPTS '+JSON.stringify((scripts.result||[]).filter(s=>['content-orchestrator','threads-automation-web'].includes(s.id)).map(s=>({id:s.id,modified_on:s.modified_on,etag:s.etag||null}))));
           NODE
