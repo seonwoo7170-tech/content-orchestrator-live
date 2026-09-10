@@ -77,30 +77,28 @@ test('style BLOCK is repaired before Gemini Critic sees the article', async () =
   assert.deepEqual(stages, ['style_repairing', 'critic_review']);
 });
 
-test('style BLOCK is retried up to three targeted repairs before Critic', async () => {
+test('production two-attempt cap retries style BLOCK twice before Critic', async () => {
   const calls = [];
   const original = article('<p>현대 사회에서 PC 성능의 중요성이 더욱 커지고 있습니다.</p>');
   const repair1 = article('<p>빠르게 변화하는 시대에 PC 성능의 중요성이 커지고 있습니다.</p>');
-  const repair2 = article('<p>오늘날의 디지털 시대에 PC 성능의 중요성이 커지고 있습니다.</p>');
-  const repair3 = article('<p>PC가 느려졌다면 작업 관리자에서 CPU, 메모리, 디스크 사용률부터 확인하세요.</p>');
+  const repair2 = article('<p>PC가 느려졌다면 작업 관리자에서 CPU, 메모리, 디스크 사용률부터 확인하세요.</p>');
 
   const result = await runNewArticlePipeline(
-    env,
+    { ...env, TARGETED_REPAIR_MAX_ATTEMPTS: '2' },
     { blogId: '11', topic: original.topic, language: 'ko' },
     makeFetch([
       { article: original },
       { article: repair1 },
       { article: repair2 },
-      { article: repair3 },
       { status: 'PASS', score: 98, issues: [] }
     ], calls)
   );
 
   assert.equal(result.status, 'READY');
-  assert.equal(result.repairAttempts, 3);
-  assert.equal(result.article.html, repair3.html);
+  assert.equal(result.repairAttempts, 2);
+  assert.equal(result.article.html, repair2.html);
   assert.equal(result.styleLint.final.status, 'PASS');
-  assert.equal(calls.filter((call) => call.path === '/api/hub/ai/repair').length, 3);
+  assert.equal(calls.filter((call) => call.path === '/api/hub/ai/repair').length, 2);
   assert.equal(calls.filter((call) => call.path === '/api/hub/ai/critic').length, 1);
 });
 
