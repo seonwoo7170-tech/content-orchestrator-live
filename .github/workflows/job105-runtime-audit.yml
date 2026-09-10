@@ -28,20 +28,6 @@ jobs:
           async function cf(path,init={}){const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}${path}`,{...init,headers});const d=await r.json();if(!r.ok||d.success===false)throw new Error(`${path}:${r.status}:${JSON.stringify(d.errors||d).slice(0,500)}`);return d;}
           const db=(await cf('/d1/database')).result.find(d=>d.name==='content-orchestrator');
           async function q(sql,params=[]){const d=await cf(`/d1/database/${db.uuid}/query`,{method:'POST',body:JSON.stringify({sql,params})});const x=Array.isArray(d.result)?d.result[0]:d.result;return {rows:x?.results||[],meta:x?.meta||{}};}
-          const sql=`SELECT DISTINCT j.id AS job_id, j.mode, j.blog_id, j.result_json, j.updated_at,
-            COALESCE(s.plan_date, date('now')) AS plan_date,
-            EXISTS(SELECT 1 FROM job_images fi WHERE fi.job_id=j.id AND fi.status='failed') AS has_failed_images,
-            COALESCE((SELECT MAX(ai.updated_at) FROM job_images ai WHERE ai.job_id=j.id),j.updated_at) AS image_activity_at,
-            EXISTS(SELECT 1 FROM job_images pi WHERE pi.job_id=j.id AND pi.provider_task_id IS NOT NULL AND pi.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry')) AS has_active_provider_task,
-            COALESCE((SELECT MIN(COALESCE(pi.provider_checked_at,pi.updated_at)) FROM job_images pi WHERE pi.job_id=j.id AND pi.provider_task_id IS NOT NULL AND pi.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry')),j.updated_at) AS active_provider_checked_at
-            FROM jobs j LEFT JOIN daily_plan_slots s ON s.job_id=j.id
-            WHERE j.status='ready' AND j.archived_at IS NULL AND j.mode IN ('new_article','repair_existing')
-              AND j.updated_at<=datetime('now',?)
-              AND (?=0 OR NOT EXISTS (SELECT 1 FROM job_images ci WHERE ci.job_id=j.id AND COALESCE(ci.provider,'kie-ai')='kie-ai' AND ci.provider_task_id IS NOT NULL AND ci.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry') AND COALESCE(ci.provider_checked_at,ci.updated_at)>datetime('now',?)))
-              AND (j.mode='repair_existing' OR (j.mode='new_article' AND (s.job_id IS NULL OR (s.kind='new_article' AND s.status='resolved'))))
-            ORDER BY CASE WHEN has_active_provider_task=1 THEN 0 WHEN has_failed_images=1 AND image_activity_at<=datetime('now',?) THEN 1 WHEN has_failed_images=0 THEN 2 ELSE 3 END,
-              CASE WHEN has_active_provider_task=1 THEN active_provider_checked_at WHEN has_failed_images=1 THEN image_activity_at ELSE j.updated_at END,j.id
-            LIMIT ?`;
-          console.log('CANDIDATES '+JSON.stringify(await q(sql,['-0 minutes',0,'-3 minutes','-10 minutes',48])));
-          console.log('IMAGES105 '+JSON.stringify(await q(`SELECT id,status,provider,provider_task_id,provider_status,provider_checked_at,created_at,updated_at FROM job_images WHERE job_id=105 ORDER BY position,id`)));
+          console.log('JOB105 '+JSON.stringify(await q(`SELECT id,status,updated_at,json_extract(result_json,'$.status') AS result_status,json_extract(result_json,'$.imagePipeline.complete') AS image_complete FROM jobs WHERE id=105`)));
+          console.log('IMAGES105 '+JSON.stringify(await q(`SELECT id,status,provider,provider_task_id,provider_status,provider_checked_at,provider_attempt_count,provider_error_code,created_at,updated_at FROM job_images WHERE job_id=105 ORDER BY position,id`)));
           NODE
