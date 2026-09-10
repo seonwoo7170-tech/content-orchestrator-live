@@ -38,7 +38,7 @@ test('active production uses Puter-first resumable durable image completion with
   assert.match(resilientImageExecutor, /Math\.min\(3, number\)/);
   assert.match(resilientImageExecutor, /!puterAttempted && puterImageConfigured\(env\)\) return 'puter'/);
   assert.match(resilientImageExecutor, /attempts === 0 && modelScopeImageEnabled\(env\)\) return 'modelscope'/);
-  assert.match(resilientImageExecutor, /provider === 'modelscope'\) return 'kie'/);
+  assert.match(resilientImageExecutor, /return provider === 'modelscope' \? 'modelscope' : 'kie'/);
   assert.match(resilientImageExecutor, /IMAGE_PROVIDER_MODE: 'cloudflare'/);
   assert.match(resilientImageExecutor, /isSuccessfulPaidImageCheckpoint/);
   assert.doesNotMatch(resilientImageExecutor, /localFallback:\s*true/);
