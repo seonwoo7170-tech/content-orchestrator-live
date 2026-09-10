@@ -26,22 +26,17 @@ function intentGoal(intent) {
   return '핵심 답을 먼저 제시하고 사용자가 바로 실행할 수 있는 단계와 예외를 설명한다.';
 }
 
-function planningProfile(topic, intent, language, { freshnessRequired, primarySourceRequired }) {
+function planningProfile(topic, intent, { freshnessRequired, primarySourceRequired }) {
   const deep = substantiveTopic(topic, intent);
-  const korean = language === 'ko';
-  const recommendedWordRange = korean
-    ? (deep
-      ? { min: 7000, max: 12000, unit: 'plain-text-characters', flexible: true }
-      : { min: 4500, max: 8500, unit: 'plain-text-characters', flexible: true })
-    : (deep
-      ? { min: 2200, max: 3500, unit: 'words', flexible: true }
-      : { min: 1500, max: 2500, unit: 'words', flexible: true });
+  const recommendedWordRange = deep
+    ? { min: 2500, max: 4000, unit: 'words', flexible: true }
+    : { min: 1500, max: 2500, unit: 'words', flexible: true };
 
   return {
     method: 'master-v4.5-prewrite',
     recommendedDepth: deep ? 'deep-dive' : 'standard-explainer',
     recommendedWordRange,
-    completionRule: '이 범위는 편집 깊이 기준이며 채우기용 목표가 아니다. 핵심 결정·행동 정보, 예외, 실패 조건, 구체 예시가 충분해질 때까지 작성하고 단순 반복이나 filler로 길이를 맞추지 않는다.',
+    completionRule: '이 범위는 Master v4.5의 유연한 편집 깊이 기준이며 채우기용 목표가 아니다. 핵심 결정·행동 정보, 예외, 실패 조건, 구체 예시가 충분해질 때까지 작성하고 단순 반복이나 filler로 길이를 맞추지 않는다.',
     readerDecision: '독자가 이 글을 읽고 무엇을 선택·확인·수리·중단·실행해야 하는지 한 문장으로 먼저 정의한다.',
     originalValueGoal: '검색 결과의 흔한 설명을 재배열하는 데서 끝내지 말고, 실제 판단 기준·상황별 차이·예외·실패 신호·작업 순서 중 최소 두 가지 이상의 고유한 실용 가치를 제공한다.',
     competitorGapQuestions: [
@@ -138,7 +133,7 @@ export async function buildSeoBrief(env, input = {}) {
   const strategyLinks = Array.isArray(input.strategyLinks) ? input.strategyLinks.slice(0, 8) : [];
   const freshnessRequired = currentSensitive(topic);
   const primarySourceRequired = freshnessRequired || safetySensitive(topic);
-  const planning = planningProfile(topic, intent, language, { freshnessRequired, primarySourceRequired });
+  const planning = planningProfile(topic, intent, { freshnessRequired, primarySourceRequired });
 
   return {
     version: 'smileseon-seo-brief.v2',
