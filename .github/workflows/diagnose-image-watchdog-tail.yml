@@ -49,3 +49,5 @@ jobs:
             for(const line of tail) console.log(line);
           }
           NODE
+
+# Diagnose resumed job105 after completion contract repair.

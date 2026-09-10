@@ -28,6 +28,9 @@ jobs:
           async function cf(path,init={}){const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}${path}`,{...init,headers});const d=await r.json();if(!r.ok||d.success===false)throw new Error(`${path}:${r.status}:${JSON.stringify(d.errors||d).slice(0,500)}`);return d;}
           const db=(await cf('/d1/database')).result.find(d=>d.name==='content-orchestrator');
           async function q(sql,params=[]){const d=await cf(`/d1/database/${db.uuid}/query`,{method:'POST',body:JSON.stringify({sql,params})});const x=Array.isArray(d.result)?d.result[0]:d.result;return {rows:x?.results||[],meta:x?.meta||{}};}
+          console.log('SETTINGS105 '+JSON.stringify(await q(`SELECT scope_key,inherit_global,json_extract(settings_json,'$.enabled') AS enabled,json_extract(settings_json,'$.imagesEnabled') AS images_enabled FROM automation_settings WHERE scope_key='global' OR blog_id=(SELECT blog_id FROM jobs WHERE id=105)`)));
+          console.log('SCHEMA '+JSON.stringify((await q('PRAGMA table_info(job_images)')).rows.map(r=>r.name)));
+          console.log('LOCKS '+JSON.stringify(await q(`SELECT lock_key,expires_at,updated_at FROM runtime_locks WHERE lock_key LIKE '%image%'`)));
           console.log('JOB105 '+JSON.stringify(await q(`SELECT id,status,updated_at,json_extract(result_json,'$.status') AS result_status,json_extract(result_json,'$.imagePipeline.complete') AS image_complete FROM jobs WHERE id=105`)));
           console.log('IMAGES105 '+JSON.stringify(await q(`SELECT id,status,provider,provider_task_id,provider_status,provider_checked_at,provider_attempt_count,provider_error_code,created_at,updated_at FROM job_images WHERE job_id=105 ORDER BY position,id`)));
           NODE
