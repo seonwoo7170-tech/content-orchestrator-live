@@ -131,7 +131,7 @@ async function listReadyImageCandidates(env, options = {}) {
       WHERE j.status = 'ready'
         AND j.archived_at IS NULL
         AND j.mode IN ('new_article', 'repair_existing')
-        AND j.updated_at <= datetime('now', ?)
+        AND datetime(j.updated_at) <= datetime('now', ?)
         AND (
           ? = 0
           OR NOT EXISTS (
@@ -141,7 +141,7 @@ async function listReadyImageCandidates(env, options = {}) {
                AND COALESCE(ci.provider, 'kie-ai') = 'kie-ai'
                AND ci.provider_task_id IS NOT NULL
                AND ci.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry')
-               AND COALESCE(ci.provider_checked_at, ci.updated_at) > datetime('now', ?)
+               AND datetime(COALESCE(ci.provider_checked_at, ci.updated_at)) > datetime('now', ?)
           )
         )
         AND (
@@ -156,14 +156,14 @@ async function listReadyImageCandidates(env, options = {}) {
         )
       ORDER BY CASE
                  WHEN has_active_provider_task = 1 THEN 0
-                 WHEN has_failed_images = 1 AND image_activity_at <= datetime('now', ?) THEN 1
+                 WHEN has_failed_images = 1 AND datetime(image_activity_at) <= datetime('now', ?) THEN 1
                  WHEN has_failed_images = 0 THEN 2
                  ELSE 3
                END,
                CASE
-                 WHEN has_active_provider_task = 1 THEN active_provider_checked_at
-                 WHEN has_failed_images = 1 THEN image_activity_at
-                 ELSE j.updated_at
+                 WHEN has_active_provider_task = 1 THEN datetime(active_provider_checked_at)
+                 WHEN has_failed_images = 1 THEN datetime(image_activity_at)
+                 ELSE datetime(j.updated_at)
                END,
                j.id
       LIMIT ?`
@@ -178,251 +178,123 @@ async function listReadyImageCandidates(env, options = {}) {
 }
 
 function candidateBlogs(candidates = []) {
-  const ids = [...new Set(candidates
-    .map((candidate) => String(candidate?.blog_id || '').trim())
-    .filter(Boolean))];
-  return ids.map((blogId) => ({ blogId, name: `Blog ${blogId}` }));
+  return [...new Set(candidates.map((candidate) => String(candidate.blog_id || '')).filter(Boolean))];
 }
 
-function imagePipelineMeta(candidate, plan, images, verification, extra = {}) {
-  const providers = [...new Set((images || []).map((image) => String(image.provider || '').trim()).filter(Boolean))];
-  return {
-    version: 'image-pipeline-v2',
-    mode: String(candidate.mode || 'new_article'),
-    targetTotal: Number(plan.targetTotal || 0),
-    existingBefore: Number(plan.existingCount || 0),
-    generatedRequired: Number(plan.generatedCount || 0),
-    bodyTarget: Number(plan.bodyNeeded || 0),
-    currentCount: Number(verification?.currentCount ?? plan.existingCount ?? 0),
-    providers,
-    qa: verification?.ok === true ? 'passed' : 'pending',
-    updatedAt: new Date().toISOString(),
-    ...extra
-  };
-}
-
-export async function completeReadyJobImages(env, candidate, effective, options = {}) {
-  const jobId = Number(candidate.job_id);
-  if (effective?.imagesEnabled === false) {
-    return { jobId, blogId: String(candidate.blog_id), mode: String(candidate.mode), complete: true, skipped: true, reason: 'IMAGES_DISABLED', pending: 0 };
+async function settingsForCandidates(candidates, env) {
+  const blogs = candidateBlogs(candidates);
+  const settings = new Map();
+  for (const blogId of blogs) {
+    settings.set(blogId, await readAutomationSettings(env, blogId));
   }
+  return settings;
+}
 
-  // Only Final-Critic-ready results are allowed into the image lane.
+function candidateEnabled(candidate, settingsByBlog) {
+  const settings = settingsByBlog.get(String(candidate.blog_id || ''));
+  if (!settings?.enabled || !settings?.imagesEnabled) return false;
+  if (candidate.mode === 'repair_existing') return settings.repairsEnabled !== false;
+  return settings.newArticlesEnabled !== false;
+}
+
+async function ensureImagePlan(candidate, env, options = {}) {
   const result = readyResult(candidate);
-  const plan = buildSupplementalImagePlan(candidate.mode, result.article, effective);
+  const current = await listJobImages(candidate.job_id, env);
+  const expectedBodyCount = Math.max(0, Number(result?.imagePipeline?.bodyTarget ?? result?.imagePipeline?.body_target ?? options.bodyImageCount ?? 2) || 0);
+  const expectedTotal = 1 + expectedBodyCount;
+  if (current.length >= expectedTotal) return { result, images: current, expectedTotal };
 
-  if (plan.generatedCount === 0) {
-    const verification = validateImagePolicy(candidate.mode, result.article, effective);
-    const nextResult = {
-      ...result,
-      imagePipeline: imagePipelineMeta(candidate, plan, [], verification, { generated: 0, reusedExisting: true })
-    };
-    await persistJobResult(env, jobId, nextResult);
-    return {
-      jobId,
-      blogId: String(candidate.blog_id),
-      mode: String(candidate.mode),
-      complete: verification.ok,
-      skipped: true,
-      reason: verification.ok ? 'EXISTING_IMAGES_SUFFICIENT' : 'IMAGE_POLICY_INCOMPLETE',
-      targetTotal: plan.targetTotal,
-      existingCount: plan.existingCount,
-      generated: 0,
-      pending: 0,
-      pendingProvider: null,
-      failed: 0
-    };
+  const plan = buildSupplementalImagePlan({
+    article: result.article,
+    currentImages: current,
+    targetBodyImages: expectedBodyCount
+  });
+  if (plan.length) await persistImagePlan(candidate.job_id, plan, env);
+  return { result, images: await listJobImages(candidate.job_id, env), expectedTotal };
+}
+
+async function attachCompletedImages(candidate, result, env) {
+  const latest = await listJobImages(candidate.job_id, env);
+  const stored = latest.filter((image) => image.status === 'stored');
+  if (!stored.length) return latest;
+
+  const attachedResult = await attachStoredImages(result, stored, env);
+  for (const image of stored) await markImageAttached(image.id, env);
+  await persistJobResult(candidate.job_id, attachedResult, env);
+  return listJobImages(candidate.job_id, env);
+}
+
+async function completeCandidate(candidate, env, options = {}) {
+  const { result, images, expectedTotal } = await ensureImagePlan(candidate, env, options);
+  const before = imageCompletionState(images, expectedTotal);
+  if (before.complete) {
+    const attached = await attachCompletedImages(candidate, result, env);
+    return { jobId: candidate.job_id, complete: imageCompletionState(attached, expectedTotal).complete };
   }
 
-  await persistImagePlan(env, jobId, plan.images);
-  let images = await listJobImages(env, jobId);
-  let state = imageCompletionState(images, plan.generatedCount);
-  let generated = { requested: 0, stored: 0, pending: 0, failed: 0, outcomes: [] };
-
-  const storedBeforeGeneration = images.some((image) => String(image.status) === 'stored');
-
-  // Finish durable stored -> attached work before asking another provider for more bytes.
-  // This keeps each free-plan cron invocation small and makes partial progress durable.
-  if (!state.complete && !storedBeforeGeneration) {
-    generated = await generatePlannedImages(env, jobId, {
-      retryFailed: true,
-      maxImages: positiveLimit(options.maxImages, 3, 3),
-      localFallback: false,
-      executionContext: options.executionContext
-    });
-    images = await listJobImages(env, jobId);
-    state = imageCompletionState(images, plan.generatedCount);
-  }
-
-  const attachableImages = images.filter((image) => String(image.status) === 'stored');
-  const article = attachStoredImages(result.article, images);
-  const verification = validateImagePolicy(candidate.mode, article, effective);
-  const visibleImages = images.filter((image) => ['stored', 'attached'].includes(String(image.status)) && /^https:\/\//i.test(String(image.public_url || '')));
-
-  if (visibleImages.length > 0) {
-    const nextResult = {
-      ...result,
-      article,
-      images: visibleImages.map((image) => ({
-        id: image.id,
-        role: image.role,
-        position: image.position,
-        url: image.public_url,
-        altText: image.alt_text,
-        provider: image.provider || null
-      })),
-      imagePipeline: imagePipelineMeta(candidate, plan, images, verification, {
-        complete: verification.ok && state.complete,
-        generated: visibleImages.length,
-        attachedThisRun: attachableImages.length,
-        reusedExisting: plan.existingCount > 0,
-        lastAttachedAt: new Date().toISOString()
-      })
-    };
-    await persistJobResult(env, jobId, nextResult);
-    for (const image of attachableImages) await markImageAttached(env, image.id);
-    images = await listJobImages(env, jobId);
-    state = imageCompletionState(images, plan.generatedCount);
-  }
-
-  if (!verification.ok) {
-    return {
-      jobId,
-      blogId: String(candidate.blog_id),
-      mode: String(candidate.mode),
-      complete: false,
-      generated: generated.stored,
-      pending: generated.pending,
-      pendingProvider: pendingProvider(images),
-      failed: generated.failed,
-      attachedThisRun: attachableImages.length,
-      targetTotal: plan.targetTotal,
-      existingCount: plan.existingCount,
-      currentCount: verification.currentCount,
-      missing: verification.missing,
-      ...state
-    };
-  }
-
+  const provider = pendingProvider(images);
+  const generated = await generatePlannedImages(candidate.job_id, env, {
+    limit: positiveLimit(options.maxImages, 1),
+    provider,
+    executionContext: options.executionContext
+  });
+  let latest = generated?.images || await listJobImages(candidate.job_id, env);
+  latest = await attachCompletedImages(candidate, result, env);
+  const after = imageCompletionState(latest, expectedTotal);
   return {
-    jobId,
-    blogId: String(candidate.blog_id),
-    mode: String(candidate.mode),
-    complete: true,
-    generated: generated.stored,
-    pending: generated.pending,
-    pendingProvider: null,
-    failed: generated.failed,
-    attachedThisRun: attachableImages.length,
-    targetTotal: plan.targetTotal,
-    existingCount: plan.existingCount,
-    currentCount: verification.currentCount,
-    ...state
+    jobId: candidate.job_id,
+    complete: after.complete,
+    generated: Number(generated?.generated || 0),
+    provider: generated?.provider || provider || null,
+    state: after
   };
 }
 
 export async function runScheduledImageCompletion(env, options = {}) {
-  if (env?.DAILY_WORK_EXECUTION_ENABLED !== 'true') {
-    return { ok: true, enabled: false, reason: 'DAILY_WORK_EXECUTION_DISABLED', attempted: 0, completed: 0, items: [] };
-  }
-
   const candidates = await listReadyImageCandidates(env, options);
-  const blogs = options.blogs || candidateBlogs(candidates);
-  const automation = options.automation || await readAutomationSettings(env, blogs);
-  const settingsByBlog = new Map((automation.blogs || []).map((item) => [String(item.blogId), item.effective || {}]));
-  const items = [];
-  const maxJobs = positiveLimit(options.maxJobs, env?.IMAGE_COMPLETION_MAX_ITEMS || 1);
-  const pollIntervalMs = imagePollIntervalMs(env, options);
-  const articleCooldownMs = articleImageCooldownMs(env, options);
-  const jobBudgetMs = imageJobBudgetMs(env, options);
-  const chainBudgetMs = imageChainBudgetMs(env, options);
-  const callbackMode = kieImageCallbackEnabled(env);
-  const chainStartedAt = Date.now();
+  if (!candidates.length) return { processed: 0, completed: 0, results: [] };
+  const settingsByBlog = await settingsForCandidates(candidates, env);
+  const maxJobs = positiveLimit(options.maxJobs, 1);
+  const selected = candidates.filter((candidate) => candidateEnabled(candidate, settingsByBlog)).slice(0, maxJobs);
+  const results = [];
+  const started = Date.now();
+  const budget = imageChainBudgetMs(env, options);
 
-  for (const candidate of candidates) {
-    if (items.length >= maxJobs) break;
-    if (Date.now() - chainStartedAt >= chainBudgetMs) break;
-    const effective = settingsByBlog.get(String(candidate.blog_id)) || automation.global;
-    if (!effective?.enabled) continue;
-
-    const jobStartedAt = Date.now();
-    const resumedActiveTask = Number(candidate?.has_active_provider_task || 0) === 1;
-    let rotateIncomplete = false;
-    let item = null;
-    try {
-      while (Date.now() - jobStartedAt < jobBudgetMs && Date.now() - chainStartedAt < chainBudgetMs) {
-        item = await completeReadyJobImages(env, candidate, effective, {
-          ...options,
-          maxImages: positiveLimit(options.maxImages, 1, 3)
-        });
-        if (item?.complete || Number(item?.failed || 0) > 0) break;
-        if (Number(item?.pending || 0) > 0) {
-          if (callbackMode && String(item?.pendingProvider || '') === 'kie-ai') {
-            item = { ...item, reason: 'AWAITING_KIE_CALLBACK' };
-            rotateIncomplete = resumedActiveTask;
-            break;
-          }
-          if (resumedActiveTask) {
-            // A durable task that already existed before this watchdog pass gets one
-            // status refresh only. Its provider_checked_at moves forward, so the next
-            // cron naturally rotates to the oldest unpolled task instead of allowing
-            // one slow provider task to monopolize the entire image lane.
-            item = { ...item, reason: 'AWAITING_PROVIDER_REPOLL' };
-            rotateIncomplete = true;
-            break;
-          }
-          await sleep(pollIntervalMs);
-          continue;
-        }
-        if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) {
-          // The serial watchdog intentionally asks for one image. Persist that one image
-          // completely, release the runtime lock, and let the next cron continue.
-          if (positiveLimit(options.maxImages, 1, 3) === 1) {
-            rotateIncomplete = resumedActiveTask && !item?.complete;
-            break;
-          }
-          continue;
-        }
-        break;
-      }
-
-      if (item && !item.complete && Number(item?.failed || 0) === 0 && Date.now() - jobStartedAt >= jobBudgetMs) {
-        item = { ...item, reason: 'IMAGE_JOB_BUDGET_EXHAUSTED' };
-      }
-      if (item) items.push(item);
-    } catch (error) {
-      item = {
-        jobId: Number(candidate.job_id),
-        blogId: String(candidate.blog_id),
-        mode: String(candidate.mode),
-        complete: false,
-        errorCode: String(error?.message || 'IMAGE_COMPLETION_FAILED').split(/[:\s]/)[0].slice(0, 80)
-      };
-      items.push(item);
-    }
-
-    if (!item?.complete && !rotateIncomplete) break;
-    if (items.length >= maxJobs) break;
-    if (rotateIncomplete) continue;
-
-    // Keep the requested 10-second gap between completed posts, not between
-    // individual images inside the same post.
-    if (articleCooldownMs > 0) {
-      if (Date.now() - chainStartedAt + articleCooldownMs >= chainBudgetMs) break;
-      await sleep(articleCooldownMs);
-    }
+  for (const candidate of selected) {
+    if (Date.now() - started >= budget) break;
+    const completion = await completeCandidate(candidate, env, options);
+    results.push(completion);
+    if (!completion.complete) break;
+    const cooldown = articleImageCooldownMs(env, options);
+    if (cooldown > 0 && results.length < selected.length) await sleep(cooldown);
   }
+
   return {
-    ok: items.every((item) => !item.errorCode),
-    enabled: true,
-    callbackMode,
-    callbackRecoveryMinutes: kieImageCallbackRecoveryMinutes(env),
-    attempted: items.length,
-    completed: items.filter((item) => item.complete).length,
-    repairAttempted: items.filter((item) => item.mode === 'repair_existing').length,
-    newAttempted: items.filter((item) => item.mode === 'new_article').length,
-    pollIntervalMs,
-    articleCooldownMs,
-    items
+    processed: results.length,
+    completed: results.filter((result) => result.complete).length,
+    results
+  };
+}
+
+export async function runImageCompletionForJob(jobId, env, options = {}) {
+  const candidates = await listReadyImageCandidates(env, {
+    ...options,
+    maxJobs: Math.max(positiveLimit(options.maxJobs, 1), 10)
+  });
+  const candidate = candidates.find((row) => Number(row.job_id) === Number(jobId));
+  if (!candidate) return { processed: 0, completed: 0, results: [] };
+  const settingsByBlog = await settingsForCandidates([candidate], env);
+  if (!candidateEnabled(candidate, settingsByBlog)) return { processed: 0, completed: 0, results: [] };
+  const result = await completeCandidate(candidate, env, options);
+  return { processed: 1, completed: result.complete ? 1 : 0, results: [result] };
+}
+
+export function validateCompletionPolicy(result, images = []) {
+  const validation = validateImagePolicy(result?.article, images);
+  return {
+    ok: validation.ok,
+    violations: validation.violations || [],
+    expected: validation.expected || null,
+    actual: validation.actual || null
   };
 }
