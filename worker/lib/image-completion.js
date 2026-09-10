@@ -242,7 +242,8 @@ export async function completeReadyJobImages(env, candidate, effective, options 
   const storedBeforeGeneration = images.some((image) => String(image.status) === 'stored');
 
   // Finish durable stored -> attached work before asking another provider for more bytes.
-  // This keeps each free-plan cron invocation small and makes partial progress durable.
+  // Each provider call still handles only one image at a time; the scheduler may continue
+  // the same article immediately after that image is durably attached.
   if (!state.complete && !storedBeforeGeneration) {
     generated = await generatePlannedImages(env, jobId, {
       retryFailed: true,
@@ -348,7 +349,7 @@ export async function runScheduledImageCompletion(env, options = {}) {
     if (!effective?.enabled) continue;
 
     const jobStartedAt = Date.now();
-    const resumedActiveTask = Number(candidate?.has_active_provider_task || 0) === 1;
+    let resumedActiveTask = Number(candidate?.has_active_provider_task || 0) === 1;
     let rotateIncomplete = false;
     let item = null;
     try {
@@ -383,10 +384,15 @@ export async function runScheduledImageCompletion(env, options = {}) {
           continue;
         }
         if (Number(item?.generated || 0) > 0 || Number(item?.attachedThisRun || 0) > 0) {
-          // The serial watchdog intentionally asks for one image. Persist that one image
-          // completely, release the runtime lock, and let the next cron continue.
-          if (positiveLimit(options.maxImages, 1, 3) === 1) {
-            rotateIncomplete = resumedActiveTask && !item?.complete;
+          // Keep provider calls serial (maxImages=1), but do not impose an extra cron
+          // boundary between images of the same article. Once an old active task has
+          // completed, the next image is fresh work and may use normal short polling.
+          resumedActiveTask = false;
+          const remainingJobMs = jobBudgetMs - (Date.now() - jobStartedAt);
+          const remainingChainMs = chainBudgetMs - (Date.now() - chainStartedAt);
+          if (Math.min(remainingJobMs, remainingChainMs) <= pollIntervalMs + 750) {
+            item = { ...item, reason: 'IMAGE_CONTINUE_NEXT_TICK' };
+            rotateIncomplete = true;
             break;
           }
           continue;
