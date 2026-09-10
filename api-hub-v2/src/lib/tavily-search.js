@@ -9,6 +9,21 @@ const FRESHNESS_PATTERNS = [
   /(최신|현재|오늘|최근|업데이트|출시|버전|가격|정책|지원금|법률|규정|마감|일정|보안|취약점|리콜|인공지능)/i
 ];
 
+const EVERGREEN_RESEARCH_PATTERNS = [
+  /\b(repair|restore|restoration|replace|replacement|install|installation|troubleshoot|diagnos(?:e|is|tic)?|maintenance|fix|clean|remove|prevent|compare|comparison|versus|\bvs\b|best|guide|checklist|material|tool|floor|threshold|plumb|electric|roof|foundation|hvac|appliance)\b/i,
+  /(수리|복원|교체|설치|진단|점검|유지보수|고장|해결|청소|제거|예방|비교|선택|가이드|체크리스트|재료|공구|바닥|문턱|배관|전기|지붕|기초|가전)/i
+];
+
+function freshnessSensitive(topic) {
+  const text = String(topic || '').trim();
+  return Boolean(text) && FRESHNESS_PATTERNS.some(pattern => pattern.test(text));
+}
+
+function substantiveEvergreen(topic) {
+  const text = String(topic || '').trim();
+  return Boolean(text) && EVERGREEN_RESEARCH_PATTERNS.some(pattern => pattern.test(text));
+}
+
 function httpError(code, status = 502) {
   return Object.assign(new Error(code), { status });
 }
@@ -54,7 +69,7 @@ export function shouldUseTavilyResearch(topic, mode = 'auto') {
   if (normalizedMode !== 'auto') throw httpError('TAVILY_RESEARCH_MODE_INVALID', 400);
   const text = String(topic || '').trim();
   if (!text) return false;
-  return FRESHNESS_PATTERNS.some(pattern => pattern.test(text));
+  return freshnessSensitive(text) || substantiveEvergreen(text);
 }
 
 export async function tavilySearch(env, input = {}, fetchImpl = fetch) {
@@ -133,16 +148,21 @@ export async function collectWriterResearch(env, { topic, language, researchMode
     return { requested: true, used: false, provider: 'tavily', resultCount: 0, results: [], unavailableReason: 'not_configured' };
   }
 
+  const fresh = freshnessSensitive(topic);
   const query = language === 'ko'
-    ? `${String(topic).trim()} 최신 정보 공식 출처`
-    : `${String(topic).trim()} latest official information`;
+    ? (fresh
+      ? `${String(topic).trim()} 최신 정보 공식 출처`
+      : `${String(topic).trim()} 공식 자료 실무 가이드 판단 기준`)
+    : (fresh
+      ? `${String(topic).trim()} latest official information`
+      : `${String(topic).trim()} official guidance practical decision criteria`);
 
   try {
     const searched = await tavilySearch(env, {
       query,
       maxResults: 5,
       topic: /\b(news|announcement|launch|released?|today)\b/i.test(String(topic)) || /(뉴스|발표|출시|오늘)/.test(String(topic)) ? 'news' : 'general',
-      timeRange: 'month'
+      ...(fresh ? { timeRange: 'month' } : {})
     }, fetchImpl);
 
     if (!searched.results.length) {
