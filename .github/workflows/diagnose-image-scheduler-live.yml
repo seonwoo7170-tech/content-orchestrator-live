@@ -1,5 +1,5 @@
 name: diagnose-image-scheduler-live
-# inspect stuck critic job 140, 2026-09-11 KST
+# read back critic job 140 after stale-recovery deployment, 2026-09-11 KST
 
 on:
   push:
