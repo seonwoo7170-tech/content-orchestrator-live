@@ -1,5 +1,5 @@
 name: diagnose-image-scheduler-live
-# read back job 143 after claim-race recovery deploy, 2026-09-11 KST
+# second read back job 143 after scheduled recovery window, 2026-09-11 KST
 
 on:
   push:
