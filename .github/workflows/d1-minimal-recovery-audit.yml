@@ -29,7 +29,7 @@ jobs:
           const headers={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
           async function cf(path,init={}){
             const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}${path}`,{...init,headers:{...headers,...(init.headers||{})},signal:AbortSignal.timeout(30000)});
-            const d=await r.json().catch(()=>({}));
+            const text=await r.text(); let d={}; try{d=text?JSON.parse(text):{}}catch{d={raw:text.slice(0,1000)}}
             if(!r.ok||d.success===false) throw new Error(`${path}:${r.status}:${JSON.stringify(d.errors||d).slice(0,400)}`);
             return d;
           }
@@ -64,10 +64,15 @@ jobs:
             console.log('JOB105_IMAGES '+JSON.stringify({rows:images.rows,meta:images.meta}));
             const active=await q(orch,`SELECT j.id job_id,j.mode,j.updated_at,MIN(COALESCE(i.provider_checked_at,i.updated_at)) oldest_checked FROM jobs j JOIN job_images i ON i.job_id=j.id WHERE j.status='ready' AND j.archived_at IS NULL AND i.provider_task_id IS NOT NULL AND i.provider_status IN ('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry') GROUP BY j.id,j.mode,j.updated_at ORDER BY oldest_checked,j.id LIMIT 8`);
             console.log('ACTIVE_IMAGE_QUEUE '+JSON.stringify({rows:active.rows,meta:active.meta}));
+            const settings=await q(orch,`SELECT scope_key,blog_id,inherit_global,settings_json,updated_at FROM automation_settings WHERE scope_key='global' OR blog_id=? ORDER BY scope_key`,['7741529904469657049']);
+            console.log('JOB105_AUTOMATION_SETTINGS '+JSON.stringify({rows:settings.rows,meta:settings.meta}));
             await threadsAudit(orch,'SHARED_ORCH_THREADS');
           }
           const threads=dbs.find(d=>d.name==='threads-automation-db');
           if(threads) await threadsAudit(threads,'DEDICATED_THREADS');
           const scripts=await cf('/workers/scripts');
           console.log('WORKER_SCRIPTS '+JSON.stringify((scripts.result||[]).filter(s=>['content-orchestrator','threads-automation-web'].includes(s.id)).map(s=>({id:s.id,modified_on:s.modified_on,etag:s.etag||null}))));
+          for(const script of ['content-orchestrator','threads-automation-web']){
+            try{const s=await cf(`/workers/scripts/${script}/schedules`);console.log('SCHEDULES_'+script+' '+JSON.stringify(s.result||s));}catch(e){console.log('SCHEDULES_'+script+'_ERROR '+String(e.message||e));}
+          }
           NODE
