@@ -1,5 +1,5 @@
 name: diagnose-image-scheduler-live
-# second read back job 143 after scheduled recovery window, 2026-09-11 KST
+# final read back job 143 after automatic restart, 2026-09-11 KST
 
 on:
   push:
