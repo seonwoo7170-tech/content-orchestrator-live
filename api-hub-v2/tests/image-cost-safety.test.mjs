@@ -69,7 +69,7 @@ test('paid KIE image is not regenerated when Gemini QA gives a real rejection', 
     if (kie) return kie;
     if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
       counters.geminiCalls += 1;
-      return geminiResponse({ pass: false, detectedText: ['ABC'], violations: ['readable text'] });
+      return geminiResponse({ pass: false, detectedText: ['ABC'], violations: ['readable text'], semanticMatch: true, semanticReason: '' });
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
@@ -108,7 +108,7 @@ test('transient Gemini outage rechecks the same paid KIE image without regenerat
     if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
       counters.geminiCalls += 1;
       if (counters.geminiCalls === 1) return jsonResponse({ error: { message: 'temporary' } }, 503);
-      return geminiResponse({ pass: true, detectedText: [], violations: [] });
+      return geminiResponse({ pass: true, detectedText: [], violations: [], semanticMatch: true, semanticReason: '' });
     }
     throw new Error(`unexpected fetch: ${url}`);
   };

@@ -207,7 +207,7 @@ test('forced KIE mode converts risky digital HomeFix concepts into a short physi
   assert.match(body.input.prompt, /homeowner inspecting a household fixture with simple hand tools/);
   assert.match(body.input.prompt, /Simple uncluttered composition/);
   assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
-  assert.doesNotMatch(body.input.prompt, KIE_RISKY_SCENE_WORDS);
+  assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
   assert.doesNotMatch(body.input.prompt, /broad uniform surfaces|simple geometry|minimal decorative detail/i);
   assert.equal(create.init.headers.authorization, 'Bearer test-secret');
 });
@@ -247,7 +247,7 @@ test('auto mode fallback resumes one KIE task after Workers AI account limit', a
   const body = JSON.parse(create.init.body);
   assert.match(body.input.prompt, /residential chrome showerhead with a steady stream of water/);
   assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
-  assert.doesNotMatch(body.input.prompt, KIE_RISKY_SCENE_WORDS);
+  assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
   assert.doesNotMatch(body.input.prompt, /broad uniform surfaces|simple geometry|minimal decorative detail/i);
   assert.ok(calls.some((call) => call.url.includes('/recordInfo?taskId=')));
 });
@@ -265,7 +265,7 @@ test('forced KIE mode converts main water shutoff into a concise editorial scene
   const body = JSON.parse(create.init.body);
   assert.match(body.input.prompt, /residential main water shutoff valve connected to exposed household plumbing/);
   assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
-  assert.doesNotMatch(body.input.prompt, KIE_RISKY_SCENE_WORDS);
+  assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
 });
 
 for (const sample of [

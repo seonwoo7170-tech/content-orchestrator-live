@@ -35,28 +35,21 @@ async function captureKieCreatePrompt(prompt) {
 
 const source = 'Photorealistic real-world photograph focused on pc 렉 걸림 끝판왕 원인별 진단 및 체감 속도 % 개선 최적화 마스터 가이드. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
 
-test('KIE converts a Korean PC performance title into a physical text-safe exterior ventilation scene', async () => {
+test('KIE preserves a Korean PC performance subject instead of replacing it with cleaning', async () => {
   const prompt = await captureKieCreatePrompt(source);
-  assert.match(prompt, /unbranded desktop computer side panel/i);
-  assert.match(prompt, /ventilation grille/i);
-  assert.match(prompt, /soft gray cleaning brush/i);
-  assert.match(prompt, /No ports, cables, internal components, screens, keyboards, stickers, labels, packaging, or documents/i);
+  assert.match(prompt, /pc 렉 걸림 끝판왕 원인별 진단 및 체감 속도 % 개선 최적화 마스터 가이드/i);
   assert.match(prompt, /No visible text, letters, numbers, logos, icons, UI/i);
-  assert.doesNotMatch(prompt, /렉 걸림|끝판왕|체감 속도|%/i);
+  assert.doesNotMatch(prompt, /cleaning brush|ventilation grille/i);
 });
 
 test('orchestrator KIE recovery levels remain distinct after API Hub prompt preparation', async () => {
   const level2 = await captureKieCreatePrompt(`${source} KIE_RECOVERY_LEVEL_2. Recovery visual rule: simplify the composition to a closer view.`);
   const level3 = await captureKieCreatePrompt(`${source} KIE_RECOVERY_LEVEL_3. Recovery visual rule: use an even tighter close-up with minimum physical elements.`);
 
-  assert.match(level2, /smooth matte black exterior side panel/i);
-  assert.match(level2, /rectangular ventilation grille/i);
-  assert.match(level2, /Keep all ports, cables, internal components, monitors, keyboards, stickers, labels, and documents out of frame/i);
-  assert.match(level2, /close editorial photograph/i);
+  assert.match(level2, /pc 렉 걸림/i);
+  assert.match(level2, /Close-up view, very simple composition/i);
 
-  assert.match(level3, /macro editorial photograph/i);
-  assert.match(level3, /ventilation grille being gently brushed clean/i);
-  assert.match(level3, /regular round ventilation holes/i);
-  assert.match(level3, /No internal computer components, ports, cables, screws, screens, keyboards, stickers, labels, or decorative details/i);
+  assert.match(level3, /pc 렉 걸림/i);
+  assert.match(level3, /Tight close-up, minimal scene elements/i);
   assert.notEqual(level2, level3);
 });
