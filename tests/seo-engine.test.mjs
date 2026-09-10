@@ -13,7 +13,7 @@ test('SEO brief remains available without D1 and keeps current topics evidence-a
     language: 'ko',
     strategyLinks: [{ url: 'https://example.test/related', query: '윈도우 복구' }]
   });
-  assert.equal(brief.version, 'smileseon-seo-brief.v1');
+  assert.equal(brief.version, 'smileseon-seo-brief.v2');
   assert.equal(brief.searchIntent, 'informational');
   assert.equal(brief.answerFirst, true);
   assert.equal(brief.evidence.source, 'planner');
