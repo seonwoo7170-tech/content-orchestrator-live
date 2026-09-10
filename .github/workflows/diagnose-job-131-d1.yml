@@ -35,11 +35,13 @@ jobs:
           const url=`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db.uuid}/query`;
           async function q(sql,params=[]){ const d=await cf(url,{method:'POST',body:JSON.stringify({sql,params})}); return (Array.isArray(d.result)?d.result[0]:d.result)||{}; }
           const job=(await q(`SELECT id,mode,blog_id,blogger_post_id,status,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,last_failure_at,updated_at,archived_at, CASE WHEN result_json IS NOT NULL AND length(result_json)>2 THEN 1 ELSE 0 END AS has_result FROM jobs WHERE id=?`,[131])).results?.[0]||null;
-          const images=(await q(`SELECT id,role,position,status,provider,provider_state,provider_task_id,attempt_count,updated_at FROM job_images WHERE job_id=? ORDER BY position,id LIMIT 10`,[131])).results||[];
-          let events=[]; try { events=(await q(`SELECT id,stage,level,message,created_at FROM job_events WHERE job_id=? ORDER BY id DESC LIMIT 12`,[131])).results||[]; } catch {}
-          let slot=[]; try { slot=(await q(`SELECT id,status,recovery_state,next_retry_at,hold_reason,last_error_code,updated_at FROM daily_plan_slots WHERE job_id=? LIMIT 3`,[131])).results||[]; } catch {}
+          let images=[]; try { images=(await q(`SELECT id,role,position,status,provider,provider_task_id,updated_at FROM job_images WHERE job_id=? ORDER BY position,id LIMIT 10`,[131])).results||[]; } catch (e) { console.log('JOB131_IMAGES_QUERY '+String(e.message||e)); }
+          let events=[]; try { events=(await q(`SELECT id,stage,level,message,created_at FROM job_events WHERE job_id=? ORDER BY id DESC LIMIT 12`,[131])).results||[]; } catch (e) { console.log('JOB131_EVENTS_QUERY '+String(e.message||e)); }
+          let slot=[]; try { slot=(await q(`SELECT id,status,recovery_state,next_retry_at,hold_reason,last_error_code,updated_at FROM daily_plan_slots WHERE job_id=? LIMIT 3`,[131])).results||[]; } catch (e) { console.log('JOB131_SLOT_QUERY '+String(e.message||e)); }
+          let imageColumns=[]; try { imageColumns=(await q(`PRAGMA table_info(job_images)`)).results?.map(x=>x.name)||[]; } catch {}
           console.log('JOB131 '+JSON.stringify(job));
           console.log('JOB131_IMAGES '+JSON.stringify(images));
           console.log('JOB131_EVENTS '+JSON.stringify(events));
           console.log('JOB131_SLOT '+JSON.stringify(slot));
+          console.log('JOB_IMAGES_COLUMNS '+JSON.stringify(imageColumns));
           NODE
