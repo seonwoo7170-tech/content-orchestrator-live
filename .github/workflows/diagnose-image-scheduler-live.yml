@@ -1,5 +1,5 @@
 name: diagnose-image-scheduler-live
-# read back critic job 140 after stale-recovery deployment, 2026-09-11 KST
+# inspect duplicate claim / recovery state for job 143, 2026-09-11 KST
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: Inspect stuck critic job 140
+      - name: Inspect duplicate claim job 143
         shell: bash
         run: |
           set -euo pipefail
@@ -31,12 +31,12 @@ jobs:
             const out=execFileSync('npx',['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'],{encoding:'utf8',env:process.env,maxBuffer:10*1024*1024});
             const x=JSON.parse(out); return (Array.isArray(x)?x:[x]).flatMap(g=>Array.isArray(g?.results)?g.results:[]);
           }
-          console.log('JOB140',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,target_url,topic,error,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,last_failure_at,created_at,updated_at FROM jobs WHERE id=140")));
-          console.log('JOB140_RESULT',JSON.stringify(q("SELECT id,json_extract(result_json,'$.status') AS result_status,json_extract(result_json,'$.reviewReason') AS review_reason,json_extract(result_json,'$.continuationAttempt') AS continuation_attempt,json_array_length(json_extract(result_json,'$.finalCritic.issues')) AS final_issue_count,json_extract(result_json,'$.finalCritic.status') AS final_critic_status,json_extract(result_json,'$.finalCritic.score') AS final_critic_score FROM jobs WHERE id=140")));
-          console.log('JOB140_EVENTS',JSON.stringify(q("SELECT id,level,event_type,stage,message,meta_json,created_at FROM job_events WHERE job_id=140 ORDER BY id DESC LIMIT 40")));
-          console.log('JOB140_SLOT',JSON.stringify(q("SELECT id,plan_date,blog_id,kind,slot_no,status,job_id,recovery_state,retry_count,next_retry_at,hold_reason,last_error_code,last_failure_at,created_at,updated_at FROM daily_plan_slots WHERE job_id=140 OR (blog_id=(SELECT blog_id FROM jobs WHERE id=140) AND plan_date IN (date('now'),date('now','+9 hours'))) ORDER BY id DESC LIMIT 20")));
-          console.log('STALE_CANDIDATE',JSON.stringify(q("SELECT id,status,recovery_state,retry_count,last_error_code,updated_at, CASE WHEN status IN ('queued','writing','critic_review','repairing','final_critic') AND updated_at <= datetime('now','-20 minutes') THEN 1 ELSE 0 END AS stale20 FROM jobs WHERE id=140")));
-          console.log('RECOVERY_DUE',JSON.stringify(q("SELECT id,status,recovery_state,retry_count,next_retry_at,last_error_code,updated_at FROM jobs WHERE id=140 AND ((status='failed' AND recovery_state='retry_wait' AND next_retry_at <= datetime('now')) OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND updated_at <= datetime('now','-20 minutes')))")));
-          console.log('RECENT_JOBS',JSON.stringify(q("SELECT id,status,mode,blog_id,retry_count,recovery_state,last_error_code,created_at,updated_at FROM jobs WHERE archived_at IS NULL ORDER BY id DESC LIMIT 12")));
+          console.log('JOB143',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,target_url,topic,error,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,last_failure_at,created_at,updated_at FROM jobs WHERE id=143")));
+          console.log('JOB143_EVENTS',JSON.stringify(q("SELECT id,level,event_type,stage,message,meta_json,created_at FROM job_events WHERE job_id=143 ORDER BY id DESC LIMIT 60")));
+          console.log('JOB143_SLOT',JSON.stringify(q("SELECT id,plan_date,blog_id,kind,slot_no,status,job_id,recovery_state,retry_count,next_retry_at,hold_reason,last_error_code,last_failure_at,created_at,updated_at FROM daily_plan_slots WHERE job_id=143 ORDER BY id DESC LIMIT 10")));
+          console.log('SAME_POST_JOBS',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,target_url,retry_count,recovery_state,last_error_code,created_at,updated_at FROM jobs WHERE blogger_post_id=(SELECT blogger_post_id FROM jobs WHERE id=143) ORDER BY id DESC LIMIT 20")));
+          console.log('ACTIVE_AI',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,topic,retry_count,recovery_state,last_error_code,created_at,updated_at FROM jobs WHERE archived_at IS NULL AND status IN ('writing','critic_review','repairing','final_critic') ORDER BY updated_at DESC")));
+          console.log('PUBLICATION143',JSON.stringify(q("SELECT job_id,status,blogger_post_id,error,created_at,updated_at FROM job_publications WHERE job_id=143")));
+          console.log('RUNTIME_LOCKS',JSON.stringify(q("SELECT lock_key,expires_at,updated_at,CASE WHEN expires_at <= datetime('now') OR expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') THEN 1 ELSE 0 END AS expired FROM runtime_locks ORDER BY updated_at DESC LIMIT 30")));
           console.log('NOW',JSON.stringify(q("SELECT datetime('now') utc_now,datetime('now','+9 hours') kst_now")));
           NODE
