@@ -105,10 +105,10 @@ export async function listReadyImageCandidates(env, options = {}) {
               SELECT 1
                 FROM job_images fi
                WHERE fi.job_id = j.id
-                 AND fi.status = 'failed'
+                 AND (fi.status = 'failed' OR fi.provider_status = 'retrying')
             ) AS has_failed_images,
             COALESCE((
-              SELECT MAX(ai.updated_at)
+              SELECT MAX(datetime(ai.updated_at))
                 FROM job_images ai
                WHERE ai.job_id = j.id
             ), j.updated_at) AS image_activity_at,
@@ -120,7 +120,7 @@ export async function listReadyImageCandidates(env, options = {}) {
                  AND pi.provider_status IN ('waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry')
             ) AS has_active_provider_task,
             COALESCE((
-              SELECT MIN(COALESCE(pi.provider_checked_at, pi.updated_at))
+              SELECT MIN(datetime(COALESCE(pi.provider_checked_at, pi.updated_at)))
                 FROM job_images pi
                WHERE pi.job_id = j.id
                  AND pi.provider_task_id IS NOT NULL
@@ -163,7 +163,7 @@ export async function listReadyImageCandidates(env, options = {}) {
                CASE
                  WHEN has_active_provider_task = 1 THEN datetime(active_provider_checked_at)
                  WHEN has_failed_images = 1 THEN datetime(image_activity_at)
-                 ELSE datetime(j.updated_at)
+                 ELSE MAX(datetime(j.updated_at), datetime(image_activity_at))
                END,
                j.id
       LIMIT ?`
@@ -293,6 +293,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
       complete: false,
       generated: generated.stored,
       pending: generated.pending,
+      retrying: generated.retrying || 0,
       pendingProvider: pendingProvider(images),
       failed: generated.failed,
       attachedThisRun: attachableImages.length,
@@ -311,6 +312,7 @@ export async function completeReadyJobImages(env, candidate, effective, options 
     complete: true,
     generated: generated.stored,
     pending: generated.pending,
+    retrying: generated.retrying || 0,
     pendingProvider: null,
     failed: generated.failed,
     attachedThisRun: attachableImages.length,
@@ -356,6 +358,12 @@ export async function runScheduledImageCompletion(env, options = {}) {
           maxImages: positiveLimit(options.maxImages, 1, 3)
         });
         if (item?.complete || Number(item?.failed || 0) > 0) break;
+        if (Number(item?.retrying || 0) > 0) {
+          // Provider failure is checkpointed on the image, even when no image has
+          // been attached yet. Give other jobs their bounded turn in this batch.
+          rotateIncomplete = true;
+          break;
+        }
         if (Number(item?.pending || 0) > 0) {
           if (callbackMode && String(item?.pendingProvider || '') === 'kie-ai') {
             item = { ...item, reason: 'AWAITING_KIE_CALLBACK' };

@@ -16,7 +16,7 @@ test('active provider tasks win first and rotate by oldest provider check before
   assert.match(source, /ELSE 3/);
   assert.match(source, /WHEN has_active_provider_task = 1 THEN datetime\(active_provider_checked_at\)/);
   assert.match(source, /WHEN has_failed_images = 1 THEN datetime\(image_activity_at\)/);
-  assert.match(source, /ELSE datetime\(j\.updated_at\)/);
+  assert.match(source, /ELSE MAX\(datetime\(j\.updated_at\), datetime\(image_activity_at\)\)/);
 });
 
 test('failed image work remains retryable within a bounded article batch', () => {
