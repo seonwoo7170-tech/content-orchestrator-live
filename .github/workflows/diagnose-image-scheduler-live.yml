@@ -1,5 +1,5 @@
 name: diagnose-image-scheduler-live
-# manual live rerun after job133 image recovery, 2026-09-11 KST
+# live readback after job133 completion, 2026-09-11 KST
 
 on:
   push:
@@ -20,35 +20,19 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: Run exact live candidate query
+      - name: Read production work progression
         shell: bash
         run: |
           set -euo pipefail
           node <<'NODE'
-          const { execFileSync } = require('node:child_process');
+          const {execFileSync}=require('node:child_process');
           const db='content-orchestrator';
           function q(sql){
             const out=execFileSync('npx',['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'],{encoding:'utf8',env:process.env,maxBuffer:10*1024*1024});
             const x=JSON.parse(out); return (Array.isArray(x)?x:[x]).flatMap(g=>Array.isArray(g?.results)?g.results:[]);
           }
-          const active="('waiting','queuing','generating','pending','processing','running','query_retry','result_pending','result_download_retry')";
-          const sql=`SELECT DISTINCT j.id AS job_id, j.mode, j.blog_id, j.updated_at,
-            EXISTS(SELECT 1 FROM job_images fi WHERE fi.job_id=j.id AND fi.status='failed') AS has_failed_images,
-            COALESCE((SELECT MAX(ai.updated_at) FROM job_images ai WHERE ai.job_id=j.id),j.updated_at) AS image_activity_at,
-            EXISTS(SELECT 1 FROM job_images pi WHERE pi.job_id=j.id AND pi.provider_task_id IS NOT NULL AND pi.provider_status IN ${active}) AS has_active_provider_task,
-            COALESCE((SELECT MIN(COALESCE(pi.provider_checked_at,pi.updated_at)) FROM job_images pi WHERE pi.job_id=j.id AND pi.provider_task_id IS NOT NULL AND pi.provider_status IN ${active}),j.updated_at) AS active_provider_checked_at
-            FROM jobs j LEFT JOIN daily_plan_slots s ON s.job_id=j.id
-            WHERE j.status='ready' AND j.archived_at IS NULL AND j.mode IN ('new_article','repair_existing')
-              AND j.updated_at <= datetime('now')
-              AND (j.mode='repair_existing' OR (j.mode='new_article' AND (s.job_id IS NULL OR (s.kind='new_article' AND s.status='resolved'))))
-            ORDER BY CASE WHEN has_active_provider_task=1 THEN 0 WHEN has_failed_images=1 AND image_activity_at <= datetime('now','-10 minutes') THEN 1 WHEN has_failed_images=0 THEN 2 ELSE 3 END,
-              CASE WHEN has_active_provider_task=1 THEN active_provider_checked_at WHEN has_failed_images=1 THEN image_activity_at ELSE j.updated_at END,
-              j.id LIMIT 48`;
-          console.log('EXACT_CANDIDATES',JSON.stringify(q(sql)));
-          console.log('ACTIVE_IMAGE_ROWS',JSON.stringify(q(`SELECT id,job_id,role,position,status,provider,provider_task_id,provider_status,provider_checked_at,updated_at FROM job_images WHERE provider_task_id IS NOT NULL AND provider_status IN ${active} ORDER BY COALESCE(provider_checked_at,updated_at),job_id LIMIT 30`)));
-          console.log('JOB133',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,target_url,updated_at,json_extract(result_json,'$.imagePipeline.complete') AS image_complete,json_extract(result_json,'$.imagePipeline.currentCount') AS current_count FROM jobs WHERE id=133")));
-          console.log('JOB133_IMAGES',JSON.stringify(q("SELECT id,role,position,status,provider,provider_task_id,provider_status,provider_attempt_count,provider_error_code,provider_error_message,provider_checked_at,puter_attempted,created_at,updated_at,public_url FROM job_images WHERE job_id=133 ORDER BY position,id")));
-          console.log('JOB133_EVENTS',JSON.stringify(q("SELECT id,level,event_type,stage,message,created_at FROM job_events WHERE job_id=133 ORDER BY id DESC LIMIT 20")));
-          console.log('LOCKS',JSON.stringify(q("SELECT lock_key,expires_at,updated_at FROM runtime_locks WHERE lock_key LIKE '%image%'")));
-          console.log('NOW',JSON.stringify(q("SELECT datetime('now') utc_now")));
+          console.log('RECENT_JOBS',JSON.stringify(q("SELECT id,status,mode,blog_id,topic,blogger_post_id,target_url,created_at,updated_at FROM jobs WHERE archived_at IS NULL ORDER BY id DESC LIMIT 12")));
+          console.log('TODAY_SLOTS',JSON.stringify(q("SELECT id,plan_date,blog_id,kind,status,job_id,recovery_state,retry_count,last_error_code,updated_at FROM daily_plan_slots WHERE plan_date IN (date('now'),date('now','+9 hours')) ORDER BY id DESC LIMIT 40")));
+          console.log('JOB133_RESULT',JSON.stringify(q("SELECT id,status,blogger_post_id,target_url,json_extract(result_json,'$.status') AS result_status,json_extract(result_json,'$.publication.status') AS publication_status,json_extract(result_json,'$.publication.url') AS publication_url,json_extract(result_json,'$.publication.postId') AS publication_post_id,json_extract(result_json,'$.imagePipeline.currentCount') AS current_count,updated_at FROM jobs WHERE id=133")));
+          console.log('NOW',JSON.stringify(q("SELECT datetime('now') utc_now,datetime('now','+9 hours') kst_now")));
           NODE
