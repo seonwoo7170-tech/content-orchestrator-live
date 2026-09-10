@@ -1,5 +1,5 @@
 name = "content-orchestrator"
-main = "index.js"
+main = "index-with-events.js"
 compatibility_date = "2026-08-28"
 
 [vars]
