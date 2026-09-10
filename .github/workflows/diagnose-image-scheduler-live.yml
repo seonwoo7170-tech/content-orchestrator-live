@@ -1,5 +1,5 @@
 name: diagnose-image-scheduler-live
-# inspect duplicate claim / recovery state for job 143, 2026-09-11 KST
+# patch scheduled AI claim race and stale recovery, 2026-09-11 KST
 
 on:
   push:
@@ -9,34 +9,128 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: production
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    timeout-minutes: 12
     steps:
-      - name: Inspect duplicate claim job 143
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch claim race root causes
         shell: bash
         run: |
           set -euo pipefail
-          node <<'NODE'
-          const {execFileSync}=require('node:child_process');
-          const db='content-orchestrator';
-          function q(sql){
-            const out=execFileSync('npx',['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'],{encoding:'utf8',env:process.env,maxBuffer:10*1024*1024});
-            const x=JSON.parse(out); return (Array.isArray(x)?x:[x]).flatMap(g=>Array.isArray(g?.results)?g.results:[]);
-          }
-          console.log('JOB143',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,target_url,topic,error,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,last_failure_at,created_at,updated_at FROM jobs WHERE id=143")));
-          console.log('JOB143_EVENTS',JSON.stringify(q("SELECT id,level,event_type,stage,message,meta_json,created_at FROM job_events WHERE job_id=143 ORDER BY id DESC LIMIT 60")));
-          console.log('JOB143_SLOT',JSON.stringify(q("SELECT id,plan_date,blog_id,kind,slot_no,status,job_id,recovery_state,retry_count,next_retry_at,hold_reason,last_error_code,last_failure_at,created_at,updated_at FROM daily_plan_slots WHERE job_id=143 ORDER BY id DESC LIMIT 10")));
-          console.log('SAME_POST_JOBS',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,target_url,retry_count,recovery_state,last_error_code,created_at,updated_at FROM jobs WHERE blogger_post_id=(SELECT blogger_post_id FROM jobs WHERE id=143) ORDER BY id DESC LIMIT 20")));
-          console.log('ACTIVE_AI',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,topic,retry_count,recovery_state,last_error_code,created_at,updated_at FROM jobs WHERE archived_at IS NULL AND status IN ('writing','critic_review','repairing','final_critic') ORDER BY updated_at DESC")));
-          console.log('PUBLICATION143',JSON.stringify(q("SELECT job_id,status,blogger_post_id,error,created_at,updated_at FROM job_publications WHERE job_id=143")));
-          console.log('RUNTIME_LOCKS',JSON.stringify(q("SELECT lock_key,expires_at,updated_at,CASE WHEN expires_at <= datetime('now') OR expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') THEN 1 ELSE 0 END AS expired FROM runtime_locks ORDER BY updated_at DESC LIMIT 30")));
-          console.log('NOW',JSON.stringify(q("SELECT datetime('now') utc_now,datetime('now','+9 hours') kst_now")));
-          NODE
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('worker/mcp-entry.js')
+          s = p.read_text()
+          if "const AI_LANE_LOCK_KEY = 'serial-ai-watchdog';" not in s:
+              old = "const IMAGE_LANE_LOCK_KEY = 'serial-image-kie';"
+              new = "const AI_LANE_LOCK_KEY = 'serial-ai-watchdog';\nconst IMAGE_LANE_LOCK_KEY = 'serial-image-kie';"
+              if old not in s:
+                  raise SystemExit('AI lock constant target not found')
+              s = s.replace(old, new, 1)
+
+          if 'async function runLockedSerialAiWatchdog' not in s:
+              marker = "async function runSerialImageWatchdog(env, ctx) {"
+              wrapper = """async function runLockedSerialAiWatchdog(env, ctx, eventNow) {
+  const leaseTtlSeconds = positiveBounded(env?.SERIAL_AI_LEASE_TTL_SECONDS, 900, 60, 900);
+  const lease = await acquireRuntimeLock(env, AI_LANE_LOCK_KEY, { ttlSeconds: leaseTtlSeconds });
+  if (!lease.acquired) {
+    return {
+      ok: true,
+      watchdogCron: WATCHDOG_CRON,
+      stopReason: 'AI_LANE_BUSY',
+      leaseTtlSeconds,
+      durationMs: 0,
+      steps: []
+    };
+  }
+  try {
+    const summary = await runSerialAiWatchdog(env, ctx, eventNow);
+    return { ...summary, leaseTtlSeconds };
+  } finally {
+    await releaseRuntimeLock(env, lease).catch((error) =>
+      console.error('SERIAL_AI_LEASE_RELEASE_FAILED', safeScheduledError(error))
+    );
+  }
+}
+
+"""
+              if marker not in s:
+                  raise SystemExit('AI wrapper insertion target not found')
+              s = s.replace(marker, wrapper + marker, 1)
+
+          old_call = "runSerialAiWatchdog(env, ctx, scheduledTime(event)),"
+          if old_call in s:
+              s = s.replace(old_call, "runLockedSerialAiWatchdog(env, ctx, scheduledTime(event)),", 1)
+          elif "runLockedSerialAiWatchdog(env, ctx, scheduledTime(event))," not in s:
+              raise SystemExit('scheduled AI call target not found')
+          p.write_text(s)
+
+          p = Path('worker/lib/job-auto-rescue.js')
+          s = p.read_text()
+          old = "OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND updated_at <= ?)"
+          new = "OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND datetime(updated_at) <= datetime(?))"
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif new not in s:
+              raise SystemExit('stale timestamp target not found')
+          p.write_text(s)
+
+          p = Path('worker/lib/job-recovery.js')
+          s = p.read_text()
+          old = "const transient = code === 'FETCH_FAILED'\n    || code === 'NETWORK_ERROR'"
+          new = "const transient = code === 'JOB_EXECUTION_ALREADY_CLAIMED'\n    || code === 'FETCH_FAILED'\n    || code === 'NETWORK_ERROR'"
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif "code === 'JOB_EXECUTION_ALREADY_CLAIMED'" not in s:
+              raise SystemExit('claim classification target not found')
+          p.write_text(s)
+
+          t = Path('tests/job-claim-race-guard.test.mjs')
+          t.write_text("""import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { classifyFailureCode } from '../worker/lib/job-recovery.js';
+
+test('scheduled AI watchdog is protected by a cross-cron runtime lease', async () => {
+  const source = await readFile(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');
+  assert.match(source, /AI_LANE_LOCK_KEY = 'serial-ai-watchdog'/);
+  assert.match(source, /acquireRuntimeLock\(env, AI_LANE_LOCK_KEY/);
+  assert.match(source, /runLockedSerialAiWatchdog\(env, ctx, scheduledTime\(event\)\)/);
+});
+
+test('fresh SQLite timestamps use SQLite datetime comparison', async () => {
+  const source = await readFile(new URL('../worker/lib/job-auto-rescue.js', import.meta.url), 'utf8');
+  assert.match(source, /datetime\(updated_at\) <= datetime\(\?\)/);
+});
+
+test('execution claim contention is retryable backpressure', () => {
+  assert.equal(classifyFailureCode('JOB_EXECUTION_ALREADY_CLAIMED').classification, 'transient');
+});
+""")
+          PY
+      - name: Verify repository
+        run: |
+          npm install --no-audit --no-fund
+          npm run verify
+      - name: Commit source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name smileseon-ops
+          git config user.email actions@users.noreply.github.com
+          git add worker/mcp-entry.js worker/lib/job-auto-rescue.js worker/lib/job-recovery.js tests/job-claim-race-guard.test.mjs
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'No source changes needed.'
+            exit 0
+          fi
+          git commit -m "fix: prevent scheduled AI claim races"
+          git push
