@@ -81,18 +81,8 @@ jobs:
       - name: Apply D1 migrations
         run: npx --yes wrangler@latest d1 migrations apply content-orchestrator --remote --config wrangler.jsonc
 
-      - name: Prepare runtime secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-          node - <<'NODE'
-          const fs = require('node:fs');
-          fs.writeFileSync('.deploy-secrets.json', JSON.stringify({HUB_API_KEY:process.env.HUB_API_KEY,ADMIN_API_KEY:process.env.ADMIN_API_KEY}));
-          fs.chmodSync('.deploy-secrets.json',0o600);
-          NODE
-
       - name: Deploy Content Orchestrator
-        run: npx --yes wrangler@latest deploy --config wrangler.jsonc --secrets-file .deploy-secrets.json
+        run: npx --yes wrangler@latest deploy --config wrangler.jsonc
 
       - name: Verify Phase 4 roadmap and GSC dashboard UI
         shell: bash
@@ -225,4 +215,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f wrangler.jsonc .deploy-secrets.json
+        run: rm -f wrangler.jsonc
