@@ -1,0 +1,26 @@
+name: ensure-image-schema
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ensure-image-schema.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply and verify required image migration
+        run: node scripts/ensure-image-schema.mjs
+      - name: Verify Job 105 completes after schema recovery
+        run: node scripts/check-image-job-progress.mjs 105

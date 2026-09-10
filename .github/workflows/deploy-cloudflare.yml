@@ -106,7 +106,10 @@ jobs:
         if: steps.d1_migrations.outputs.apply == 'true'
         run: npx --yes wrangler@latest d1 migrations apply content-orchestrator --remote --config wrangler.jsonc
       - name: Deploy Worker and PWA while preserving existing runtime secrets
-        run: npx --yes wrangler@latest deploy --config wrangler.jsonc
+        # Required by listJobImages even when optional migrations are not requested.
+        run: |
+          node scripts/ensure-image-schema.mjs
+          npx --yes wrangler@latest deploy --config wrangler.jsonc
       - name: Production public health read-back
         shell: bash
         run: |
