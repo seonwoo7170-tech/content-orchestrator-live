@@ -15,10 +15,11 @@ test('ready image scheduler prioritizes and rotates durable active provider task
 
 test('an already-active provider task gets one status refresh and rotates instead of monopolizing the lane', async () => {
   const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
-  assert.match(source, /const resumedActiveTask = Number\(candidate\?\.has_active_provider_task \|\| 0\) === 1/);
+  assert.match(source, /let resumedActiveTask = Number\(candidate\?\.has_active_provider_task \|\| 0\) === 1/);
   assert.match(source, /if \(resumedActiveTask\) \{/);
   assert.match(source, /AWAITING_PROVIDER_REPOLL/);
   assert.match(source, /rotateIncomplete = true/);
+  assert.match(source, /resumedActiveTask = false/);
   assert.match(source, /if \(!item\?\.complete && !rotateIncomplete\) break/);
   assert.match(source, /if \(rotateIncomplete\) continue/);
 });
