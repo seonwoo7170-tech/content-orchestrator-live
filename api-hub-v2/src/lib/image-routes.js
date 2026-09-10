@@ -16,9 +16,11 @@ const IMAGE_QA_SCHEMA = Object.freeze({
   properties: {
     pass: { type: 'boolean' },
     detectedText: { type: 'array', items: { type: 'string' } },
-    violations: { type: 'array', items: { type: 'string' } }
+    violations: { type: 'array', items: { type: 'string' } },
+    semanticMatch: { type: 'boolean' },
+    semanticReason: { type: 'string' }
   },
-  required: ['pass', 'detectedText', 'violations']
+  required: ['pass', 'detectedText', 'violations', 'semanticMatch', 'semanticReason']
 });
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -67,30 +69,34 @@ async function generateProviderImage(env, { role, prompt, steps, seed, providerM
   if (providerMode === 'modelscope') { const result = await generateModelScopeImage(env, { role, prompt: prepareKiePrompt(prompt), aspectRatio, taskId }, fetchImpl); return { ...result, role, providerMode: 'modelscope' }; }
   try { return { ...(await generateCloudflareImage(env, { role, prompt, steps, seed }, aiBinding)), providerMode }; } catch (cloudflareError) { if (providerMode === 'cloudflare' || !String(env?.KIE_API_KEY || '').trim()) throw cloudflareError; const kie = await generateKieImage(env, { role, prompt: prepareKiePrompt(prompt), aspectRatio, taskId }, fetchImpl); return { ...kie, role, providerMode: 'auto', fallbackFrom: 'cloudflare-workers-ai', fallbackReason: String(cloudflareError?.message || 'CLOUDFLARE_IMAGE_FAILED') }; }
 }
-async function inspectGeneratedImage(env, generated, fetchImpl) {
+async function inspectGeneratedImage(env, generated, expectedPrompt, fetchImpl) {
   if (!String(env?.GEMINI_API_KEY || '').trim()) throw Object.assign(new Error('IMAGE_QA_GEMINI_REQUIRED'), { status: 503 });
   const model = String(env?.GEMINI_IMAGE_QA_MODEL || env?.GEMINI_CRITIC_MODEL || DEFAULT_IMAGE_QA_MODEL).trim();
-  const result = await runGeminiAi(env, { model, systemInstruction: ['You are a strict image compliance gate for blog publishing.','Inspect only the supplied image pixels.','Set pass=false if any readable or clearly intended writing is visible, including words, letters, numbers, logos, watermarks, captions, labels, signs, packaging marks, interface writing, or title overlays.','Do not fail harmless abstract shapes, texture, pipes, seams, shadows, or random marks that are not actually readable.','Only list violations related to readable or clearly intended writing, logos, watermarks, labels, captions, signs, packaging marks, interface writing, or title overlays. Do not use this field for aesthetic or composition preferences.','Return only the requested JSON structure.'].join(' '), userContent: 'Inspect this generated source image before publication. List any readable snippets you can see and any compliance violations.', inlineImage: { mimeType: String(generated?.mimeType || '').split(';')[0].trim().toLowerCase(), data: String(generated?.imageBase64 || '').trim() }, maxOutputTokens: 384, responseSchema: IMAGE_QA_SCHEMA, thinking: 'minimal' }, fetchImpl);
+  const expected = String(expectedPrompt || '').replace(/\s+/g, ' ').trim().slice(0, 1400);
+  const result = await runGeminiAi(env, { model, systemInstruction: ['You are a strict image compliance and semantic-relevance gate for blog publishing.','Inspect only the supplied image pixels and compare them with the expected visual subject/task supplied by the user.','Set pass=false if any readable or clearly intended writing is visible, including words, letters, numbers, logos, watermarks, captions, labels, signs, packaging marks, interface writing, or title overlays.','Set semanticMatch=false when the main visible subject or action does not clearly correspond to the expected visual subject/task. A generic portrait, posed person, generic workshop, unrelated room, scenery, or merely thematic stock image is a mismatch when the requested repair target, object, material, condition, or action is not visibly central.','Accept reasonable visual interpretations and normal variation when the requested physical subject or task is clearly recognizable and dominant. Do not require an exact composition.','Do not fail harmless abstract shapes, texture, pipes, seams, shadows, or random marks that are not actually readable.','Only list writing/logo/watermark problems in violations. Put topic mismatch reasoning only in semanticReason.','Return only the requested JSON structure.'].join(' '), userContent: `Expected visual subject/task: ${expected}\nInspect this generated source image before publication. Report writing violations and whether the main visible subject/action semantically matches the expectation.`, inlineImage: { mimeType: String(generated?.mimeType || '').split(';')[0].trim().toLowerCase(), data: String(generated?.imageBase64 || '').trim() }, maxOutputTokens: 512, responseSchema: IMAGE_QA_SCHEMA, thinking: 'minimal' }, fetchImpl);
   let parsed; try { parsed = JSON.parse(String(result.response || '')); } catch { throw Object.assign(new Error('IMAGE_QA_RESPONSE_INVALID'), { status: 502 }); }
   const detectedText = Array.isArray(parsed?.detectedText) ? parsed.detectedText.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12) : [];
   const violations = Array.isArray(parsed?.violations) ? parsed.violations.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12) : [];
   const hardViolations = violations.filter((item) => /(readable|text|letter|number|logo|watermark|caption|label|sign|packaging|interface|\bui\b|title|writing|문자|글자|숫자|로고|워터마크|라벨|표지|간판)/i.test(item));
-  return { pass: detectedText.length === 0 && hardViolations.length === 0, detectedText, violations: hardViolations, model: result.model };
+  const semanticMatch = parsed?.semanticMatch === true;
+  const semanticReason = String(parsed?.semanticReason || '').trim().slice(0, 500);
+  return { pass: detectedText.length === 0 && hardViolations.length === 0 && semanticMatch, detectedText, violations: hardViolations, semanticMatch, semanticReason, model: result.model };
 }
-async function inspectGeneratedImageWithRetry(env, generated, fetchImpl) { const maxChecks = IMAGE_QA_TRANSIENT_DELAYS_MS.length + 1; let lastError = null; for (let check = 1; check <= maxChecks; check += 1) { try { return { ...(await inspectGeneratedImage(env, generated, fetchImpl)), inspectionAttempts: check }; } catch (error) { lastError = error; if (!isTransientImageQaFailure(error) || check >= maxChecks) throw error; await sleep(IMAGE_QA_TRANSIENT_DELAYS_MS[check - 1]); } } throw lastError; }
+async function inspectGeneratedImageWithRetry(env, generated, expectedPrompt, fetchImpl) { const maxChecks = IMAGE_QA_TRANSIENT_DELAYS_MS.length + 1; let lastError = null; for (let check = 1; check <= maxChecks; check += 1) { try { return { ...(await inspectGeneratedImage(env, generated, expectedPrompt, fetchImpl)), inspectionAttempts: check }; } catch (error) { lastError = error; if (!isTransientImageQaFailure(error) || check >= maxChecks) throw error; await sleep(IMAGE_QA_TRANSIENT_DELAYS_MS[check - 1]); } } throw lastError; }
 export async function generateImage(env, input, aiBinding = env?.AI, fetchImpl = fetch) {
   const role = String(input?.role || 'body').trim(); if (!IMAGE_ROLES.has(role)) throw Object.assign(new Error('IMAGE_ROLE_INVALID'), { status: 400 });
   const basePrompt = normalizePrompt(input?.prompt); const prompt = `${basePrompt}\n\n${PLAIN_SURFACE_GUARD}`; const steps = normalizeSteps(input?.steps); const seed = normalizeSeed(input?.seed); const providerMode = normalizeProviderMode(input?.providerMode); const qaRequired = imageQaRequired(env); const maxAttempts = qaRequired ? imageQaAttempts(env) : 1;
   if (providerMode !== 'kie' && providerMode !== 'modelscope') { const model = String(env?.IMAGE_MODEL || DEFAULT_IMAGE_MODEL).trim(); if (!ALLOWED_IMAGE_MODELS.has(model)) throw Object.assign(new Error('IMAGE_MODEL_NOT_ALLOWED'), { status: 500 }); }
   let lastQa = null; let lastGenerated = null; let providerAttempts = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const generated = await generateProviderImage(env, { role, prompt: promptForAttempt(prompt, attempt), steps, seed: nextSeed(seed, attempt), providerMode, aspectRatio: input?.aspectRatio, taskId: input?.taskId }, aiBinding, fetchImpl); lastGenerated = generated; providerAttempts = attempt;
+    const attemptPrompt = promptForAttempt(prompt, attempt);
+    const generated = await generateProviderImage(env, { role, prompt: attemptPrompt, steps, seed: nextSeed(seed, attempt), providerMode, aspectRatio: input?.aspectRatio, taskId: input?.taskId }, aiBinding, fetchImpl); lastGenerated = generated; providerAttempts = attempt;
     if (generated?.pending === true || generated?.complete === false) return { ...generated, imageQa: { enabled: qaRequired, pass: null, attempts: 0, pending: true } };
     if (!qaRequired) return { ...generated, imageQa: { enabled: false, pass: null, attempts: 0 } };
-    const qa = await inspectGeneratedImageWithRetry(env, generated, fetchImpl); lastQa = qa; if (qa.pass) return { ...generated, imageQa: { enabled: true, pass: true, attempts: attempt, inspectionAttempts: qa.inspectionAttempts, model: qa.model } };
+    const qa = await inspectGeneratedImageWithRetry(env, generated, attemptPrompt, fetchImpl); lastQa = qa; if (qa.pass) return { ...generated, imageQa: { enabled: true, pass: true, attempts: attempt, inspectionAttempts: qa.inspectionAttempts, semanticMatch: true, model: qa.model } };
     if (generated.provider === 'kie-ai' || generated.provider === 'modelscope') break;
   }
-  const error = new Error('IMAGE_QA_REJECTED'); error.status = 502; error.qaAttempts = providerAttempts; error.qaViolationCount = Number(lastQa?.violations?.length || 0); error.qaDetectedTextCount = Number(lastQa?.detectedText?.length || 0); error.qaDetectedText = Array.isArray(lastQa?.detectedText) ? lastQa.detectedText.slice(0, 8) : []; error.qaViolations = Array.isArray(lastQa?.violations) ? lastQa.violations.slice(0, 8) : [];
+  const error = new Error('IMAGE_QA_REJECTED'); error.status = 502; error.qaAttempts = providerAttempts; error.qaViolationCount = Number(lastQa?.violations?.length || 0); error.qaDetectedTextCount = Number(lastQa?.detectedText?.length || 0); error.qaDetectedText = Array.isArray(lastQa?.detectedText) ? lastQa.detectedText.slice(0, 8) : []; error.qaViolations = Array.isArray(lastQa?.violations) ? lastQa.violations.slice(0, 8) : []; error.qaSemanticMismatch = lastQa?.semanticMatch === false; error.qaSemanticReason = String(lastQa?.semanticReason || '').slice(0, 500);
   if (lastGenerated?.provider === 'kie-ai' && /^https:\/\//i.test(String(lastGenerated?.sourceUrl || ''))) { error.rejectedImageUrl = String(lastGenerated.sourceUrl); error.rejectedImageMimeType = String(lastGenerated.mimeType || 'image/jpeg'); error.rejectedProvider = 'kie-ai'; error.rejectedModel = String(lastGenerated.model || 'z-image'); error.rejectedTaskId = String(lastGenerated.taskId || ''); }
   throw error;
 }
