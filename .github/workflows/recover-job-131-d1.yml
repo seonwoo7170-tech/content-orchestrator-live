@@ -1,0 +1,52 @@
+name: recover-job-131-d1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-job-131-d1.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Mark only stale Job 131 retryable
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          node --input-type=module - <<'NODE'
+          const account=process.env.CLOUDFLARE_ACCOUNT_ID;
+          const headers={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
+          async function cf(url,init={}) { const r=await fetch(url,{...init,headers:{...headers,...(init.headers||{})}}); const d=await r.json(); if(!r.ok||d.success===false) throw new Error(`CF_${r.status}:${JSON.stringify(d.errors||[]).slice(0,300)}`); return d; }
+          const dbs=await cf(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database`);
+          const db=(dbs.result||[]).find(x=>x.name==='content-orchestrator');
+          if(!db?.uuid) throw new Error('D1_DATABASE_NOT_FOUND');
+          const url=`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db.uuid}/query`;
+          async function q(sql,params=[]){ const d=await cf(url,{method:'POST',body:JSON.stringify({sql,params})}); return (Array.isArray(d.result)?d.result[0]:d.result)||{}; }
+          const before=(await q(`SELECT id,status,retry_count,recovery_state,last_error_code,updated_at,blogger_post_id,CASE WHEN result_json IS NULL THEN 0 ELSE 1 END has_result FROM jobs WHERE id=?`,[131])).results?.[0]||null;
+          console.log('JOB131_BEFORE '+JSON.stringify(before));
+          if(!before) throw new Error('JOB131_NOT_FOUND');
+          if(before.blogger_post_id) throw new Error('JOB131_BLOGGER_ID_PRESENT_ABORT');
+          if(!['repairing','writing','critic_review','final_critic','running'].includes(String(before.status))) {
+            console.log('JOB131_NO_CHANGE status='+String(before.status));
+          } else {
+            const out=await q(`UPDATE jobs
+              SET status='failed', error='STALE_PIPELINE_EXECUTION', retry_count=retry_count+1,
+                  recovery_state='retry_wait', next_retry_at=datetime('now'), hold_reason=NULL,
+                  last_error_code='STALE_PIPELINE_EXECUTION', last_failure_at=datetime('now'), updated_at=datetime('now')
+              WHERE id=? AND archived_at IS NULL AND status=? AND datetime(updated_at) <= datetime('now','-20 minutes')`,[131,String(before.status)]);
+            console.log('JOB131_UPDATE_CHANGES '+String(out.meta?.changes||0));
+          }
+          const after=(await q(`SELECT id,status,retry_count,recovery_state,next_retry_at,last_error_code,updated_at,blogger_post_id FROM jobs WHERE id=?`,[131])).results?.[0]||null;
+          console.log('JOB131_AFTER '+JSON.stringify(after));
+          NODE
