@@ -75,7 +75,7 @@ jobs:
             '"GSC_COLLECTION_ENABLED": "true"',
             '"GA4_COLLECTION_ENABLED": "true"',
             '"ADSENSE_COLLECTION_ENABLED": "true"',
-            '"MODELSCOPE_IMAGE_ENABLED": "false"',
+            '"MODELSCOPE_IMAGE_ENABLED": "true"',
             '"KIE_IMAGE_CALLBACK_ENABLED": "false"',
             '"KIE_IMAGE_FALLBACK_ENABLED": "false"',
             '"DAILY_NEW_PER_BLOG": "2"',
