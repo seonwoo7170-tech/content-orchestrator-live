@@ -59,6 +59,13 @@ function asyncAttempts(image = {}) {
   return Math.max(0, Math.trunc(Number(image?.provider_attempt_count || 0) || 0));
 }
 
+export function modelScopeAlreadyAttempted(image = {}) {
+  const provider = normalizedProvider(image);
+  const error = String(image?.provider_error_code || image?.provider_error_message || image?.error || '').toUpperCase();
+  return (provider === 'modelscope' && asyncAttempts(image) > 0)
+    || error.includes('MODELSCOPE_ATTEMPTED');
+}
+
 export function isAmbiguousKieSubmission(image = {}) {
   const provider = normalizedProvider(image);
   const taskId = String(image?.provider_task_id || '').trim();
@@ -120,7 +127,7 @@ export function scheduledProviderModeForImage(image = {}, env = {}) {
   const attempts = asyncAttempts(image);
   const puterAttempted = Number(image?.puter_attempted || 0) === 1;
   if (!puterAttempted && puterImageConfigured(env)) return 'puter';
-  if (attempts === 0 && modelScopeImageEnabled(env)) return 'modelscope';
+  if (modelScopeImageEnabled(env) && !modelScopeAlreadyAttempted(image)) return 'modelscope';
 
   // Cloudflare Workers AI is synchronous and free-first for scheduled production.
   // Try it before creating a paid/slow KIE task. If it cannot produce an acceptable
@@ -268,7 +275,14 @@ async function runOneImage(env, jobId, image, options = {}) {
   }
 
   if (providerMode === 'modelscope' && firstOutcome?.status === 'retrying') {
-    return runCloudflareThenKie(env, jobId, image, imageOptions);
+    const fallback = await runCloudflareThenKie(env, jobId, image, imageOptions);
+    const fallbackOutcome = Array.isArray(fallback?.outcomes) ? fallback.outcomes[0] : null;
+    if (fallbackOutcome?.status === 'retrying') {
+      const error = imageFallbackFailureCode(firstOutcome, { error: `MODELSCOPE_ATTEMPTED:${fallbackOutcome.error || 'PROVIDER_ERROR'}` });
+      await markImageProviderRetry(env, image.id, error, { countAttempt: false, provider: 'modelscope' });
+      fallbackOutcome.error = error;
+    }
+    return fallback;
   }
 
   if (providerMode === 'cloudflare' && firstOutcome?.status === 'retrying') {
