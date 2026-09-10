@@ -1,0 +1,45 @@
+name: diagnose-job-131-d1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-job-131-d1.yml'
+      - '.github/diagnose-job-131-d1-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Read Job 131 only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          node --input-type=module - <<'NODE'
+          const account=process.env.CLOUDFLARE_ACCOUNT_ID;
+          const headers={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
+          async function cf(url,init={}) { const r=await fetch(url,{...init,headers:{...headers,...(init.headers||{})}}); const d=await r.json(); if(!r.ok||d.success===false) throw new Error(`CF_${r.status}:${JSON.stringify(d.errors||[]).slice(0,300)}`); return d; }
+          const dbs=await cf(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database`);
+          const db=(dbs.result||[]).find(x=>x.name==='content-orchestrator');
+          if(!db?.uuid) throw new Error('D1_DATABASE_NOT_FOUND');
+          const url=`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db.uuid}/query`;
+          async function q(sql,params=[]){ const d=await cf(url,{method:'POST',body:JSON.stringify({sql,params})}); return (Array.isArray(d.result)?d.result[0]:d.result)||{}; }
+          const job=(await q(`SELECT id,mode,blog_id,blogger_post_id,status,retry_count,recovery_state,next_retry_at,hold_reason,last_error_code,last_failure_at,updated_at,archived_at, CASE WHEN result_json IS NOT NULL AND length(result_json)>2 THEN 1 ELSE 0 END AS has_result FROM jobs WHERE id=?`,[131])).results?.[0]||null;
+          const images=(await q(`SELECT id,role,position,status,provider,provider_state,provider_task_id,attempt_count,updated_at FROM job_images WHERE job_id=? ORDER BY position,id LIMIT 10`,[131])).results||[];
+          let events=[]; try { events=(await q(`SELECT id,stage,level,message,created_at FROM job_events WHERE job_id=? ORDER BY id DESC LIMIT 12`,[131])).results||[]; } catch {}
+          let slot=[]; try { slot=(await q(`SELECT id,status,recovery_state,next_retry_at,hold_reason,last_error_code,updated_at FROM daily_plan_slots WHERE job_id=? LIMIT 3`,[131])).results||[]; } catch {}
+          console.log('JOB131 '+JSON.stringify(job));
+          console.log('JOB131_IMAGES '+JSON.stringify(images));
+          console.log('JOB131_EVENTS '+JSON.stringify(events));
+          console.log('JOB131_SLOT '+JSON.stringify(slot));
+          NODE
