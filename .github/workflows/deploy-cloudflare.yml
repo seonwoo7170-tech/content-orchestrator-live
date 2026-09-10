@@ -83,7 +83,6 @@ jobs:
             '"TREND_KEYWORDS_ENABLED": "true"',
             '"SERIAL_AI_COOLDOWN_MS": "30000"',
             '"SERIAL_AI_CHAIN_MAX_ITEMS": "4"',
-            '"IMAGE_STAGE_PACING_MS": "0"',
             '"SERIAL_IMAGE_COOLDOWN_MS": "0"',
             '"SERIAL_IMAGE_POLL_INTERVAL_MS": "3000"',
             '"SERIAL_ARTICLE_IMAGE_COOLDOWN_MS": "10000"',

@@ -12,17 +12,21 @@ const puterProvider = fs.readFileSync(new URL('../worker/lib/puter-image-provide
 
 test('active production uses Puter-first resumable durable image completion without fixed per-image cooldown', () => {
   assert.equal(config.vars.SYSTEM_PAUSED, 'false');
-  assert.equal(config.vars.IMAGE_PROVIDER_MODE, 'auto');
-  assert.equal(config.vars.PUTER_IMAGE_ENABLED, 'true');
-  assert.equal(config.vars.PUTER_IMAGE_MODELS, 'gemini-3.1-flash-lite-image,gemini-2.5-flash-image');
-  assert.equal(config.vars.PUTER_IMAGE_QUALITY, '1K');
-  assert.equal(Number(config.vars.PUTER_IMAGE_TIMEOUT_MS), 120000);
-  assert.equal(Number(config.vars.PUTER_OUTCOME_UNKNOWN_GRACE_MS), 600000);
+  assert.equal(config.vars.IMAGE_PROVIDER_MODE, undefined);
+  assert.equal(config.vars.PUTER_IMAGE_ENABLED, undefined);
+  assert.equal(config.vars.PUTER_IMAGE_MODELS, undefined);
+  assert.equal(config.vars.PUTER_IMAGE_QUALITY, undefined);
+  assert.equal(config.vars.PUTER_IMAGE_TIMEOUT_MS, undefined);
+  assert.equal(config.vars.PUTER_IMAGE_READ_TIMEOUT_MS, undefined);
+  assert.equal(config.vars.PUTER_OUTCOME_UNKNOWN_GRACE_MS, undefined);
   assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'false');
   assert.equal(config.vars.KIE_IMAGE_CALLBACK_ENABLED, 'false');
   assert.equal(config.vars.KIE_IMAGE_FALLBACK_ENABLED, 'false');
   assert.equal(config.vars.LOCAL_IMAGE_FALLBACK_ENABLED, 'false');
-  assert.equal(Number(config.vars.IMAGE_STAGE_PACING_MS), 0);
+  assert.equal(config.vars.IMAGE_STAGE_PACING_MS, undefined);
+  // Free Workers allow 64 text variables plus secrets. Reserve three slots for
+  // HUB_API_KEY, ADMIN_API_KEY, and PUTER_AUTH_TOKEN.
+  assert.ok(Object.keys(config.vars).length <= 61);
   assert.equal(Number(config.vars.IMAGE_COMPLETION_MAX_ITEMS), 1);
   assert.equal(Number(config.vars.SERIAL_IMAGE_COOLDOWN_MS), 0);
   assert.equal(Number(config.vars.SERIAL_IMAGE_POLL_INTERVAL_MS), 3000);
