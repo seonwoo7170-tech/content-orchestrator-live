@@ -129,6 +129,9 @@ async function activeAiJob(env) {
        FROM jobs
       WHERE archived_at IS NULL
         AND status IN ('writing', 'critic_review', 'repairing', 'final_critic')
+        -- A stale in-flight row must not block the recovery lane forever.
+        -- job-auto-rescue owns rows at/after the same 20 minute cutoff.
+        AND updated_at > datetime('now', '-20 minutes')
       ORDER BY updated_at, id
       LIMIT 1`
   ).first();
