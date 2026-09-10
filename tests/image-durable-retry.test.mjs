@@ -94,6 +94,14 @@ test('timed-out KIE submission without a task id is never blindly submitted agai
   } });
   assert.deepEqual(modes, ['cloudflare']);
   assert.equal(result.retrying, 1);
+  assert.equal(row().provider, 'kie-ai');
+  assert.match(row().provider_error_code, /KIE_SUBMISSION_OUTCOME_UNKNOWN/);
+
+  await generateResilient(env, 1, { callHubFn: async (_, __, payload) => {
+    modes.push(payload.providerMode);
+    throw new Error('CLOUDFLARE_AI_ACCOUNT_LIMITED');
+  } });
+  assert.deepEqual(modes, ['cloudflare', 'cloudflare']);
 });
 
 test('stored successful image never enters generation again', async (t) => {
