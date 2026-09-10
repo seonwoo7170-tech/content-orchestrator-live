@@ -48,14 +48,16 @@ jobs:
           }
           const scripts=(await cf('/workers/scripts')).result || [];
           const relevant=scripts.map(s=>s.id||s.name).filter(name=>/(orchestrator|hub|five|smile)/i.test(String(name||'')));
-          for (const name of relevant) {
+          const allPuter=[];
+          for (const name of scripts.map(s=>s.id||s.name).filter(Boolean)) {
             try {
               const settings=(await cf('/workers/scripts/'+name+'/settings')).result;
               const puter=(settings.bindings||[]).filter(b=>/PUTER/i.test(String(b.name||''))).map(b=>({name:b.name,type:b.type}));
-              if(puter.length) console.log('PUTER_SCRIPT_BINDINGS '+name+' '+JSON.stringify(puter));
+              if(puter.length) { allPuter.push({name,bindings:puter}); console.log('PUTER_SCRIPT_BINDINGS '+name+' '+JSON.stringify(puter)); }
             } catch {}
           }
           console.log('RELEVANT_WORKERS '+JSON.stringify(relevant));
+          console.log('PUTER_ALL_WORKERS '+JSON.stringify(allPuter));
           for (const environment of ['production']) {
             try {
               const settings=(await cf('/workers/services/content-orchestrator/environments/'+environment+'/settings')).result;
