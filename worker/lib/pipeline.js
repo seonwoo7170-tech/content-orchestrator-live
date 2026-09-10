@@ -3,7 +3,7 @@ import { callHub } from './api-hub.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { assertTargetedRepairPreserved, constrainTargetedRepair } from './targeted-repair-guard.js';
 
-const DEFAULT_MAX_TARGETED_REPAIRS = 3;
+const DEFAULT_MAX_TARGETED_REPAIRS = 2;
 const DEFAULT_MAX_NEW_ARTICLE_CANDIDATES = 2;
 const TARGETED_REPAIR = 'targeted_sections_only';
 const CONTINUATION_REWRITE = 'targeted_sections_rewrite';
@@ -19,7 +19,7 @@ function boundedInteger(value, fallback, min, max) {
 }
 
 function maxTargetedRepairs(env) {
-  return boundedInteger(env?.TARGETED_REPAIR_MAX_ATTEMPTS, DEFAULT_MAX_TARGETED_REPAIRS, 2, 3);
+  return boundedInteger(env?.TARGETED_REPAIR_MAX_ATTEMPTS, DEFAULT_MAX_TARGETED_REPAIRS, 2, 2);
 }
 
 function maxNewArticleCandidates(env) {
