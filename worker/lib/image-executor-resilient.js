@@ -105,6 +105,12 @@ function needsImmediateCloudflareFallback(outcome = {}) {
     || error.includes('KIE_CONTENT_REJECTED');
 }
 
+export function imageFallbackFailureCode(primary = {}, fallback = {}) {
+  const codes = [primary.error, fallback.error].flatMap(value =>
+    String(value || '').match(/\b(?:KIE|CLOUDFLARE|PUTER|MODELSCOPE)_[A-Z0-9_]+\b/g) || []);
+  return `IMAGE_FALLBACK_FAILED:${[...new Set(codes)].slice(0, 4).join(':') || 'PROVIDER_ERROR'}`.slice(0, 300);
+}
+
 async function refreshedImage(env, jobId, imageId) {
   const rows = await listJobImages(env, jobId);
   return rows.find((row) => Number(row?.id) === Number(imageId)) || null;
@@ -220,11 +226,20 @@ async function runOneImage(env, jobId, image, options = {}) {
 
     const retryBudgetExhausted = scheduledProviderModeForImage(current || image, env) === 'cloudflare';
     if (needsImmediateCloudflareFallback(firstOutcome) || retryBudgetExhausted) {
-      return generateBaseImages(
+      const fallback = await generateBaseImages(
         { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
         jobId,
         imageOptions
       );
+      const fallbackOutcome = fallback?.outcomes?.[0];
+      if (fallbackOutcome?.status === 'retrying') {
+        // The fallback writes its own error. Retain the original KIE failure too,
+        // so an authentication/credit/input problem is not hidden by a free quota error.
+        const error = imageFallbackFailureCode(firstOutcome, fallbackOutcome);
+        await markImageProviderRetry(env, image.id, error, { countAttempt: false });
+        fallbackOutcome.error = error;
+      }
+      return fallback;
     }
   }
 

@@ -72,4 +72,19 @@ test('a provider retry without any attached image yields to the next job in the 
   assert.ok(work.items.every(i=>i.retrying===1 && !i.complete));
   assert.equal(calls,2);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM job_images WHERE provider_status='retrying'").get().n,2);
+  // A KIE authentication failure followed by a free-provider quota failure must
+  // preserve both causes, without incrementing the paid attempt counter twice.
+  db.exec('UPDATE job_images SET provider_attempt_count=0');
+  env.API_HUB_SERVICE.fetch = async request => {
+    const {providerMode} = await request.json();
+    return new Response(JSON.stringify({error:providerMode==='kie'?'KIE_AUTH_FAILED':'CLOUDFLARE_AI_ACCOUNT_LIMITED'}),
+      {status:providerMode==='kie'?401:429});
+  };
+  const retried = await runScheduledImageCompletion(env,{maxJobs:2,maxImages:1,staleMinutes:0,articleCooldownMs:0,
+    automation:{global:{enabled:true,imagesEnabled:true,bodyImageCount:0},blogs:[]}});
+  assert.equal(retried.attempted,2);
+  for (const row of db.prepare('SELECT provider_error_code,provider_attempt_count FROM job_images').all()) {
+    assert.equal(row.provider_error_code,'IMAGE_FALLBACK_FAILED:KIE_AUTH_FAILED:CLOUDFLARE_AI_ACCOUNT_LIMITED');
+    assert.equal(row.provider_attempt_count,1);
+  }
 });
