@@ -9,21 +9,27 @@ test('automatic image routing is always the default', () => {
   assert.equal(imageProviderMode({ KIE_IMAGE_FALLBACK_ENABLED: 'false' }), 'auto');
 });
 
-test('automatic image routing is Puter first, then KIE, then Cloudflare', () => {
+test('base automatic image routing remains compatible for direct callers', () => {
   assert.deepEqual(imageProviderSequence('auto'), ['puter', 'kie', 'cloudflare']);
   assert.deepEqual(imageProviderSequence('puter'), ['puter']);
   assert.deepEqual(imageProviderSequence('kie'), ['kie']);
   assert.deepEqual(imageProviderSequence('cloudflare'), ['cloudflare']);
 });
 
-test('scheduled routing uses Puter once, then preserves the existing KIE retry budget', () => {
+test('scheduled routing uses Puter once, then synchronous Cloudflare before creating a KIE task', () => {
   const env = { PUTER_AUTH_TOKEN: 'test-secret', KIE_IMAGE_GENERATION_RETRY_MAX: '3', MODELSCOPE_IMAGE_ENABLED: 'false' };
   assert.equal(scheduledProviderModeForImage({ puter_attempted: 0, provider_attempt_count: 0 }, env), 'puter');
-  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 0 }, env), 'kie');
-  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 2 }, env), 'kie');
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 0 }, env), 'cloudflare');
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 2 }, env), 'cloudflare');
   assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 3 }, env), 'cloudflare');
   assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider: 'kie-ai', provider_task_id: 'kie-task', provider_status: 'generating' }, env), 'kie');
   assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider: 'puter', provider_task_id: 'puterfs:~/checkpoint.png', provider_status: 'outcome_unknown' }, env), 'puter');
+});
+
+test('scheduled routing keeps optional ModelScope ahead of Cloudflare when explicitly enabled', () => {
+  const env = { MODELSCOPE_IMAGE_ENABLED: 'true' };
+  assert.equal(scheduledProviderModeForImage({ provider_attempt_count: 0, puter_attempted: 1 }, env), 'modelscope');
+  assert.equal(scheduledProviderModeForImage({ provider: 'modelscope', provider_attempt_count: 1, puter_attempted: 1 }, env), 'cloudflare');
 });
 
 test('explicit provider mode is respected without inspecting provider secrets in the orchestrator', () => {
@@ -32,6 +38,8 @@ test('explicit provider mode is respected without inspecting provider secrets in
   assert.equal(imageProviderMode({ IMAGE_PROVIDER_MODE: 'puter' }), 'puter');
   assert.equal(imageProviderMode({ IMAGE_PROVIDER_MODE: 'kie' }), 'kie');
   assert.throws(() => imageProviderMode({ IMAGE_PROVIDER_MODE: 'unknown' }), /IMAGE_PROVIDER_MODE_INVALID/);
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1 }, { IMAGE_PROVIDER_MODE: 'kie' }), 'kie');
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1 }, { IMAGE_PROVIDER_MODE: 'cloudflare' }), 'cloudflare');
 });
 
 test('image pacing is limited to the requested 3-5 second safety window', () => {
