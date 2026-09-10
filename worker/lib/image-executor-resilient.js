@@ -21,11 +21,18 @@ export function modelScopeImageEnabled(env = {}) {
   return String(env?.MODELSCOPE_IMAGE_ENABLED || 'false').trim().toLowerCase() === 'true';
 }
 
-function orderedCandidates(rows = [], retryFailed = true) {
+function retryAge(image = {}) {
+  const value = timestampMs(image?.provider_checked_at || image?.updated_at || image?.created_at);
+  return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
+export function orderedCandidates(rows = [], retryFailed = true) {
   return rows
     .filter((row) => isResumableImageStatus(row.status, retryFailed))
     .map((row, index) => ({ row, index }))
-    .sort((a, b) => imageExecutionPriority(a.row) - imageExecutionPriority(b.row) || a.index - b.index)
+    .sort((a, b) => imageExecutionPriority(a.row) - imageExecutionPriority(b.row)
+      || retryAge(a.row) - retryAge(b.row)
+      || a.index - b.index)
     .map((item) => item.row);
 }
 
