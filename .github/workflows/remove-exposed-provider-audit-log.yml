@@ -1,0 +1,21 @@
+name: remove-exposed-provider-audit-log
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/remove-exposed-provider-audit-log.yml'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  remove-log:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete audit run containing a plaintext provider token
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh api --method DELETE "repos/$REPOSITORY/actions/runs/34502507950"
