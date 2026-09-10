@@ -38,7 +38,7 @@ jobs:
           console.log('IMAGE_DIAGNOSTICS_AFTER_RESUME',JSON.stringify(diag));
 
           const ids=[...new Set([
-            101,104,105,111,
+            101,104,105,111,133,
             ...(diag.ready||[]).filter(x=>['generating','attaching','failed'].includes(String(x.imageState||''))).map(x=>Number(x.jobId)),
             ...(diag.failures||[]).map(x=>Number(x.jobId))
           ].filter(Number.isFinite))].slice(0,12);
@@ -77,3 +77,4 @@ jobs:
 # probe: post-deploy-zero-delay-readback-2026-09-07-0255
 # probe: publication-progression-readback-2026-09-07-0302
 # probe: user-provider-secrets-2026-09-10-1650
+# probe: resume-job-133-after-kie-age-fix-2026-09-11-0234
