@@ -12,6 +12,7 @@ import { acquireRuntimeLock, releaseRuntimeLock, renewRuntimeLock } from './lib/
 const WATCHDOG_CRON = '*/3 * * * *';
 const LEGACY_MAINTENANCE_CRON = '*/5 * * * *';
 const ACTIVE_AI_STATUSES = ['writing', 'critic_review', 'repairing', 'final_critic'];
+const AI_LANE_LOCK_KEY = 'serial-ai-watchdog';
 const IMAGE_LANE_LOCK_KEY = 'serial-image-kie';
 
 function scheduledTime(event) {
@@ -343,6 +344,29 @@ async function runSerialAiWatchdog(env, ctx, eventNow) {
   };
 }
 
+async function runLockedSerialAiWatchdog(env, ctx, eventNow) {
+  const leaseTtlSeconds = positiveBounded(env?.SERIAL_AI_LEASE_TTL_SECONDS, 900, 60, 900);
+  const lease = await acquireRuntimeLock(env, AI_LANE_LOCK_KEY, { ttlSeconds: leaseTtlSeconds });
+  if (!lease.acquired) {
+    return {
+      ok: true,
+      watchdogCron: WATCHDOG_CRON,
+      stopReason: 'AI_LANE_BUSY',
+      leaseTtlSeconds,
+      durationMs: 0,
+      steps: []
+    };
+  }
+  try {
+    const summary = await runSerialAiWatchdog(env, ctx, eventNow);
+    return { ...summary, leaseTtlSeconds };
+  } finally {
+    await releaseRuntimeLock(env, lease).catch((error) =>
+      console.error('SERIAL_AI_LEASE_RELEASE_FAILED', safeScheduledError(error))
+    );
+  }
+}
+
 async function runSerialImageWatchdog(env, ctx) {
   const maxItems = positiveBounded(env?.SERIAL_IMAGE_CHAIN_MAX_ITEMS, 8, 1, 8);
   const leaseTtlSeconds = positiveBounded(env?.SERIAL_IMAGE_LEASE_TTL_SECONDS, 210, 60, 900);
@@ -409,7 +433,7 @@ export default {
     if (event?.cron !== WATCHDOG_CRON) return;
 
     const [aiSummary, imageSummary] = await Promise.all([
-      runSerialAiWatchdog(env, ctx, scheduledTime(event)),
+      runLockedSerialAiWatchdog(env, ctx, scheduledTime(event)),
       runSerialImageWatchdog(env, ctx)
     ]);
     console.log('SERIAL_AI_WATCHDOG', JSON.stringify(aiSummary));
