@@ -2,8 +2,10 @@ import { adminApi, isAdminConnected } from './admin-session.js';
 
 const jobList = document.querySelector('#job-list');
 const cursors = new Map();
-const timers = new Map();
 const startedAt = new Map();
+const jobMeta = new Map();
+const openJobs = new Set();
+let pollTimer = null;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -45,19 +47,26 @@ function elapsedText(ms) {
   return minutes ? `${minutes}분 ${seconds % 60}초` : `${seconds}초`;
 }
 
-function updateMeta(panel, events) {
+function rememberEvent(event) {
+  const jobId = Number(event.job_id);
+  const current = jobMeta.get(jobId) || { repair: 0, maxRepair: 2, stage: '대기' };
+  if (event?.meta?.repairAttempt !== undefined) current.repair = Number(event.meta.repairAttempt) || current.repair;
+  if (event?.meta?.maxRepairAttempts !== undefined) current.maxRepair = Number(event.meta.maxRepairAttempts) || current.maxRepair;
+  if (/부분보완/.test(String(event.message || '')) && event?.meta?.repairAttempt === undefined) current.repair += 1;
+  if (event.stage) current.stage = event.stage;
+  jobMeta.set(jobId, current);
+  if (!startedAt.has(jobId)) {
+    const when = new Date(event.created_at).getTime();
+    if (Number.isFinite(when)) startedAt.set(jobId, when);
+  }
+}
+
+function updateMeta(panel, jobId) {
   const meta = panel.querySelector('.job-live-log-meta');
   if (!meta) return;
-  const all = [...panel.querySelectorAll('.job-live-log-list li[data-event-id]')];
-  const last = events?.length ? events[events.length - 1] : null;
-  const repairRows = all.filter((node) => /부분보완/.test(node.textContent || ''));
-  const repair = last?.meta?.repairAttempt ?? repairRows.length;
-  const maxRepair = last?.meta?.maxRepairAttempts ?? 2;
-  const stage = last?.stage || panel.dataset.lastStage || '대기';
-  if (last?.stage) panel.dataset.lastStage = last.stage;
-  const jobId = Number(panel.dataset.jobLog);
+  const state = jobMeta.get(jobId) || { repair: 0, maxRepair: 2, stage: '대기' };
   const start = startedAt.get(jobId) || Date.now();
-  meta.innerHTML = `<span>현재 ${escapeHtml(stage)}</span><span>Repair ${escapeHtml(repair)}/${escapeHtml(maxRepair)}</span><span data-elapsed>경과 ${elapsedText(Date.now() - start)}</span>`;
+  meta.innerHTML = `<span>현재 ${escapeHtml(state.stage)}</span><span>Repair ${escapeHtml(state.repair)}/${escapeHtml(state.maxRepair)}</span><span data-elapsed>경과 ${elapsedText(Date.now() - start)}</span>`;
 }
 
 function appendEvents(panel, events) {
@@ -65,24 +74,21 @@ function appendEvents(panel, events) {
   if (!list) return;
   list.querySelector('.job-live-log-empty')?.remove();
   for (const event of events) {
+    rememberEvent(event);
     if (list.querySelector(`[data-event-id="${Number(event.id)}"]`)) continue;
     const row = document.createElement('li');
     row.dataset.eventId = String(event.id);
     const level = ['success','warn','error'].includes(String(event.level)) ? event.level : 'info';
     row.innerHTML = `<time>[${escapeHtml(timeText(event.created_at))}]</time><span class="log-${level}">#${escapeHtml(event.job_id)} ${escapeHtml(event.message)}</span>`;
     list.appendChild(row);
-    const jobId = Number(event.job_id);
-    if (!startedAt.has(jobId)) {
-      const when = new Date(event.created_at).getTime();
-      if (Number.isFinite(when)) startedAt.set(jobId, when);
-    }
   }
   if (events.length) list.scrollTop = list.scrollHeight;
-  updateMeta(panel, events);
+  updateMeta(panel, Number(panel.dataset.jobLog));
 }
 
-async function refreshPanel(jobId, panel) {
-  if (!isAdminConnected() || panel.hidden || panel.dataset.loading === 'true') return;
+async function refreshJob(jobId) {
+  const panel = jobList?.querySelector(`[data-job-log="${jobId}"]`);
+  if (!panel || panel.hidden || !isAdminConnected() || panel.dataset.loading === 'true') return;
   panel.dataset.loading = 'true';
   try {
     const after = cursors.get(jobId) || 0;
@@ -100,29 +106,32 @@ async function refreshPanel(jobId, panel) {
   }
 }
 
-function stopPolling(jobId) {
-  const timer = timers.get(jobId);
-  if (timer) clearInterval(timer);
-  timers.delete(jobId);
+function refreshOpenJobs() {
+  if (document.hidden) return;
+  for (const jobId of openJobs) void refreshJob(jobId);
 }
 
-function startPolling(jobId, panel) {
-  stopPolling(jobId);
-  void refreshPanel(jobId, panel);
-  timers.set(jobId, setInterval(() => {
-    if (!document.hidden && !panel.hidden) void refreshPanel(jobId, panel);
-  }, 5000));
+function ensurePolling() {
+  if (pollTimer || !openJobs.size) return;
+  pollTimer = setInterval(refreshOpenJobs, 5000);
+}
+
+function stopPollingIfIdle() {
+  if (openJobs.size || !pollTimer) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
 }
 
 function buildPanel(jobId) {
   const panel = document.createElement('section');
   panel.className = 'job-live-log';
   panel.dataset.jobLog = String(jobId);
-  panel.hidden = true;
+  panel.hidden = !openJobs.has(jobId);
   panel.innerHTML = `
     <div class="job-live-log-head"><strong>상세 진행 로그 · #${jobId}</strong><span data-log-state>연결 대기</span></div>
     <div class="job-live-log-meta"><span>현재 대기</span><span>Repair 0/2</span><span data-elapsed>경과 0초</span></div>
     <ul class="job-live-log-list"><li class="job-live-log-empty">기록된 진행 로그를 불러옵니다.</li></ul>`;
+  updateMeta(panel, jobId);
   return panel;
 }
 
@@ -137,14 +146,16 @@ function enhanceCard(card) {
   button.className = 'button small ghost card-action job-log-action';
   button.dataset.action = 'job-live-log';
   button.dataset.jobId = String(jobId);
-  button.textContent = '상세 로그';
+  button.textContent = openJobs.has(jobId) ? '로그 닫기' : '상세 로그';
   actions.appendChild(button);
   const panel = buildPanel(jobId);
   card.appendChild(panel);
+  if (openJobs.has(jobId)) void refreshJob(jobId);
 }
 
 function enhanceAll() {
   jobList?.querySelectorAll('.job-row').forEach(enhanceCard);
+  ensurePolling();
 }
 
 jobList?.addEventListener('click', (event) => {
@@ -157,26 +168,27 @@ jobList?.addEventListener('click', (event) => {
   const card = button.closest('.job-row');
   const panel = card?.querySelector(`[data-job-log="${jobId}"]`);
   if (!panel || !Number.isInteger(jobId)) return;
-  panel.hidden = !panel.hidden;
-  button.textContent = panel.hidden ? '상세 로그' : '로그 닫기';
-  if (panel.hidden) stopPolling(jobId);
-  else startPolling(jobId, panel);
+  if (openJobs.has(jobId)) {
+    openJobs.delete(jobId);
+    panel.hidden = true;
+    button.textContent = '상세 로그';
+    stopPollingIfIdle();
+  } else {
+    openJobs.add(jobId);
+    panel.hidden = false;
+    button.textContent = '로그 닫기';
+    void refreshJob(jobId);
+    ensurePolling();
+  }
 }, true);
 
 window.addEventListener('orchestrator:jobs-changed', () => {
   enhanceAll();
-  for (const [jobId] of timers) {
-    const panel = jobList?.querySelector(`[data-job-log="${jobId}"]`);
-    if (panel && !panel.hidden) void refreshPanel(jobId, panel);
-  }
+  refreshOpenJobs();
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) return;
-  for (const [jobId] of timers) {
-    const panel = jobList?.querySelector(`[data-job-log="${jobId}"]`);
-    if (panel && !panel.hidden) void refreshPanel(jobId, panel);
-  }
+  if (!document.hidden) refreshOpenJobs();
 });
 
 if (jobList) {
