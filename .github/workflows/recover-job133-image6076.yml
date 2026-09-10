@@ -1,0 +1,76 @@
+name: recover-job133-image6076
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/recover-job133-image6076.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Restore already-paid KIE task checkpoint for image 6076
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID missing'; exit 1; }
+          node <<'NODE'
+          const {execFileSync}=require('node:child_process');
+          const db='content-orchestrator';
+          function q(sql){
+            const out=execFileSync('npx',['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'],{encoding:'utf8',env:process.env,maxBuffer:10*1024*1024});
+            const x=JSON.parse(out); return (Array.isArray(x)?x:[x]).flatMap(g=>Array.isArray(g?.results)?g.results:[]);
+          }
+          const before=q("SELECT id,job_id,status,provider,provider_task_id,provider_status,provider_attempt_count,provider_checked_at,public_url FROM job_images WHERE id=6076 AND job_id=133");
+          console.log('BEFORE',JSON.stringify(before));
+          if(before.length!==1) throw new Error('IMAGE_6076_NOT_FOUND');
+          const row=before[0];
+          if(row.public_url || row.status==='attached' || row.status==='stored') {
+            console.log('ALREADY_RECOVERED_OR_COMPLETE'); process.exit(0);
+          }
+          if(row.provider_task_id) {
+            console.log('ACTIVE_TASK_ALREADY_PRESENT_NO_CHANGE'); process.exit(0);
+          }
+          // This exact task was already submitted and persisted at 16:30:56 UTC, then
+          // incorrectly abandoned four seconds later by the pre-fix row-age bug.
+          // Restoring it does NOT submit or charge for a new KIE generation.
+          const task='73d2389fe55ba64f90db3a36935f2846';
+          q(`UPDATE job_images
+               SET provider='kie-ai', provider_task_id='${task}', provider_status='waiting',
+                   provider_error_code=NULL, provider_error_message=NULL, error=NULL,
+                   provider_checked_at='2026-09-10 16:30:56', updated_at=datetime('now')
+             WHERE id=6076 AND job_id=133 AND status='planned' AND provider_task_id IS NULL AND public_url IS NULL`);
+          const after=q("SELECT id,job_id,status,provider,provider_task_id,provider_status,provider_attempt_count,provider_checked_at,public_url FROM job_images WHERE id=6076 AND job_id=133");
+          console.log('AFTER_RESTORE',JSON.stringify(after));
+          if(after[0]?.provider_task_id!==task) throw new Error('KIE_TASK_RESTORE_FAILED');
+          NODE
+
+      - name: Wait for next image watchdog tick
+        run: sleep 205
+
+      - name: Read back image 6076 and job 133
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const {execFileSync}=require('node:child_process');
+          const db='content-orchestrator';
+          function q(sql){
+            const out=execFileSync('npx',['--yes','wrangler@latest','d1','execute',db,'--remote','--command',sql,'--json'],{encoding:'utf8',env:process.env,maxBuffer:10*1024*1024});
+            const x=JSON.parse(out); return (Array.isArray(x)?x:[x]).flatMap(g=>Array.isArray(g?.results)?g.results:[]);
+          }
+          console.log('IMAGE6076',JSON.stringify(q("SELECT id,status,provider,provider_task_id,provider_status,provider_attempt_count,provider_error_code,provider_checked_at,updated_at,public_url FROM job_images WHERE id=6076 AND job_id=133")));
+          console.log('JOB133',JSON.stringify(q("SELECT id,status,updated_at,json_extract(result_json,'$.imagePipeline.complete') AS image_complete,json_extract(result_json,'$.imagePipeline.currentCount') AS current_count FROM jobs WHERE id=133")));
+          console.log('LATEST_EVENTS',JSON.stringify(q("SELECT id,level,event_type,message,created_at FROM job_events WHERE job_id=133 AND message LIKE '%6076%' ORDER BY id DESC LIMIT 8")));
+          NODE
