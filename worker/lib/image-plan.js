@@ -48,6 +48,11 @@ function extractH2s(html) {
   return headings;
 }
 
+function abstractVisualHeading(value) {
+  const text = cleanText(value).toLowerCase();
+  return /^(direct answer|quick answer|overview|summary|introduction|conclusion|final thoughts|reader questions?|faq|frequently asked|common mistakes?|decision criteria|key takeaways?|what to know)|^(핵심 답변|빠른 답변|요약|개요|서론|결론|자주 묻는 질문|독자 질문|흔한 실수|판단 기준|핵심 정리)/i.test(text);
+}
+
 function normalizeBodyCount(value) {
   if (value === undefined || value === null || value === '') return 2;
   const count = Number(value);
@@ -101,18 +106,23 @@ export function buildThumbnailHook(article) {
   return '핵심부터 확인';
 }
 
+function topicDominance(concept) {
+  return `The physical subject represented by ${concept} must be clearly visible and remain the dominant visual focus. Use task-focused documentary framing. When a person is useful, show hands or forearms actively performing the relevant task while the physical subject remains dominant, rather than a posed portrait.`;
+}
+
 function thumbnailScene(concept) {
-  return `Photorealistic real-world photograph focused on ${concept}. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic. One clear focal subject, natural lighting, realistic materials, uncluttered composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present. Wide landscape framing with comfortable open space around the focal subject.`;
+  return `Photorealistic real-world photograph focused on ${concept}. ${topicDominance(concept)} Depict tangible objects, tools, materials, fixtures, devices, and surroundings appropriate to the exact topic. One clear focal subject, natural lighting, realistic materials, uncluttered composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present. Wide landscape framing with comfortable open space around the focal subject.`;
 }
 
 function bodyScene(sectionConcept, topicConcept) {
-  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}. Depict relevant people, objects, tools, devices, materials, and surroundings at a useful close-to-medium distance. Natural lighting, realistic materials, one clear focal subject, clean composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present.`;
+  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}. ${topicDominance(topicConcept)} Show a concrete action, condition, material, fixture, tool interaction, or before-work detail that directly explains this section. Natural lighting, realistic materials, useful close-to-medium distance, one clear focal subject, clean composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present.`;
 }
 
 export function buildImagePlan(article, options = {}) {
   const { title, topic } = articleIdentity(article);
   const bodyCount = normalizeBodyCount(options.bodyCount);
   const headings = extractH2s(article.html);
+  const visualHeadings = headings.filter((heading) => !abstractVisualHeading(heading));
   const topicConcept = visualConcept(topic) || visualConcept(title) || 'a practical everyday subject';
   const images = [
     {
@@ -125,7 +135,7 @@ export function buildImagePlan(article, options = {}) {
   ];
 
   for (let index = 0; index < bodyCount; index += 1) {
-    const section = headings[index] || topic;
+    const section = visualHeadings[index] || headings[index] || topic;
     const sectionConcept = visualConcept(section) || topicConcept;
     images.push({
       role: 'body',
