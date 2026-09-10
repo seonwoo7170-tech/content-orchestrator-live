@@ -97,7 +97,10 @@ export function isStaleKieActiveTask(image = {}, env = {}, nowMs = Date.now()) {
   // is a conservative lower bound for legacy task age even though old rows predate the
   // provider_task_id columns. A task must still be active after a final poll before this
   // stale guard is allowed to retire it.
-  const startedAt = timestampMs(image?.created_at);
+  // provider_checked_at is written when a task id is first persisted and on every
+  // subsequent poll. An old image row can receive a brand-new KIE task, so created_at
+  // is only a legacy fallback when no provider timestamp exists.
+  const startedAt = timestampMs(image?.provider_checked_at || image?.created_at);
   if (!Number.isFinite(startedAt)) return false;
   return Math.max(0, Number(nowMs) - startedAt) >= kieActiveTaskStaleMs(env);
 }
@@ -302,7 +305,11 @@ async function runOneImage(env, jobId, image, options = {}) {
     // it is active after that query; a success checkpoint must always win instead.
     const current = await refreshedImage(env, jobId, image.id);
     if (isSuccessfulPaidImageCheckpoint(current || image)) return first;
-    if (isStaleKieActiveTask(current || image, env)) {
+    const refreshed = current || image;
+    const stillActive = String(refreshed?.provider_task_id || '').trim() === String(image?.provider_task_id || '').trim()
+      && ['kie', 'kie-ai'].includes(normalizedProvider(refreshed))
+      && ACTIVE_PROVIDER_STATES.has(String(refreshed?.provider_status || '').trim().toLowerCase());
+    if (stillActive) {
       return recoverStaleKieTask(env, jobId, current || image, imageOptions);
     }
   }
