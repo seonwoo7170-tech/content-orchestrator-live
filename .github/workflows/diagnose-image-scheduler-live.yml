@@ -44,11 +44,11 @@ jobs:
             ORDER BY CASE WHEN has_active_provider_task=1 THEN 0 WHEN has_failed_images=1 AND image_activity_at <= datetime('now','-10 minutes') THEN 1 WHEN has_failed_images=0 THEN 2 ELSE 3 END,
               CASE WHEN has_active_provider_task=1 THEN active_provider_checked_at WHEN has_failed_images=1 THEN image_activity_at ELSE j.updated_at END,
               j.id LIMIT 48`;
-          try { console.log('EXACT_CANDIDATES',JSON.stringify(q(sql))); }
-          catch(e){ console.error('EXACT_QUERY_FAILED',String(e?.message||e)); process.exitCode=2; }
+          console.log('EXACT_CANDIDATES',JSON.stringify(q(sql)));
           console.log('ACTIVE_IMAGE_ROWS',JSON.stringify(q(`SELECT id,job_id,role,position,status,provider,provider_task_id,provider_status,provider_checked_at,updated_at FROM job_images WHERE provider_task_id IS NOT NULL AND provider_status IN ${active} ORDER BY COALESCE(provider_checked_at,updated_at),job_id LIMIT 30`)));
           console.log('JOB133',JSON.stringify(q("SELECT id,status,mode,blog_id,updated_at,json_extract(result_json,'$.imagePipeline.complete') AS image_complete,json_extract(result_json,'$.imagePipeline.currentCount') AS current_count FROM jobs WHERE id=133")));
-          console.log('JOB133_IMAGES',JSON.stringify(q("SELECT id,role,position,status,provider,provider_task_id,provider_status,provider_attempt_count,provider_error_code,provider_checked_at,created_at,updated_at,public_url FROM job_images WHERE job_id=133 ORDER BY position,id")));
+          console.log('JOB133_IMAGES',JSON.stringify(q("SELECT id,role,position,status,provider,provider_task_id,provider_status,provider_attempt_count,provider_error_code,provider_error_message,provider_checked_at,puter_attempted,created_at,updated_at,public_url FROM job_images WHERE job_id=133 ORDER BY position,id")));
+          console.log('IMAGE6076_EVENTS',JSON.stringify(q("SELECT id,level,event_type,stage,message,meta_json,created_at FROM job_events WHERE job_id=133 AND (message LIKE '%6076%' OR meta_json LIKE '%6076%') ORDER BY id DESC LIMIT 40")));
           console.log('LOCKS',JSON.stringify(q("SELECT lock_key,expires_at,updated_at FROM runtime_locks WHERE lock_key LIKE '%image%'")));
           console.log('NOW',JSON.stringify(q("SELECT datetime('now') utc_now")));
           NODE
