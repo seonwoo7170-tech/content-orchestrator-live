@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { generatePlannedImages, imageExecutionPriority, retryPromptForImage } from '../worker/lib/image-executor.js';
-import { generatePlannedImages as generateResilient, isSuccessfulPaidImageCheckpoint } from '../worker/lib/image-executor-resilient.js';
+import { generatePlannedImages as generateResilient, isAmbiguousKieSubmission, isSuccessfulPaidImageCheckpoint } from '../worker/lib/image-executor-resilient.js';
 import { handleKieImageCallback } from '../worker/lib/kie-image-callback.js';
 
 function fixture(t, active = false) {
@@ -80,6 +80,20 @@ test('successful KIE checkpoint without task id is protected instead of generati
   assert.equal(result.outcomes[0].error, 'KIE_SUCCESS_CHECKPOINT_TASK_ID_MISSING_NO_REGEN');
   assert.equal(row().status, 'generated');
   assert.equal(row().provider_status, 'success');
+});
+
+test('timed-out KIE submission without a task id is never blindly submitted again', async (t) => {
+  const { env, db, row } = fixture(t);
+  env.IMAGE_PROVIDER_MODE = 'auto';
+  db.exec("UPDATE job_images SET provider='kie-ai', provider_task_id=NULL, provider_status='retrying', provider_attempt_count=1, provider_error_code='IMAGE_PROVIDER_CHAIN_RETRY:API_HUB_TIMEOUT:API_HUB_TIMEOUT'");
+  assert.equal(isAmbiguousKieSubmission(row()), true);
+  const modes = [];
+  const result = await generateResilient(env, 1, { callHubFn: async (_, __, payload) => {
+    modes.push(payload.providerMode);
+    throw new Error('CLOUDFLARE_AI_ACCOUNT_LIMITED');
+  } });
+  assert.deepEqual(modes, ['cloudflare']);
+  assert.equal(result.retrying, 1);
 });
 
 test('stored successful image never enters generation again', async (t) => {
