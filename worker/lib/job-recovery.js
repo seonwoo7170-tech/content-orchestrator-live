@@ -82,7 +82,8 @@ export function classifyFailureCode(input) {
     || code.includes('DAILY_QUOTA');
   if (quota) return { code, classification: 'quota' };
 
-  const transient = code === 'FETCH_FAILED'
+  const transient = code === 'JOB_EXECUTION_ALREADY_CLAIMED'
+    || code === 'FETCH_FAILED'
     || code === 'NETWORK_ERROR'
     || code === 'ECONNRESET'
     || code === 'ETIMEDOUT'
