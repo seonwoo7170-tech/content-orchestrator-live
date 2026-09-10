@@ -31,6 +31,7 @@ jobs:
           for (const worker of ['content-orchestrator','api-hub-v2']) {
             const settings=(await cf('/workers/scripts/'+worker+'/settings')).result;
             console.log('BINDINGS '+worker+' '+JSON.stringify((settings.bindings||[]).filter(b=>b.type==='service').map(b=>({name:b.name,service:b.service,environment:b.environment,entrypoint:b.entrypoint}))));
+            console.log('PUTER_TOKEN_PRESENT '+worker+' '+(settings.bindings||[]).some(b=>b.type==='secret_text' && b.name==='PUTER_AUTH_TOKEN'));
             console.log('LIMITS '+worker+' '+JSON.stringify(settings.limits||{}));
             const health=await fetch('https://'+worker+'.smileseon.workers.dev/health');
             console.log('HEALTH '+worker+' '+health.status+' '+(await health.text()).slice(0,10000));
