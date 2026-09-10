@@ -26,16 +26,18 @@ test('failed image work remains retryable within a bounded article batch', () =>
   assert.match(source, /Math\.max\(3, Math\.min\(60, Number\(options\.failedRetryCooldownMinutes \?\? 10\)/);
 });
 
-test('scheduled image lane polls fresh work quickly but rotates already-active work without head-of-line blocking', () => {
+test('scheduled image lane polls fresh work quickly, rotates old active tasks, and continues same-article images without a cron gap', () => {
   assert.match(source, /SERIAL_IMAGE_POLL_INTERVAL_MS/);
   assert.match(source, /SERIAL_ARTICLE_IMAGE_COOLDOWN_MS/);
   assert.match(source, /storedBeforeGeneration/);
   assert.match(source, /maxImages:\s*positiveLimit\(options\.maxImages, 1, 3\)/);
-  assert.match(source, /const resumedActiveTask = Number\(candidate\?\.has_active_provider_task \|\| 0\) === 1/);
+  assert.match(source, /let resumedActiveTask = Number\(candidate\?\.has_active_provider_task \|\| 0\) === 1/);
   assert.match(source, /if \(Number\(item\?\.pending \|\| 0\) > 0\) \{/);
   assert.match(source, /AWAITING_KIE_CALLBACK/);
   assert.match(source, /AWAITING_PROVIDER_REPOLL/);
   assert.match(source, /await sleep\(pollIntervalMs\)/);
+  assert.match(source, /resumedActiveTask = false/);
+  assert.match(source, /IMAGE_CONTINUE_NEXT_TICK/);
   assert.match(source, /if \(!item\?\.complete && !rotateIncomplete\) break/);
   assert.match(source, /if \(rotateIncomplete\) continue/);
   assert.match(source, /await sleep\(articleCooldownMs\)/);
