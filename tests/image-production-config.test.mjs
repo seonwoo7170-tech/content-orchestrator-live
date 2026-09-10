@@ -19,7 +19,7 @@ test('active production uses Puter-first resumable durable image completion with
   assert.equal(config.vars.PUTER_IMAGE_TIMEOUT_MS, undefined);
   assert.equal(config.vars.PUTER_IMAGE_READ_TIMEOUT_MS, undefined);
   assert.equal(config.vars.PUTER_OUTCOME_UNKNOWN_GRACE_MS, undefined);
-  assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'false');
+  assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'true');
   assert.equal(config.vars.KIE_IMAGE_CALLBACK_ENABLED, 'false');
   assert.equal(config.vars.KIE_IMAGE_FALLBACK_ENABLED, 'false');
   assert.equal(config.vars.LOCAL_IMAGE_FALLBACK_ENABLED, 'false');
