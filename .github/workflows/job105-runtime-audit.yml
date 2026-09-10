@@ -39,6 +39,8 @@ jobs:
           async function q(sql,params=[]){const d=await cf(`/d1/database/${db.uuid}/query`,{method:'POST',body:JSON.stringify({sql,params})});const x=Array.isArray(d.result)?d.result[0]:d.result;return {rows:x?.results||[],meta:x?.meta||{}};}
           const {listReadyImageCandidates}=await import('./worker/lib/image-completion.js');
           const candidates=await listReadyImageCandidates({ORCHESTRATOR_DB:{prepare(sql){return {bind(...params){return {async all(){return {results:(await q(sql,params)).rows};}};}};}}},{maxJobs:8,staleMinutes:0});
+          console.log('READY_SHAPES '+JSON.stringify(candidates.map(r=>{let v;try{v=JSON.parse(r.result_json);}catch{}return {id:r.job_id,mode:r.mode,status:v?.status,article:!!v?.article,imageComplete:v?.imagePipeline?.complete};})));
+          console.log('CANDIDATE_IMAGES '+JSON.stringify(await q("SELECT job_id,id,status,provider,provider_status,provider_error_code,updated_at FROM job_images WHERE job_id IN (127,128,129,96,98,95,100,114,115,116,117) ORDER BY job_id,position")));
           console.log('CANDIDATES '+JSON.stringify(candidates.map(r=>({id:r.job_id,updated:r.updated_at,failed:r.has_failed_images,active:r.has_active_provider_task,checked:r.active_provider_checked_at}))));
           console.log('SETTINGS105 '+JSON.stringify(await q(`SELECT scope_key,inherit_global,json_extract(settings_json,'$.enabled') AS enabled,json_extract(settings_json,'$.imagesEnabled') AS images_enabled FROM automation_settings WHERE scope_key='global' OR blog_id=(SELECT blog_id FROM jobs WHERE id=105)`)));
           console.log('SCHEMA '+JSON.stringify((await q('PRAGMA table_info(job_images)')).rows.map(r=>r.name)));
