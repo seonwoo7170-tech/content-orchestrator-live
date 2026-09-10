@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('3-minute watchdog runs a leased Puter-first image lane without fixed serial pacing', async () => {
+test('3-minute watchdog runs leased AI and Puter-first image lanes without fixed serial pacing', async () => {
   const [entry, lock, migration] = await Promise.all([
     readFile(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8'),
     readFile(new URL('../worker/lib/runtime-lock.js', import.meta.url), 'utf8'),
@@ -19,9 +19,12 @@ test('3-minute watchdog runs a leased Puter-first image lane without fixed seria
   assert.match(entry, /acquireRuntimeLock/);
   assert.match(entry, /renewRuntimeLock/);
   assert.match(entry, /releaseRuntimeLock/);
+  assert.match(entry, /AI_LANE_LOCK_KEY = 'serial-ai-watchdog'/);
+  assert.match(entry, /runLockedSerialAiWatchdog/);
+  assert.match(entry, /AI_LANE_BUSY/);
   assert.match(entry, /IMAGE_LANE_BUSY/);
   assert.match(entry, /SERIAL_IMAGE_WATCHDOG/);
-  assert.match(entry, /Promise\.all\(\[\s*runSerialAiWatchdog[\s\S]*runSerialImageWatchdog/);
+  assert.match(entry, /Promise\.all\(\[\s*runLockedSerialAiWatchdog[\s\S]*runSerialImageWatchdog/);
   assert.match(lock, /ON CONFLICT\(lock_key\) DO UPDATE/);
   assert.match(lock, /runtime_locks\.expires_at <= \?/);
   assert.match(lock, /owner_token = \?/);
