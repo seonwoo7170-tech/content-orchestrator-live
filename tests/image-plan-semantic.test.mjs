@@ -17,8 +17,8 @@ test('body image planning skips abstract headings and keeps the repair target vi
   }, { bodyCount: 2 });
 
   assert.equal(plan.images.length, 3);
-  assert.match(plan.images[1].prompt, /removing the damaged transition strip/i);
-  assert.match(plan.images[2].prompt, /fitting the replacement threshold/i);
+  assert.match(plan.images[1].prompt, /removing damaged transition strip/i);
+  assert.match(plan.images[2].prompt, /fitting replacement threshold/i);
   assert.doesNotMatch(plan.images[1].prompt, /direct answer/i);
   assert.doesNotMatch(plan.images[2].prompt, /decision criteria/i);
   assert.match(plan.images[1].prompt, /dominant visual focus/i);
