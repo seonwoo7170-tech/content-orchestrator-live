@@ -103,29 +103,9 @@ export function safePromptForKie(value) {
   const prompt = String(value || '').replace(/\s+/g, ' ').trim();
   if (!prompt) return prompt;
 
-  const commonSafety = 'Photorealistic real-world image. Use plain unbranded objects and surfaces. No visible text, letters, numbers, logos, icons, UI, packaging, labels, documents, signs, or watermarks.';
-  const monitorTopic = /(모니터|화면\s*깜빡|monitor|display|screen\s*flicker)/i.test(prompt);
-  const cableTopic = /(케이블|물리적\s*연결|연결\s*상태|cable|connector|connection|port)/i.test(prompt);
-  const computerHardwareTopic = /(desktop computer case|computer cooling fan|cooling fan housing|open unbranded desktop|metal desktop case|sleeved cable)/i.test(prompt);
-  const tightRecovery = /(extreme tight close-up|minimum physical elements|completely out of frame)/i.test(prompt);
-  const closeRecovery = /(close-up view|person.?s hands checking|exposed circuit boards are minimized)/i.test(prompt);
-
-  if (computerHardwareTopic) {
-    if (tightRecovery) {
-      return `A photorealistic macro editorial photograph of a plain matte black metal desktop computer ventilation grille being gently brushed clean. Show only a small section of the regular round ventilation holes, soft gray brush bristles, and two fingertips. No internal computer components, ports, cables, screws, screens, keyboards, stickers, labels, or decorative details are visible. Broad uniform black surfaces, simple geometry, soft natural side light, shallow depth of field. ${commonSafety}`;
-    }
-    if (closeRecovery) {
-      return `A photorealistic close editorial photograph of the smooth matte black exterior side panel of an unbranded desktop computer case on a clean workbench. One simple rectangular ventilation grille is being cleaned with a soft gray brush held by a hand. Keep all ports, cables, internal components, monitors, keyboards, stickers, labels, and documents out of frame. Broad uniform surfaces, minimal objects, soft natural daylight. ${commonSafety}`;
-    }
-    return `A photorealistic editorial photograph of a plain matte black unbranded desktop computer side panel resting on a clean wooden workbench. A hand uses a soft gray cleaning brush on one simple ventilation grille. Only the smooth case panel, regular ventilation holes, brush, and hand are visible. No ports, cables, internal components, screens, keyboards, stickers, labels, packaging, or documents. Soft natural daylight and a simple uncluttered composition. ${commonSafety}`;
-  }
-
-  if (monitorTopic && cableTopic) {
-    return `${prompt}. Show the relevant monitor and cable connection clearly in a realistic clean setting. Keep any screen blank or out of frame. ${commonSafety}`;
-  }
-  if (monitorTopic) {
-    return `${prompt}. Show a realistic desktop monitor with a blank featureless screen in a clean real-world setting. ${commonSafety}`;
-  }
+  // Preserve the planner's subject and action. Safety shaping may suppress text-bearing
+  // details, but must never replace the requested scene with a generic recovery scene.
+  const commonSafety = 'Preserve the exact subject, action, problem context, objects, and scene requested above. Photorealistic real-world image. Use plain unbranded objects and surfaces. If a screen is visible, keep it blank or featureless unless the requested concept absolutely requires a screen; never invent UI. No visible text, letters, numbers, logos, icons, UI, packaging, labels, documents, signs, or watermarks. Do not substitute a different troubleshooting action, component, or generic cleaning scene.';
   return `${prompt}. ${commonSafety}`;
 }
 
