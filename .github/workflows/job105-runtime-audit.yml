@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 5
     environment: production
     env:
+      PUTER_AUTH_TOKEN: ${{ secrets.PUTER_AUTH_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
@@ -25,6 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           node - <<'NODE'
+          console.log('GITHUB_PUTER_TOKEN_PRESENT '+Boolean(process.env.PUTER_AUTH_TOKEN));
           const account=process.env.CLOUDFLARE_ACCOUNT_ID;
           const headers={authorization:`Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,'content-type':'application/json'};
           async function cf(path,init={}){const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}${path}`,{...init,headers});const d=await r.json();if(!r.ok||d.success===false)throw new Error(`${path}:${r.status}:${JSON.stringify(d.errors||d).slice(0,500)}`);return d;}
@@ -41,6 +43,7 @@ jobs:
           const {listReadyImageCandidates}=await import('./worker/lib/image-completion.js');
           const candidates=await listReadyImageCandidates({ORCHESTRATOR_DB:{prepare(sql){return {bind(...params){return {async all(){return {results:(await q(sql,params)).rows};}};}};}}},{maxJobs:8,staleMinutes:0});
           console.log('READY_SHAPES '+JSON.stringify(candidates.map(r=>{let v;try{v=JSON.parse(r.result_json);}catch{}return {id:r.job_id,mode:r.mode,status:v?.status,article:!!v?.article,imageComplete:v?.imagePipeline?.complete};})));
+          console.log('PRESERVED_FAILURES '+JSON.stringify(await q("SELECT job_id,id,provider_error_code,updated_at FROM job_images WHERE provider_error_code LIKE 'IMAGE_FALLBACK_FAILED:%' ORDER BY datetime(updated_at) DESC LIMIT 8")));
           console.log('CANDIDATE_IMAGES '+JSON.stringify(await q("SELECT job_id,id,status,provider,provider_status,provider_error_code,updated_at FROM job_images WHERE job_id IN (127,128,129,96,98,95,100,114,115,116,117) ORDER BY job_id,position")));
           console.log('CANDIDATES '+JSON.stringify(candidates.map(r=>({id:r.job_id,updated:r.updated_at,failed:r.has_failed_images,active:r.has_active_provider_task,checked:r.active_provider_checked_at}))));
           console.log('SETTINGS105 '+JSON.stringify(await q(`SELECT scope_key,inherit_global,json_extract(settings_json,'$.enabled') AS enabled,json_extract(settings_json,'$.imagesEnabled') AS images_enabled FROM automation_settings WHERE scope_key='global' OR blog_id=(SELECT blog_id FROM jobs WHERE id=105)`)));
