@@ -3,6 +3,7 @@ import { listJobImages, markImageProviderRetry } from './image-store.js';
 import { puterImageConfigured } from './puter-image-provider.js';
 
 const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry']);
+const EXPLICIT_PROVIDER_MODES = new Set(['puter', 'modelscope', 'cloudflare', 'kie']);
 
 export function kieGenerationRetryMax(env = {}) {
   const configured = Number(env?.KIE_IMAGE_GENERATION_RETRY_MAX ?? 3);
@@ -45,6 +46,23 @@ function timestampMs(value) {
   return Date.parse(normalized);
 }
 
+function explicitProviderMode(env = {}) {
+  const mode = String(env?.IMAGE_PROVIDER_MODE || '').trim().toLowerCase();
+  return EXPLICIT_PROVIDER_MODES.has(mode) ? mode : null;
+}
+
+function asyncAttemptCeiling(env = {}) {
+  return kieGenerationRetryMax(env) + (modelScopeImageEnabled(env) ? 1 : 0);
+}
+
+function asyncAttempts(image = {}) {
+  return Math.max(0, Math.trunc(Number(image?.provider_attempt_count || 0) || 0));
+}
+
+function kieRetryAvailable(image = {}, env = {}) {
+  return asyncAttempts(image) < asyncAttemptCeiling(env);
+}
+
 export function isStaleKieActiveTask(image = {}, env = {}, nowMs = Date.now()) {
   const provider = normalizedProvider(image);
   const taskId = String(image?.provider_task_id || '').trim();
@@ -83,18 +101,20 @@ export function scheduledProviderModeForImage(image = {}, env = {}) {
   // A missing taskId here is a recovery/data-integrity problem, not a reason to charge again.
   if (isSuccessfulPaidImageCheckpoint(image)) return 'paid-success-checkpoint';
 
-  // A finished/failed ModelScope task gets one immediate handoff to KIE.
-  if (provider === 'modelscope') return 'kie';
+  // Explicit diagnostic/operator modes still win when no durable async task exists.
+  // Production leaves IMAGE_PROVIDER_MODE unset/auto and follows the free/fast chain below.
+  const explicit = explicitProviderMode(env);
+  if (explicit) return explicit;
 
-  const attempts = Math.max(0, Math.trunc(Number(image?.provider_attempt_count || 0) || 0));
+  const attempts = asyncAttempts(image);
   const puterAttempted = Number(image?.puter_attempted || 0) === 1;
   if (!puterAttempted && puterImageConfigured(env)) return 'puter';
   if (attempts === 0 && modelScopeImageEnabled(env)) return 'modelscope';
 
-  // provider_attempt_count is shared across async providers. Reserve one slot for
-  // the optional ModelScope attempt, then preserve the configured KIE retry budget.
-  const asyncAttemptCeiling = kieGenerationRetryMax(env) + (modelScopeImageEnabled(env) ? 1 : 0);
-  return attempts < asyncAttemptCeiling ? 'kie' : 'cloudflare';
+  // Cloudflare Workers AI is synchronous and free-first for scheduled production.
+  // Try it before creating a paid/slow KIE task. If it cannot produce an acceptable
+  // image, runOneImage immediately hands off to the existing bounded KIE retry path.
+  return 'cloudflare';
 }
 
 function needsImmediateCloudflareFallback(outcome = {}) {
@@ -153,6 +173,35 @@ async function recoverStaleKieTask(env, jobId, image, imageOptions) {
   );
 }
 
+async function runCloudflareThenKie(env, jobId, image, imageOptions, cloudflareResult = null) {
+  const cloudflare = cloudflareResult || await generateBaseImages(
+    { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
+    jobId,
+    imageOptions
+  );
+  const cloudflareOutcome = Array.isArray(cloudflare?.outcomes) ? cloudflare.outcomes[0] : null;
+  if (cloudflareOutcome?.status !== 'retrying') return cloudflare;
+
+  const current = await refreshedImage(env, jobId, image.id);
+  if (isSuccessfulPaidImageCheckpoint(current || image)) return cloudflare;
+  if (!kieRetryAvailable(current || image, env)) return cloudflare;
+
+  const kie = await generateBaseImages(
+    { ...env, IMAGE_PROVIDER_MODE: 'kie' },
+    jobId,
+    imageOptions
+  );
+  const kieOutcome = Array.isArray(kie?.outcomes) ? kie.outcomes[0] : null;
+  if (kieOutcome?.status === 'retrying') {
+    // Preserve both failure families for diagnostics while keeping the durable KIE
+    // retry counter written by the base executor intact.
+    const error = imageFallbackFailureCode(cloudflareOutcome, kieOutcome);
+    await markImageProviderRetry(env, image.id, error, { countAttempt: false, provider: 'kie-ai' });
+    kieOutcome.error = error;
+  }
+  return kie;
+}
+
 async function runOneImage(env, jobId, image, options = {}) {
   const providerMode = scheduledProviderModeForImage(image, env);
 
@@ -185,21 +234,26 @@ async function runOneImage(env, jobId, image, options = {}) {
 
   if (providerMode === 'puter' && firstOutcome?.status === 'retrying') {
     const current = await refreshedImage(env, jobId, image.id);
-    const attempts = Math.max(0, Math.trunc(Number((current || image)?.provider_attempt_count || 0) || 0));
-    const nextMode = attempts < kieGenerationRetryMax(env) ? 'kie' : 'cloudflare';
-    return generateBaseImages(
-      { ...env, IMAGE_PROVIDER_MODE: nextMode },
-      jobId,
-      imageOptions
-    );
+    const attempts = asyncAttempts(current || image);
+    if (attempts === 0 && modelScopeImageEnabled(env)) {
+      const modelScope = await generateBaseImages(
+        { ...env, IMAGE_PROVIDER_MODE: 'modelscope' },
+        jobId,
+        imageOptions
+      );
+      const modelScopeOutcome = Array.isArray(modelScope?.outcomes) ? modelScope.outcomes[0] : null;
+      if (modelScopeOutcome?.status !== 'retrying') return modelScope;
+      return runCloudflareThenKie(env, jobId, current || image, imageOptions);
+    }
+    return runCloudflareThenKie(env, jobId, current || image, imageOptions);
   }
 
   if (providerMode === 'modelscope' && firstOutcome?.status === 'retrying') {
-    return generateBaseImages(
-      { ...env, IMAGE_PROVIDER_MODE: 'kie' },
-      jobId,
-      imageOptions
-    );
+    return runCloudflareThenKie(env, jobId, image, imageOptions);
+  }
+
+  if (providerMode === 'cloudflare' && firstOutcome?.status === 'retrying') {
+    return runCloudflareThenKie(env, jobId, image, imageOptions, first);
   }
 
   if (providerMode === 'kie' && firstOutcome?.status === 'pending' && staleKieBeforePoll) {
@@ -224,7 +278,7 @@ async function runOneImage(env, jobId, image, options = {}) {
       return first;
     }
 
-    const retryBudgetExhausted = scheduledProviderModeForImage(current || image, env) === 'cloudflare';
+    const retryBudgetExhausted = !kieRetryAvailable(current || image, env);
     if (needsImmediateCloudflareFallback(firstOutcome) || retryBudgetExhausted) {
       const fallback = await generateBaseImages(
         { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
@@ -263,13 +317,13 @@ function combineExecutionResults(results = [], images = []) {
  * Scheduled publishing policy:
  * - Puter is the free/user-allowance-first provider when configured;
  * - ModelScope Z-Image Turbo remains optional when explicitly enabled;
+ * - Cloudflare Workers AI is the synchronous free/fast provider before KIE;
  * - an active async task always resumes on the provider that created it;
  * - a KIE task that remains non-terminal beyond the stale window gets one final poll,
  *   then exits to Puter/Cloudflare without submitting another paid KIE task;
  * - a successful KIE checkpoint is never regenerated or replaced;
- * - ModelScope terminal failure hands off immediately to KIE;
- * - KIE keeps its bounded retry budget, then Cloudflare is the final provider;
- * - once the final KIE retry is persisted, Cloudflare runs in the same invocation;
+ * - Cloudflare failure hands off immediately to the bounded KIE retry path;
+ * - explicit operator provider modes remain respected;
  * - up to three images for the same post may be selected, while the scheduled watchdog can cap this to one;
  * - provider-chain failure stays retryable/planned;
  * - the local renderer is never enabled here.
