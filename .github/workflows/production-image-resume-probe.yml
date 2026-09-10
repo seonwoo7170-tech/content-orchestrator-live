@@ -76,3 +76,4 @@ jobs:
 # probe: lifecycle-and-gallery-2026-09-07-0018
 # probe: post-deploy-zero-delay-readback-2026-09-07-0255
 # probe: publication-progression-readback-2026-09-07-0302
+# probe: user-provider-secrets-2026-09-10-1650
