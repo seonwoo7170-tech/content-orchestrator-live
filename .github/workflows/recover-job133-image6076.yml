@@ -1,4 +1,5 @@
 name: recover-job133-image6076
+# retry trigger: 2026-09-11 KST
 
 on:
   push:
@@ -42,9 +43,6 @@ jobs:
           if(row.provider_task_id) {
             console.log('ACTIVE_TASK_ALREADY_PRESENT_NO_CHANGE'); process.exit(0);
           }
-          // This exact task was already submitted and persisted at 16:30:56 UTC, then
-          // incorrectly abandoned four seconds later by the pre-fix row-age bug.
-          // Restoring it does NOT submit or charge for a new KIE generation.
           const task='73d2389fe55ba64f90db3a36935f2846';
           q(`UPDATE job_images
                SET provider='kie-ai', provider_task_id='${task}', provider_status='waiting',
