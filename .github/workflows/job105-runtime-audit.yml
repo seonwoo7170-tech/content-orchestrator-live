@@ -75,6 +75,6 @@ jobs:
           console.log('SETTINGS105 '+JSON.stringify(await q(`SELECT scope_key,inherit_global,json_extract(settings_json,'$.enabled') AS enabled,json_extract(settings_json,'$.imagesEnabled') AS images_enabled FROM automation_settings WHERE scope_key='global' OR blog_id=(SELECT blog_id FROM jobs WHERE id=105)`)));
           console.log('SCHEMA '+JSON.stringify((await q('PRAGMA table_info(job_images)')).rows.map(r=>r.name)));
           console.log('LOCKS '+JSON.stringify(await q(`SELECT lock_key,expires_at,updated_at FROM runtime_locks WHERE lock_key LIKE '%image%'`)));
-          console.log('JOB105 '+JSON.stringify(await q(`SELECT id,status,updated_at,json_extract(result_json,'$.status') AS result_status,json_extract(result_json,'$.imagePipeline.complete') AS image_complete FROM jobs WHERE id=105`)));
-          console.log('IMAGES105 '+JSON.stringify(await q(`SELECT id,status,provider,provider_task_id,provider_status,provider_checked_at,provider_attempt_count,provider_error_code,created_at,updated_at FROM job_images WHERE job_id=105 ORDER BY position,id`)));
+          console.log('JOBS_105_133 '+JSON.stringify(await q(`SELECT id,status,updated_at,json_extract(result_json,'$.status') AS result_status,json_extract(result_json,'$.imagePipeline.complete') AS image_complete FROM jobs WHERE id IN (105,133) ORDER BY id`)));
+          console.log('IMAGES_105_133 '+JSON.stringify(await q(`SELECT job_id,id,position,status,provider,provider_task_id,provider_status,provider_checked_at,provider_attempt_count,provider_error_code,created_at,updated_at FROM job_images WHERE job_id IN (105,133) ORDER BY job_id,position,id`)));
           NODE
