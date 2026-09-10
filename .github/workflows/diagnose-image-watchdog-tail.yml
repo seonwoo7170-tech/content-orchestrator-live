@@ -12,13 +12,17 @@ permissions:
 
 jobs:
   tail:
+    strategy:
+      matrix:
+        worker: [content-orchestrator, api-hub-v2]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 16
     environment: production
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
+      - uses: actions/checkout@v4
       - name: Capture one production watchdog window
         shell: bash
         run: |
@@ -26,7 +30,7 @@ jobs:
           test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN missing'; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID missing'; exit 1; }
           rm -f /tmp/tail.log
-          timeout 205s npx --yes wrangler@latest tail content-orchestrator --format json > /tmp/tail.log 2>&1 || true
+          timeout 205s npx --yes wrangler@latest tail ${{ matrix.worker }} --format json > /tmp/tail.log 2>&1 || true
           node <<'NODE'
           const fs=require('node:fs');
           const text=fs.existsSync('/tmp/tail.log')?fs.readFileSync('/tmp/tail.log','utf8'):'';
@@ -34,7 +38,7 @@ jobs:
           let count=0;
           for(const raw of rows){
             let line=raw;
-            if(!/(SERIAL_IMAGE|IMAGE_WORK|SCHEDULED_IMAGE|KIE|job.?105|jobId.?[:=]?\s*105|IMAGE_COMPLETION|IMAGE_LANE)/i.test(line)) continue;
+            if(!/(outcome|exception|message|SERIAL_IMAGE|IMAGE_WORK|SCHEDULED_IMAGE|KIE|job.?105|jobId.?[:=]?\s*105|IMAGE_COMPLETION|IMAGE_LANE)/i.test(line)) continue;
             line=line
               .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi,'Bearer [redacted]')
               .replace(/\b[a-f0-9]{24,}\b/gi,'[id]')
@@ -51,3 +55,6 @@ jobs:
           NODE
 
 # Diagnose resumed job105 after completion contract repair.
+
+      - name: Check Job 105 current state
+        run: node scripts/check-image-job-progress.mjs 105
