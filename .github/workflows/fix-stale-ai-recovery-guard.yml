@@ -1,0 +1,83 @@
+name: fix-stale-ai-recovery-guard
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-stale-ai-recovery-guard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch stale active AI guard
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs=require('node:fs');
+          const path='worker/mcp-entry.js';
+          let text=fs.readFileSync(path,'utf8');
+          const old=`async function activeAiJob(env) {
+            if (!env?.ORCHESTRATOR_DB) return null;
+            const row = await env.ORCHESTRATOR_DB.prepare(
+              \`SELECT id, status
+                 FROM jobs
+                WHERE archived_at IS NULL
+                  AND status IN ('writing', 'critic_review', 'repairing', 'final_critic')
+                ORDER BY updated_at, id
+                LIMIT 1\`
+            ).first();
+            return row ? { id: Number(row.id), status: String(row.status || '') } : null;
+          }`;
+          const next=`async function activeAiJob(env) {
+            if (!env?.ORCHESTRATOR_DB) return null;
+            const row = await env.ORCHESTRATOR_DB.prepare(
+              \`SELECT id, status
+                 FROM jobs
+                WHERE archived_at IS NULL
+                  AND status IN ('writing', 'critic_review', 'repairing', 'final_critic')
+                  -- A stale in-flight row must not block the recovery lane forever.
+                  -- job-auto-rescue owns rows at/after the same 20 minute cutoff.
+                  AND updated_at > datetime('now', '-20 minutes')
+                ORDER BY updated_at, id
+                LIMIT 1\`
+            ).first();
+            return row ? { id: Number(row.id), status: String(row.status || '') } : null;
+          }`;
+          if(!text.includes(old)) {
+            if(text.includes("AND updated_at > datetime('now', '-20 minutes')")) {
+              console.log('Patch already present');
+            } else {
+              throw new Error('ACTIVE_AI_GUARD_SOURCE_NOT_FOUND');
+            }
+          } else {
+            text=text.replace(old,next);
+            fs.writeFileSync(path,text);
+          }
+
+          const testPath='tests/mcp-stale-ai-recovery-guard.test.mjs';
+          fs.writeFileSync(testPath, `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n\ntest('serial AI guard ignores stale in-flight jobs so recovery can run', () => {\n  const source = fs.readFileSync(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');\n  assert.match(source, /status IN \\('writing', 'critic_review', 'repairing', 'final_critic'\\)[\\s\\S]*updated_at > datetime\\('now', '-20 minutes'\\)/);\n  const guardIndex = source.indexOf('const active = await activeAiJob(env)');\n  const recoveryIndex = source.indexOf('recovery = await runScheduledJobRecovery', guardIndex);\n  assert.ok(guardIndex >= 0 && recoveryIndex > guardIndex, 'recovery remains immediately downstream of the freshness-aware guard');\n});\n`);
+          NODE
+      - name: Verify
+        run: npm run verify
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add worker/mcp-entry.js tests/mcp-stale-ai-recovery-guard.test.mjs
+          git commit -m 'fix: let stale AI jobs reach automatic recovery'
+          git push origin HEAD:main
