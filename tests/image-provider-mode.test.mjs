@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { imageProviderMode, imageProviderSequence, imageStagePacingMs } from '../worker/lib/image-executor.js';
-import { scheduledProviderModeForImage } from '../worker/lib/image-executor-resilient.js';
+import { modelScopeAlreadyAttempted, scheduledProviderModeForImage } from '../worker/lib/image-executor-resilient.js';
 
 test('automatic image routing is always the default', () => {
   assert.equal(imageProviderMode({}), 'auto');
@@ -29,7 +29,9 @@ test('scheduled routing uses Puter once, then synchronous Cloudflare before crea
 test('scheduled routing keeps optional ModelScope ahead of Cloudflare when explicitly enabled', () => {
   const env = { MODELSCOPE_IMAGE_ENABLED: 'true' };
   assert.equal(scheduledProviderModeForImage({ provider_attempt_count: 0, puter_attempted: 1 }, env), 'modelscope');
+  assert.equal(scheduledProviderModeForImage({ provider: 'kie-ai', provider_attempt_count: 4, puter_attempted: 1 }, env), 'modelscope');
   assert.equal(scheduledProviderModeForImage({ provider: 'modelscope', provider_attempt_count: 1, puter_attempted: 1 }, env), 'cloudflare');
+  assert.equal(modelScopeAlreadyAttempted({ provider: 'cloudflare', provider_attempt_count: 4, provider_error_code: 'IMAGE_FALLBACK_FAILED:MODELSCOPE_ATTEMPTED:CLOUDFLARE_AI_ACCOUNT_LIMITED' }), true);
 });
 
 test('explicit provider mode is respected without inspecting provider secrets in the orchestrator', () => {
