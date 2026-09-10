@@ -345,7 +345,7 @@ export async function primeAutomaticJobRescue(env, options = {}) {
             AND blogger_post_id IS NOT NULL
           )
           OR (status = 'failed' AND recovery_state = 'none')
-          OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND updated_at <= ?)
+          OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND datetime(updated_at) <= datetime(?))
         )
       ORDER BY updated_at ASC, id ASC
       LIMIT ?`
