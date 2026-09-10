@@ -1,0 +1,81 @@
+name: fix-stale-ai-deadlock
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-stale-ai-deadlock.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch stale AI guard and datetime comparison
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p=Path('worker/mcp-entry.js')
+          s=p.read_text()
+          old="""async function activeAiJob(env) {
+  if (!env?.ORCHESTRATOR_DB) return null;
+  const row = await env.ORCHESTRATOR_DB.prepare(
+    `SELECT id, status
+       FROM jobs
+      WHERE archived_at IS NULL
+        AND status IN ('writing', 'critic_review', 'repairing', 'final_critic')
+      ORDER BY updated_at, id
+      LIMIT 1`
+  ).first();
+  return row ? { id: Number(row.id), status: String(row.status || '') } : null;
+}
+"""
+          new="""async function activeAiJob(env) {
+  if (!env?.ORCHESTRATOR_DB) return null;
+  const staleMinutes = positiveBounded(env?.JOB_RECOVERY_STALE_MINUTES, 20, 5, 1440);
+  const row = await env.ORCHESTRATOR_DB.prepare(
+    `SELECT id, status
+       FROM jobs
+      WHERE archived_at IS NULL
+        AND status IN ('writing', 'critic_review', 'repairing', 'final_critic')
+        AND datetime(updated_at) > datetime('now', ?)
+      ORDER BY datetime(updated_at), id
+      LIMIT 1`
+  ).bind(`-${staleMinutes} minutes`).first();
+  return row ? { id: Number(row.id), status: String(row.status || '') } : null;
+}
+"""
+          if old not in s:
+              raise SystemExit('mcp-entry activeAiJob block not found')
+          p.write_text(s.replace(old,new,1))
+
+          p=Path('worker/lib/job-auto-rescue.js')
+          s=p.read_text()
+          old="OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND updated_at <= ?)"
+          new="OR (status IN ('queued','writing','critic_review','repairing','final_critic') AND datetime(updated_at) <= datetime(?))"
+          if old not in s:
+              raise SystemExit('job-auto-rescue stale comparison not found')
+          p.write_text(s.replace(old,new,1))
+          PY
+      - name: Verify root suite
+        run: |
+          npm install --no-audit --no-fund
+          npm run verify
+      - name: Commit hotfix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker/mcp-entry.js worker/lib/job-auto-rescue.js
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: recover stale AI jobs before active guard deadlock"
+          git push origin HEAD:main
