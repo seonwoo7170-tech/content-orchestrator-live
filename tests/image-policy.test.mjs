@@ -41,6 +41,23 @@ test('repair supplements only the missing number of images', () => {
   assert.deepEqual(three.images, []);
 });
 
+test('new article also generates only the missing image deficit', () => {
+  const empty = buildSupplementalImagePlan('new_article', baseArticle(), settings);
+  assert.equal(empty.generatedCount, 3);
+  assert.equal(empty.needsThumbnail, true);
+  assert.deepEqual(empty.images.map((image) => image.role), ['thumbnail', 'body', 'body']);
+
+  const one = buildSupplementalImagePlan('new_article', baseArticle('<img src="existing"><p>x</p>'), settings);
+  assert.equal(one.existingCount, 1);
+  assert.equal(one.generatedCount, 2);
+  assert.equal(one.needsThumbnail, false);
+  assert.deepEqual(one.images.map((image) => image.role), ['body', 'body']);
+
+  const complete = buildSupplementalImagePlan('new_article', baseArticle('<img src="a"><img src="b"><img src="c">'), settings);
+  assert.equal(complete.generatedCount, 0);
+  assert.deepEqual(complete.images, []);
+});
+
 test('image policy blocks repair update until target image count is met', () => {
   const incomplete = validateImagePolicy('repair_existing', baseArticle('<img src="a">'), settings);
   assert.equal(incomplete.ok, false);
