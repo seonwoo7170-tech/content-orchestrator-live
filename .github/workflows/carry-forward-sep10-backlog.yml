@@ -1,4 +1,5 @@
 name: carry-forward-sep10-backlog
+# trigger: continue missed Sep 10 work immediately after midnight KST
 
 on:
   push:
