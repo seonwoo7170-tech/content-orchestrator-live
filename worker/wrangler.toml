@@ -5,6 +5,7 @@ compatibility_date = "2026-08-28"
 [vars]
 SYSTEM_PAUSED = "true"
 BLOGGER_WRITES_ENABLED = "false"
+TARGETED_REPAIR_MAX_ATTEMPTS = "2"
 HUB_WRITER_PATH = "/api/hub/ai/writer"
 HUB_CRITIC_PATH = "/api/hub/ai/critic"
 HUB_REPAIR_PATH = "/api/hub/ai/repair"
