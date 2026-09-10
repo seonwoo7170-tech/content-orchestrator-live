@@ -33,31 +33,19 @@ export function resolveImagePolicy(mode, article, settings = {}) {
     };
   }
 
-  if (normalizedMode === 'repair_existing') {
-    const deficit = Math.max(0, targetTotal - existingCount);
-    const needsThumbnail = existingCount === 0 && deficit > 0;
-    const bodyNeeded = Math.max(0, deficit - (needsThumbnail ? 1 : 0));
-    return {
-      enabled: true,
-      mode: normalizedMode,
-      targetTotal,
-      existingCount,
-      generatedCount: deficit,
-      needsThumbnail,
-      bodyNeeded,
-      deficit
-    };
-  }
+  const deficit = Math.max(0, targetTotal - existingCount);
+  const needsThumbnail = existingCount === 0 && deficit > 0;
+  const bodyNeeded = Math.max(0, deficit - (needsThumbnail ? 1 : 0));
 
   return {
     enabled: true,
     mode: normalizedMode,
     targetTotal,
     existingCount,
-    generatedCount: targetTotal,
-    needsThumbnail: true,
-    bodyNeeded: bodyImageCount,
-    deficit: Math.max(0, targetTotal - existingCount)
+    generatedCount: deficit,
+    needsThumbnail,
+    bodyNeeded,
+    deficit
   };
 }
 
