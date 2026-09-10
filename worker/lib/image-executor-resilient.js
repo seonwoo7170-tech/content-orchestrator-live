@@ -66,7 +66,7 @@ export function isAmbiguousKieSubmission(image = {}) {
   return ['kie', 'kie-ai'].includes(provider)
     && !taskId
     && asyncAttempts(image) > 0
-    && error.includes('API_HUB_TIMEOUT');
+    && (error.includes('API_HUB_TIMEOUT') || error.includes('KIE_SUBMISSION_OUTCOME_UNKNOWN'));
 }
 
 function kieRetryAvailable(image = {}, env = {}) {
@@ -194,7 +194,12 @@ async function runCloudflareThenKie(env, jobId, image, imageOptions, cloudflareR
   if (cloudflareOutcome?.status !== 'retrying') return cloudflare;
   // A timed-out KIE create request may already have consumed a paid submission even
   // though no task id reached D1. Do not submit another paid task blindly.
-  if (isAmbiguousKieSubmission(image)) return cloudflare;
+  if (isAmbiguousKieSubmission(image)) {
+    const error = imageFallbackFailureCode({ error: 'KIE_SUBMISSION_OUTCOME_UNKNOWN' }, cloudflareOutcome);
+    await markImageProviderRetry(env, image.id, error, { countAttempt: false, provider: 'kie-ai' });
+    cloudflareOutcome.error = error;
+    return cloudflare;
+  }
 
   const current = await refreshedImage(env, jobId, image.id);
   if (isSuccessfulPaidImageCheckpoint(current || image)) return cloudflare;
