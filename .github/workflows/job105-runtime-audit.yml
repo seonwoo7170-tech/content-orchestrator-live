@@ -19,6 +19,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
+      - run: npm install --ignore-scripts --no-audit --no-fund
       - name: Validate exact image watchdog candidate query
         shell: bash
         run: |
