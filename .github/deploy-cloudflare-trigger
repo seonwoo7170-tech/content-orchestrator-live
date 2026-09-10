@@ -1,1 +1,1 @@
-disable exposed ModelScope token path while preserving Puter secret 2026-09-10
+enable verified ModelScope secret fallback 2026-09-10
