@@ -7,10 +7,12 @@ test('Tavily configuration is based only on secret presence', () => {
   assert.equal(tavilyConfigured({ TAVILY_API_KEY: '' }), false);
 });
 
-test('auto research triggers for freshness-sensitive topics and skips evergreen topics', () => {
+test('auto research triggers for freshness-sensitive and substantive evergreen topics', () => {
   assert.equal(shouldUseTavilyResearch('Windows 11 2026 update guide'), true);
   assert.equal(shouldUseTavilyResearch('최신 AI 모델 비교'), true);
-  assert.equal(shouldUseTavilyResearch('How to clean a stainless steel sink'), false);
+  assert.equal(shouldUseTavilyResearch('How to clean a stainless steel sink'), true);
+  assert.equal(shouldUseTavilyResearch('Threshold repair and restoration'), true);
+  assert.equal(shouldUseTavilyResearch('A short personal reflection'), false);
   assert.equal(shouldUseTavilyResearch('anything', 'always'), true);
   assert.equal(shouldUseTavilyResearch('latest news', 'off'), false);
 });
@@ -59,7 +61,7 @@ test('always writer research fails closed when Tavily is missing', async () => {
   );
 });
 
-test('writer research uses a month window and returns only grounded source records', async () => {
+test('fresh writer research uses a month window and returns only grounded source records', async () => {
   let body;
   const fetchImpl = async (_url, init) => {
     body = JSON.parse(init.body);
@@ -78,4 +80,24 @@ test('writer research uses a month window and returns only grounded source recor
   assert.equal(body.time_range, 'month');
   assert.equal(research.used, true);
   assert.equal(research.resultCount, 2);
+});
+
+test('evergreen writer research does not force a freshness window', async () => {
+  let body;
+  const fetchImpl = async (_url, init) => {
+    body = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      results: [
+        { title: 'Repair guidance', url: 'https://example.com/repair', content: 'Stable repair guidance', score: 0.9 }
+      ]
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const research = await collectWriterResearch(
+    { TAVILY_API_KEY: 'secret' },
+    { topic: 'Threshold repair and restoration', language: 'en' },
+    fetchImpl
+  );
+  assert.equal(body.time_range, undefined);
+  assert.match(body.query, /official guidance practical decision criteria/i);
+  assert.equal(research.used, true);
 });
