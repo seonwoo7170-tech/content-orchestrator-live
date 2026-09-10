@@ -1,5 +1,5 @@
 name: diagnose-image-scheduler-live
-# manual live rerun after KIE task-age deployment, 2026-09-11 KST
+# manual live rerun after job133 image recovery, 2026-09-11 KST
 
 on:
   push:
@@ -46,9 +46,9 @@ jobs:
               j.id LIMIT 48`;
           console.log('EXACT_CANDIDATES',JSON.stringify(q(sql)));
           console.log('ACTIVE_IMAGE_ROWS',JSON.stringify(q(`SELECT id,job_id,role,position,status,provider,provider_task_id,provider_status,provider_checked_at,updated_at FROM job_images WHERE provider_task_id IS NOT NULL AND provider_status IN ${active} ORDER BY COALESCE(provider_checked_at,updated_at),job_id LIMIT 30`)));
-          console.log('JOB133',JSON.stringify(q("SELECT id,status,mode,blog_id,updated_at,json_extract(result_json,'$.imagePipeline.complete') AS image_complete,json_extract(result_json,'$.imagePipeline.currentCount') AS current_count FROM jobs WHERE id=133")));
+          console.log('JOB133',JSON.stringify(q("SELECT id,status,mode,blog_id,blogger_post_id,target_url,updated_at,json_extract(result_json,'$.imagePipeline.complete') AS image_complete,json_extract(result_json,'$.imagePipeline.currentCount') AS current_count FROM jobs WHERE id=133")));
           console.log('JOB133_IMAGES',JSON.stringify(q("SELECT id,role,position,status,provider,provider_task_id,provider_status,provider_attempt_count,provider_error_code,provider_error_message,provider_checked_at,puter_attempted,created_at,updated_at,public_url FROM job_images WHERE job_id=133 ORDER BY position,id")));
-          console.log('IMAGE6076_EVENTS',JSON.stringify(q("SELECT id,level,event_type,stage,message,meta_json,created_at FROM job_events WHERE job_id=133 AND (message LIKE '%6076%' OR meta_json LIKE '%6076%') ORDER BY id DESC LIMIT 40")));
+          console.log('JOB133_EVENTS',JSON.stringify(q("SELECT id,level,event_type,stage,message,created_at FROM job_events WHERE job_id=133 ORDER BY id DESC LIMIT 20")));
           console.log('LOCKS',JSON.stringify(q("SELECT lock_key,expires_at,updated_at FROM runtime_locks WHERE lock_key LIKE '%image%'")));
           console.log('NOW',JSON.stringify(q("SELECT datetime('now') utc_now")));
           NODE
