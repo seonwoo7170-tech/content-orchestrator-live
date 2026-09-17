@@ -21,6 +21,7 @@ import { listAnalyticsProperties, queryAnalyticsReport } from './lib/google-anal
 import { listAdsenseAccounts, listAdsenseSites, queryAdsenseReport } from './lib/google-adsense.js';
 import { getPost, listBlogs, writePost } from './lib/blogger.js';
 import { listPosts } from './lib/blogger-posts.js';
+import { getPage, listPages, writePage } from './lib/blogger-pages.js';
 import { planTopic } from './lib/topic-planner.js';
 import { assertBloggerWriteAllowed } from './lib/write-policy.js';
 import { tavilyConfigured, tavilySearch } from './lib/tavily-search.js';
@@ -206,6 +207,13 @@ export default {
         const input = await readJson(request);
         assertBloggerWriteAllowed(env, input);
         return json(await writePost(env, input));
+      }
+      if (url.pathname === '/api/blogger/pages') return json(await listPages(env, await readJson(request)));
+      if (url.pathname === '/api/blogger/page/get') return json(await getPage(env, await readJson(request)));
+      if (url.pathname === '/api/blogger/page') {
+        const input = await readJson(request);
+        assertBloggerWriteAllowed(env, input);
+        return json(await writePage(env, input));
       }
 
       return json({ ok: false, error: 'NOT_FOUND' }, 404);
