@@ -23,6 +23,7 @@ import { getPost, listBlogs, writePost } from './lib/blogger.js';
 import { listPosts } from './lib/blogger-posts.js';
 import { getPage, listPages, writePage } from './lib/blogger-pages.js';
 import { planTopic } from './lib/topic-planner.js';
+import { generateRequiredPages } from './lib/required-pages.js';
 import { assertBloggerWriteAllowed } from './lib/write-policy.js';
 import { tavilyConfigured, tavilySearch } from './lib/tavily-search.js';
 
@@ -199,6 +200,7 @@ export default {
       if (url.pathname === '/api/hub/ai/writer') return json(await writer(env, await readJson(request)));
       if (url.pathname === '/api/hub/ai/critic') return json(await critic(env, await readJson(request)));
       if (url.pathname === '/api/hub/ai/repair') return json(await repair(env, await readJson(request)));
+      if (url.pathname === '/api/hub/ai/required-pages') return json(await generateRequiredPages(env, await readJson(request)));
       if (url.pathname === '/api/hub/image/generate') return json(await generateImage(env, await readJson(request)));
       if (url.pathname === '/api/blogger/blogs') return json(await listBlogs(env));
       if (url.pathname === '/api/blogger/posts') return json(await listPosts(env, await readJson(request)));
