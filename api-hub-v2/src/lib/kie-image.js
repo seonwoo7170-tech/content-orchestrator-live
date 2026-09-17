@@ -1,5 +1,7 @@
 const DEFAULT_KIE_BASE_URL = 'https://api.kie.ai';
 const DEFAULT_KIE_MODEL = 'z-image';
+const GPT4O_IMAGE_MODEL = 'gpt4o-image';
+const DEFAULT_KIE_THUMBNAIL_MODEL = 'z-image';
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const DEFAULT_KIE_TASK_TIMEOUT_MS = 15 * 60 * 1000;
 const MIN_KIE_TASK_TIMEOUT_MS = 5 * 60 * 1000;
@@ -33,6 +35,21 @@ function safeModel(env) {
   const model = String(env?.KIE_IMAGE_MODEL || DEFAULT_KIE_MODEL).trim();
   if (model !== DEFAULT_KIE_MODEL) throw Object.assign(new Error('KIE_IMAGE_MODEL_NOT_ALLOWED'), { status: 500 });
   return model;
+}
+
+// Thumbnails are the one image per article that drives click-through, so they are allowed to use
+// the premium gpt4o-image model; body images stay on z-image. Locked to an explicit allowlist like
+// safeModel() above so a stray env value can never silently switch production to a costlier model.
+function safeThumbnailModel(env) {
+  const model = String(env?.KIE_THUMBNAIL_MODEL || DEFAULT_KIE_THUMBNAIL_MODEL).trim();
+  if (model !== DEFAULT_KIE_THUMBNAIL_MODEL && model !== GPT4O_IMAGE_MODEL) {
+    throw Object.assign(new Error('KIE_THUMBNAIL_MODEL_NOT_ALLOWED'), { status: 500 });
+  }
+  return model;
+}
+
+function resolveModelForRole(env, role) {
+  return role === 'thumbnail' ? safeThumbnailModel(env) : safeModel(env);
 }
 
 export function kieCallbackUrl(env = {}) {
@@ -195,7 +212,7 @@ function transientQueryError(error) {
     || status >= 500;
 }
 
-async function queryKieTaskDetail(env, baseUrl, apiKey, taskId, fetchImpl) {
+async function queryTaskDetail(env, url, apiKey, fetchImpl) {
   const maxAttempts = kieQueryRetryMax(env);
   const baseDelay = kieQueryRetryBaseMs(env);
   let lastError = null;
@@ -205,7 +222,7 @@ async function queryKieTaskDetail(env, baseUrl, apiKey, taskId, fetchImpl) {
       return {
         data: await jsonRequest(
           fetchImpl,
-          `${baseUrl}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
+          url,
           { headers: { authorization: `Bearer ${apiKey}` } },
           'KIE_TASK_QUERY_FAILED'
         ),
@@ -223,6 +240,14 @@ async function queryKieTaskDetail(env, baseUrl, apiKey, taskId, fetchImpl) {
   return { data: null, transientError: lastError, attempts: maxAttempts };
 }
 
+function queryKieTaskDetail(env, baseUrl, apiKey, taskId, fetchImpl) {
+  return queryTaskDetail(env, `${baseUrl}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`, apiKey, fetchImpl);
+}
+
+function queryGpt4oImageDetail(env, baseUrl, apiKey, taskId, fetchImpl) {
+  return queryTaskDetail(env, `${baseUrl}/api/v1/gpt4o-image/record-info?taskId=${encodeURIComponent(taskId)}`, apiKey, fetchImpl);
+}
+
 function parseResultUrl(task) {
   let parsed;
   try { parsed = JSON.parse(String(task?.resultJson || '{}')); } catch { return ''; }
@@ -232,6 +257,37 @@ function parseResultUrl(task) {
   try { parsedUrl = new URL(url); } catch { return ''; }
   if (parsedUrl.protocol !== 'https:') return '';
   return parsedUrl.href;
+}
+
+function parseGpt4oResultUrl(task) {
+  const urls = task?.response?.resultUrls;
+  const url = Array.isArray(urls) ? String(urls[0] || '').trim() : '';
+  if (!url) return '';
+  let parsedUrl;
+  try { parsedUrl = new URL(url); } catch { return ''; }
+  if (parsedUrl.protocol !== 'https:') return '';
+  return parsedUrl.href;
+}
+
+function gpt4oTaskFailure(task) {
+  const providerCode = numericCode(task?.errorCode);
+  const detail = String(task?.errorMessage || '').trim().toLowerCase();
+  let message = 'KIE_IMAGE_GENERATION_FAILED';
+  let status = 502;
+
+  if (providerCode === 429 || /rate.?limit|too many|concurrent/.test(detail)) {
+    message = 'KIE_RATE_LIMITED';
+    status = 429;
+  } else if (/(moderator|content policy|policy violation|nsfw|inappropriate content)/.test(detail)) {
+    message = 'KIE_CONTENT_REJECTED';
+    status = 422;
+  } else if ((providerCode !== null && providerCode >= 500) || /internal error|try again later|generation failed|generate failed/.test(detail)) {
+    message = 'KIE_PROVIDER_GENERATION_FAILED';
+  }
+
+  const error = Object.assign(new Error(message), { status });
+  if (providerCode !== null) error.providerCode = providerCode;
+  return error;
 }
 
 function classifyMimeType(value) {
@@ -288,11 +344,52 @@ async function downloadKieResult(env, fetchImpl, resultUrl) {
   throw lastError || Object.assign(new Error('KIE_RESULT_DOWNLOAD_FAILED'), { status: 502, transient: true });
 }
 
+async function startGpt4oImageTask(env, { role, prompt, aspectRatio }, apiKey, baseUrl, callbackUrl, fetchImpl) {
+  const body = {
+    filesUrl: [],
+    prompt: safePromptForKie(prompt),
+    size: normalizeAspectRatio(aspectRatio, role)
+  };
+  if (callbackUrl) body.callBackUrl = callbackUrl;
+
+  const create = await jsonRequest(
+    fetchImpl,
+    `${baseUrl}/api/v1/gpt4o-image/generate`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    },
+    'KIE_CREATE_TASK_FAILED'
+  );
+
+  const taskId = String(create?.data?.taskId || '').trim();
+  if (!taskId) throw Object.assign(new Error('KIE_TASK_ID_MISSING'), { status: 502 });
+  return {
+    ok: true,
+    provider: 'kie-ai',
+    model: GPT4O_IMAGE_MODEL,
+    taskId,
+    state: 'waiting',
+    pending: true,
+    complete: false,
+    callback: Boolean(callbackUrl)
+  };
+}
+
 export async function startKieImageTask(env, { role, prompt, aspectRatio }, fetchImpl = fetch) {
   const apiKey = requiredKey(env);
   const baseUrl = safeBaseUrl(env);
-  const model = safeModel(env);
+  const model = resolveModelForRole(env, role);
   const callbackUrl = kieCallbackUrl(env);
+
+  if (model === GPT4O_IMAGE_MODEL) {
+    return startGpt4oImageTask(env, { role, prompt, aspectRatio }, apiKey, baseUrl, callbackUrl, fetchImpl);
+  }
+
   const body = {
     model,
     input: {
@@ -331,12 +428,108 @@ export async function startKieImageTask(env, { role, prompt, aspectRatio }, fetc
   };
 }
 
-export async function pollKieImageTask(env, taskId, fetchImpl = fetch) {
+async function pollGpt4oImageTask(env, taskId, apiKey, baseUrl, fetchImpl) {
+  const queried = await queryGpt4oImageDetail(env, baseUrl, apiKey, taskId, fetchImpl);
+
+  if (queried.transientError) {
+    return {
+      ok: true,
+      provider: 'kie-ai',
+      model: GPT4O_IMAGE_MODEL,
+      taskId,
+      state: 'query_retry',
+      pending: true,
+      complete: false,
+      queryAttempts: queried.attempts,
+      recoveryReason: String(queried.transientError?.message || 'KIE_TASK_QUERY_RETRY')
+    };
+  }
+
+  const task = queried.data?.data || {};
+  const successFlag = Number(task.successFlag);
+  if (successFlag === 2 || successFlag === 3) throw gpt4oTaskFailure(task);
+  if (successFlag !== 1) {
+    if (kieTaskTimedOut(task, env)) {
+      const error = Object.assign(new Error('KIE_TASK_TIMEOUT'), {
+        status: 504,
+        taskId,
+        taskState: 'waiting',
+        taskAgeMs: kieTaskAgeMs(task),
+        taskTimeoutMs: kieTaskTimeoutMs(env)
+      });
+      const progress = Number(task?.progress);
+      if (Number.isFinite(progress)) error.progress = progress;
+      throw error;
+    }
+    return {
+      ok: true,
+      provider: 'kie-ai',
+      model: GPT4O_IMAGE_MODEL,
+      taskId,
+      state: 'waiting',
+      pending: true,
+      complete: false
+    };
+  }
+
+  const resultUrl = parseGpt4oResultUrl(task);
+  if (!resultUrl) {
+    return {
+      ok: true,
+      provider: 'kie-ai',
+      model: GPT4O_IMAGE_MODEL,
+      taskId,
+      state: 'result_pending',
+      pending: true,
+      complete: false,
+      recoveryReason: 'KIE_RESULT_URL_MISSING'
+    };
+  }
+
+  let downloaded;
+  try {
+    downloaded = await downloadKieResult(env, fetchImpl, resultUrl);
+  } catch (error) {
+    if (error?.transient === true || String(error?.message || '') === 'KIE_RESULT_DOWNLOAD_FAILED') {
+      return {
+        ok: true,
+        provider: 'kie-ai',
+        model: GPT4O_IMAGE_MODEL,
+        taskId,
+        state: 'result_download_retry',
+        pending: true,
+        complete: false,
+        sourceUrl: resultUrl,
+        recoveryReason: 'KIE_RESULT_DOWNLOAD_FAILED'
+      };
+    }
+    throw error;
+  }
+
+  return {
+    ok: true,
+    provider: 'kie-ai',
+    model: GPT4O_IMAGE_MODEL,
+    taskId,
+    state: 'success',
+    pending: false,
+    complete: true,
+    sourceUrl: resultUrl,
+    ...downloaded
+  };
+}
+
+// `role` is appended last (rather than replacing fetchImpl's position) so every existing
+// 3-argument call site (tests included) keeps resolving to the z-image path unchanged.
+export async function pollKieImageTask(env, taskId, fetchImpl = fetch, role) {
   const normalizedTaskId = String(taskId || '').trim();
   if (!normalizedTaskId) throw Object.assign(new Error('KIE_TASK_ID_REQUIRED'), { status: 400 });
   const apiKey = requiredKey(env);
   const baseUrl = safeBaseUrl(env);
-  const model = safeModel(env);
+  const model = resolveModelForRole(env, role);
+  if (model === GPT4O_IMAGE_MODEL) {
+    return pollGpt4oImageTask(env, normalizedTaskId, apiKey, baseUrl, fetchImpl);
+  }
   const queried = await queryKieTaskDetail(env, baseUrl, apiKey, normalizedTaskId, fetchImpl);
 
   if (queried.transientError) {
@@ -428,6 +621,6 @@ export async function pollKieImageTask(env, taskId, fetchImpl = fetch) {
 }
 
 export async function generateKieImage(env, { role, prompt, aspectRatio, taskId }, fetchImpl = fetch) {
-  if (String(taskId || '').trim()) return pollKieImageTask(env, taskId, fetchImpl);
+  if (String(taskId || '').trim()) return pollKieImageTask(env, taskId, fetchImpl, role);
   return startKieImageTask(env, { role, prompt, aspectRatio }, fetchImpl);
 }

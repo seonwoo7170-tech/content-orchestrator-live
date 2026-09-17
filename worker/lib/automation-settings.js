@@ -1,3 +1,4 @@
+import { DEFAULT_BODY_IMAGE_COUNT, MAX_BODY_IMAGE_COUNT } from './image-plan.js';
 import { buildDailySlots } from './daily-plan.js';
 
 export const DEFAULT_AUTOMATION_SETTINGS = Object.freeze({
@@ -14,7 +15,7 @@ export const DEFAULT_AUTOMATION_SETTINGS = Object.freeze({
   publishJitterMinutes: 5,
   maxPublishesPerDay: 2,
   imagesEnabled: true,
-  bodyImageCount: 2,
+  bodyImageCount: DEFAULT_BODY_IMAGE_COUNT,
   approvalMode: 'approval',
   operationMode: 'validation',
   contentLanguage: 'auto',
@@ -79,7 +80,7 @@ export function normalizeAutomationSettings(input = {}, base = DEFAULT_AUTOMATIO
     publishJitterMinutes: integer(input.publishJitterMinutes, base.publishJitterMinutes, 0, 60, 'PUBLISH_JITTER_INVALID'),
     maxPublishesPerDay: integer(input.maxPublishesPerDay, base.maxPublishesPerDay, 0, 20, 'MAX_PUBLISHES_PER_DAY_INVALID'),
     imagesEnabled: bool(input.imagesEnabled, base.imagesEnabled),
-    bodyImageCount: integer(input.bodyImageCount, base.bodyImageCount, 0, 3, 'BODY_IMAGE_COUNT_INVALID'),
+    bodyImageCount: integer(input.bodyImageCount, base.bodyImageCount, 0, MAX_BODY_IMAGE_COUNT, 'BODY_IMAGE_COUNT_INVALID'),
     approvalMode: String(input.approvalMode ?? base.approvalMode),
     operationMode: String(input.operationMode ?? base.operationMode),
     contentLanguage: contentLanguage(input.contentLanguage, base.contentLanguage),

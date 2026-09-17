@@ -3,7 +3,7 @@ import { materializeDailySlot } from './daily-slot-materializer.js';
 import { listDailySlots } from './daily-plan-store.js';
 import { getStoredJob, persistJobResult, persistJobTransition } from './job-store.js';
 import { processStoredJob } from './stored-job-executor.js';
-import { attachStoredImages, buildImagePlan } from './image-plan.js';
+import { attachStoredImages, buildImagePlan, normalizeBodyCount } from './image-plan.js';
 import { generatePlannedImages } from './image-executor.js';
 import { listJobImages, markImageAttached, persistImagePlan } from './image-store.js';
 import {
@@ -229,7 +229,7 @@ export async function prepareNewArticleImages(env, jobId, effective, options = {
     () => (options.strategyLinksForTopicFn || strategyLinksForTopic)(env, String(row.blog_id || ''), String(row.topic || ''), 3),
     []
   );
-  const bodyCount = Math.max(0, Math.min(3, Number(effective?.bodyImageCount ?? 2)));
+  const bodyCount = normalizeBodyCount(effective?.bodyImageCount);
   const plan = buildImagePlan(result.article, { bodyCount });
   await (options.persistImagePlanFn || persistImagePlan)(env, jobId, plan.images);
   const generated = await (options.generatePlannedImagesFn || generatePlannedImages)(env, jobId, {

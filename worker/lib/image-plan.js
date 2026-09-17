@@ -53,10 +53,13 @@ function abstractVisualHeading(value) {
   return /^(direct answer|quick answer|overview|summary|introduction|conclusion|final thoughts|reader questions?|faq|frequently asked|common mistakes?|decision criteria|key takeaways?|what to know)|^(핵심 답변|빠른 답변|요약|개요|서론|결론|자주 묻는 질문|독자 질문|흔한 실수|판단 기준|핵심 정리)/i.test(text);
 }
 
-function normalizeBodyCount(value) {
-  if (value === undefined || value === null || value === '') return 2;
+export const DEFAULT_BODY_IMAGE_COUNT = 4;
+export const MAX_BODY_IMAGE_COUNT = 6;
+
+export function normalizeBodyCount(value) {
+  if (value === undefined || value === null || value === '') return DEFAULT_BODY_IMAGE_COUNT;
   const count = Number(value);
-  if (!Number.isInteger(count) || count < 0 || count > 3) throw new Error('BODY_IMAGE_COUNT_INVALID');
+  if (!Number.isInteger(count) || count < 0 || count > MAX_BODY_IMAGE_COUNT) throw new Error('BODY_IMAGE_COUNT_INVALID');
   return count;
 }
 
@@ -114,8 +117,17 @@ function thumbnailScene(concept) {
   return `Photorealistic real-world photograph focused on ${concept}. ${topicDominance(concept)} Depict tangible objects, tools, materials, fixtures, devices, and surroundings appropriate to the exact topic. One clear focal subject, natural lighting, realistic materials, uncluttered composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present. Wide landscape framing with comfortable open space around the focal subject.`;
 }
 
-function bodyScene(sectionConcept, topicConcept) {
-  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}. ${topicDominance(topicConcept)} Show a concrete action, condition, material, fixture, tool interaction, or before-work detail that directly explains this section. Natural lighting, realistic materials, useful close-to-medium distance, one clear focal subject, clean composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present.`;
+const BODY_SCENE_PURPOSES = [
+  'Establish the relevant setting and show the subject in its everyday surroundings.',
+  'Isolate a meaningful component or material detail in a tight close-up.',
+  'Show the relevant equipment or objects arranged for a practical task, viewed from above.',
+  'Show the subject in a realistic everyday use situation at eye level.',
+  'Show a complementary side view of the relevant physical relationship between objects.',
+  'Show the finished arrangement with emphasis on the useful physical result.'
+];
+
+function bodyScene(sectionConcept, topicConcept, index) {
+  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}. ${topicDominance(topicConcept)} Show a concrete action, condition, material, fixture, tool interaction, or before-work detail that directly explains this section. ${BODY_SCENE_PURPOSES[index % BODY_SCENE_PURPOSES.length]} Keep the scene specific to the section subject; choose only physically relevant props. Natural lighting, realistic materials, useful close-to-medium distance, one clear focal subject, clean composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present.`;
 }
 
 export function buildImagePlan(article, options = {}) {
@@ -135,12 +147,14 @@ export function buildImagePlan(article, options = {}) {
   ];
 
   for (let index = 0; index < bodyCount; index += 1) {
-    const section = visualHeadings[index] || headings[index] || topic;
+    const section = (visualHeadings.length ? visualHeadings[index % visualHeadings.length] : null)
+      || (headings.length ? headings[index % headings.length] : null)
+      || topic;
     const sectionConcept = visualConcept(section) || topicConcept;
     images.push({
       role: 'body',
       position: index + 1,
-      prompt: bodyScene(sectionConcept, topicConcept),
+      prompt: bodyScene(sectionConcept, topicConcept, index),
       altText: imageAltText(article, section, 'body'),
       hookText: null
     });
@@ -170,7 +184,7 @@ function distributionFractions(count) {
   if (count === 1) return [0.52];
   if (count === 2) return [0.34, 0.70];
   if (count === 3) return [0.25, 0.52, 0.78];
-  return [];
+  return Array.from({ length: count }, (_, index) => (index + 1) / (count + 1));
 }
 
 function insertBodyImagesDistributed(html, bodyImages) {
