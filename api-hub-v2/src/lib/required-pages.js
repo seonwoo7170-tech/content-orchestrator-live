@@ -21,20 +21,29 @@ function required(value, name) {
 // boilerplate plus one short AI-written intro paragraph: AdSense reviewers check for specific
 // disclosure language (cookies, third-party ad vendors, opt-out links), so the legally load-bearing
 // text must not be left to free-form generation.
+//
+// Page titles are fixed in code (below), not model-generated: a caller (e.g. the AWS scheduler that
+// checks which required pages a blog is still missing) needs to match existing Blogger pages by a
+// predictable title. A model choosing a different title each run would break that idempotency check.
 const REQUIRED_PAGES_ADAPTER = `AUTOMATION REQUIRED-PAGES ADAPTER — this adapter overrides any interactive/questioning flow in the master prompt for this server call.
-Platform is Google Blogger / Blogspot. Do not ask questions. Produce content for exactly two static informational pages for the blog described below: "About" and "Contact". These are not blog posts; do not use a listicle or SEO-article structure, do not invent a search topic, and do not add headings that imply this is an article.
+Platform is Google Blogger / Blogspot. Do not ask questions. Produce content for exactly two static informational pages for the blog described below: "About" and "Contact". These are not blog posts; do not use a listicle or SEO-article structure, do not invent a search topic, and do not add headings that imply this is an article. Do not invent a title for either page; only write the body content described below.
 Tailor both pages specifically to the supplied blog name and theme/purpose. Do not write generic boilerplate that could apply to any blog — reference what this specific blog actually covers.
 About page: 2-4 short paragraphs. State what the blog covers, who it is useful for, and the general approach or perspective the blog takes. Do not fabricate specific credentials, company history, awards, or team members that were not supplied. If no author/team detail was supplied, speak in terms of the blog's editorial focus and interest rather than inventing a biography.
 Contact page: 1-2 short paragraphs inviting readers to reach out (feedback, corrections, inquiries), plus a short line noting the contact email will be inserted separately. Do not invent a physical address, phone number, or contact email yourself.
 Also write ONE short paragraph (2-4 sentences, in the requested language) introducing this specific blog for the Privacy Policy page — what kind of site it is and what it is generally about. Do not write about cookies, advertising, or data collection in this paragraph; that boilerplate is added separately.
-Return JSON only with this exact shape: {"about":{"title":"...","html":"..."},"contact":{"title":"...","html":"..."},"privacyIntro":"..."}. The html fields must contain only the page body (no <html>/<head>/<body>), using <p> paragraphs only — no headings, since the Blogger page title already provides one. Write in the requested language only.`;
+Return JSON only with this exact shape: {"about":{"html":"..."},"contact":{"html":"..."},"privacyIntro":"..."}. The html fields must contain only the page body (no <html>/<head>/<body>), using <p> paragraphs only — no headings, since the Blogger page title already provides one. Write in the requested language only.`;
+
+const FIXED_TITLES = Object.freeze({
+  ko: { 'privacy-policy': '개인정보처리방침', about: '소개', contact: '문의하기' },
+  en: { 'privacy-policy': 'Privacy Policy', about: 'About', contact: 'Contact' }
+});
 
 function validatePagesShape(value) {
   const parsed = value && typeof value === 'object' ? value : null;
   if (!parsed) throw Object.assign(new Error('REQUIRED_PAGES_SCHEMA_INVALID'), { status: 502 });
   for (const key of ['about', 'contact']) {
     const page = parsed[key];
-    if (!page || typeof page !== 'object' || typeof page.title !== 'string' || !page.title.trim() || typeof page.html !== 'string' || !page.html.trim()) {
+    if (!page || typeof page !== 'object' || typeof page.html !== 'string' || !page.html.trim()) {
       throw Object.assign(new Error(`REQUIRED_PAGES_${key.toUpperCase()}_INVALID`), { status: 502 });
     }
   }
@@ -121,15 +130,16 @@ export async function generateRequiredPages(env, input = {}, aiBinding = env?.AI
   }
   const validated = validatePagesShape(parsed);
 
+  const titles = FIXED_TITLES[language];
   return {
     pages: [
       {
         type: 'privacy-policy',
-        title: language === 'en' ? 'Privacy Policy' : '개인정보처리방침',
+        title: titles['privacy-policy'],
         html: privacyPolicyHtml(language, { blogName, blogUrl, contactEmail, intro: validated.privacyIntro })
       },
-      { type: 'about', title: validated.about.title, html: validated.about.html },
-      { type: 'contact', title: validated.contact.title, html: validated.contact.html }
+      { type: 'about', title: titles.about, html: validated.about.html },
+      { type: 'contact', title: titles.contact, html: validated.contact.html }
     ],
     model: result.model,
     provider: result.provider,

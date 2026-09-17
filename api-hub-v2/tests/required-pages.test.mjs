@@ -16,8 +16,8 @@ const ENV = Object.freeze({
 });
 
 const MODEL_PAYLOAD = {
-  about: { title: '이 블로그 소개', html: '<p>이 블로그는 자취생 생활정보를 다룹니다.</p>' },
-  contact: { title: '문의하기', html: '<p>피드백을 보내주세요.</p>' },
+  about: { html: '<p>이 블로그는 자취생 생활정보를 다룹니다.</p>' },
+  contact: { html: '<p>피드백을 보내주세요.</p>' },
   privacyIntro: '이 블로그는 자취 생활 정보를 다루는 개인 블로그입니다.'
 };
 
@@ -44,7 +44,7 @@ test('generates a privacy policy (with boilerplate), about, and contact page in 
   assert.match(privacy.html, /adssettings\.google\.com/);
   assert.match(privacy.html, /owner@example\.com/);
 
-  assert.equal(about.title, '이 블로그 소개');
+  assert.equal(about.title, '소개');
   assert.match(about.html, /자취생 생활정보/);
 
   assert.equal(contact.title, '문의하기');
@@ -58,17 +58,21 @@ test('generates the English privacy policy variant with the AdSense/cookie discl
     topic: 'Practical tips for first-time renters',
     language: 'en'
   }, workersMustNotRun(), async () => geminiResponse(JSON.stringify({
-    about: { title: 'About This Blog', html: '<p>Tips for renters.</p>' },
-    contact: { title: 'Contact', html: '<p>Reach out anytime.</p>' },
+    about: { html: '<p>Tips for renters.</p>' },
+    contact: { html: '<p>Reach out anytime.</p>' },
     privacyIntro: 'This blog covers practical advice for people renting their first apartment.'
   })));
 
   const privacy = result.pages.find((page) => page.type === 'privacy-policy');
+  const about = result.pages.find((page) => page.type === 'about');
+  const contact = result.pages.find((page) => page.type === 'contact');
   assert.equal(privacy.title, 'Privacy Policy');
   assert.match(privacy.html, /Google AdSense/);
   assert.match(privacy.html, /DoubleClick DART cookie/);
   assert.match(privacy.html, /adssettings\.google\.com/);
   assert.doesNotMatch(privacy.html, /mailto:/); // no contactEmail supplied this time
+  assert.equal(about.title, 'About');
+  assert.equal(contact.title, 'Contact');
 });
 
 test('rejects missing required input before calling the model', async () => {
@@ -86,7 +90,7 @@ test('rejects a malformed model response instead of publishing a broken page', a
   await assert.rejects(
     () => generateRequiredPages(ENV, {
       blogName: 'x', blogUrl: 'https://x.com', topic: 't', language: 'ko'
-    }, workersMustNotRun(), async () => geminiResponse(JSON.stringify({ about: { title: 'x' } }))),
+    }, workersMustNotRun(), async () => geminiResponse(JSON.stringify({ about: {} }))),
     /GEMINI_JSON_INVALID/
   );
 });
