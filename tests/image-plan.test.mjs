@@ -81,8 +81,10 @@ test('English image alt text stays English', () => {
   assert.doesNotMatch(plan.images.map((image) => image.altText).join(' '), /대표|관련|설명/);
 });
 
-test('image plan limits body image count to three', () => {
-  assert.throws(() => buildImagePlan(ARTICLE, { bodyCount: 4 }), /BODY_IMAGE_COUNT_INVALID/);
+test('image plan allows up to six body images and rejects beyond that', () => {
+  assert.doesNotThrow(() => buildImagePlan(ARTICLE, { bodyCount: 4 }));
+  assert.doesNotThrow(() => buildImagePlan(ARTICLE, { bodyCount: 6 }));
+  assert.throws(() => buildImagePlan(ARTICLE, { bodyCount: 7 }), /BODY_IMAGE_COUNT_INVALID/);
 });
 
 test('stored images attach thumbnail first and distribute body images through article paragraphs', () => {

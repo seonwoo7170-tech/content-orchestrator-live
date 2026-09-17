@@ -61,7 +61,7 @@ function settingsFields() {
       ${field('maxPublishesPerDay', '하루 최대 예약/업데이트 수', 'number', 'min="0" max="20" step="1"')}
       ${selectField('approvalMode', '처리 방식', [['approval', '승인대기'], ['auto', '자동 예약']])}
       ${checkField('imagesEnabled', '썸네일/본문 이미지 생성')}
-      ${field('bodyImageCount', '본문 이미지 수', 'number', 'min="0" max="3" step="1"')}
+      ${field('bodyImageCount', '본문 이미지 수', 'number', 'min="0" max="6" step="1"')}
       ${selectField('operationMode', '운영 모드', [['growth', '성장'], ['recovery', '회복'], ['validation', '검증']])}
       <label class="automation-field">시간대<input name="timezone" value="Asia/Seoul" readonly></label>
     </div>`;

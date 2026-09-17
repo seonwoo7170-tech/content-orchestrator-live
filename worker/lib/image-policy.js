@@ -1,9 +1,9 @@
-import { buildImagePlan } from './image-plan.js';
+import { buildImagePlan, DEFAULT_BODY_IMAGE_COUNT, MAX_BODY_IMAGE_COUNT } from './image-plan.js';
 
 function bodyTarget(value) {
-  const number = Number(value ?? 2);
-  if (!Number.isInteger(number) || number < 0) return 2;
-  return Math.min(3, number);
+  const number = Number(value ?? DEFAULT_BODY_IMAGE_COUNT);
+  if (!Number.isInteger(number) || number < 0) return DEFAULT_BODY_IMAGE_COUNT;
+  return Math.min(MAX_BODY_IMAGE_COUNT, number);
 }
 
 export function countArticleImages(articleOrHtml) {
