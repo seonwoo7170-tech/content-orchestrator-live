@@ -112,6 +112,21 @@ test('handled provider 503 from service binding preserves the provider code', as
   assert.equal(publicCalls, 0);
 });
 
+test('a TOUR_API_ provider code from the Hub is preserved, not collapsed to a bare API_HUB_502', async () => {
+  const env = {
+    API_HUB_BASE_URL: 'https://api-hub-v2.example', HUB_API_KEY: 'secret',
+    API_HUB_SERVICE: { async fetch() { return new Response(JSON.stringify({ error: 'TOUR_API_SERVICE_KEY_IS_NOT_REGISTERED_ERROR' }), { status: 502 }); } }
+  };
+  await assert.rejects(
+    () => callHub(env, '/api/hub/tour/attractions', { areaCode: '1' }, async () => new Response('', { status: 404 })),
+    (error) => {
+      assert.equal(error.code, 'TOUR_API_SERVICE_KEY_IS_NOT_REGISTERED_ERROR');
+      assert.equal(error.message, 'API_HUB_502:TOUR_API_SERVICE_KEY_IS_NOT_REGISTERED_ERROR');
+      return true;
+    }
+  );
+});
+
 test('a provider validation hint from the Hub is folded into the visible error message, not just error.data', async () => {
   const env = {
     API_HUB_BASE_URL: 'https://api-hub-v2.example', HUB_API_KEY: 'secret',

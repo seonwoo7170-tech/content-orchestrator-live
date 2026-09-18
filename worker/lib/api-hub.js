@@ -84,6 +84,7 @@ const SAFE_PROVIDER_CODE_PREFIXES = Object.freeze([
   'WORKERS_AI_',
   'GOOGLE_',
   'TAVILY_',
+  'TOUR_API_',
   'IMAGE_',
   'WRITER_',
   'CRITIC_',
