@@ -126,7 +126,17 @@ const EN_TO_KR_CITY = Object.freeze({
   gyeongju: '경주',
   suwon: '수원',
   gangneung: '강릉',
-  jeonju: '전주'
+  jeonju: '전주',
+  yeosu: '여수',
+  tongyeong: '통영',
+  sokcho: '속초',
+  chuncheon: '춘천',
+  pohang: '포항',
+  andong: '안동',
+  suncheon: '순천',
+  gapyeong: '가평',
+  pyeongchang: '평창',
+  geoje: '거제'
 });
 
 export function koreanCityNameFor(cityNameEn) {
@@ -161,4 +171,25 @@ export async function findKlookProductsForAttraction(env, { cityNameEn, limit = 
     instantConfirmation: Boolean(row.instant_confirmation),
     affiliateLink: row.affiliate_link
   }));
+}
+
+// Klook's affiliate program only offers manual CSV export, not a live search API, so catalog
+// coverage is only ever as good as what the operator has imported for a given city. This
+// surfaces exactly which known cities still have zero products, so a coverage gap is a
+// visible, actionable backlog item instead of articles silently publishing without an
+// affiliate recommendation.
+export async function klookCityCoverage(env) {
+  const db = requireDb(env);
+  const rows = await db.prepare(
+    `SELECT city_name, COUNT(*) as count FROM klook_products GROUP BY city_name`
+  ).bind().all();
+  const counts = new Map((rows.results || []).map((row) => [row.city_name, Number(row.count || 0)]));
+
+  return Object.entries(EN_TO_KR_CITY)
+    .map(([cityNameEn, cityNameKo]) => ({
+      cityNameEn,
+      cityNameKo,
+      productCount: counts.get(cityNameKo) || 0
+    }))
+    .sort((a, b) => a.productCount - b.productCount || a.cityNameEn.localeCompare(b.cityNameEn));
 }

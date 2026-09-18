@@ -10,7 +10,7 @@ import { listGa4Coverage } from './lib/ga4-coverage.js';
 import { runScheduledImageCompletion } from './lib/image-completion.js';
 import { listImageDiagnostics } from './lib/image-diagnostics.js';
 import { resetFailedImageForRetry } from './lib/image-store.js';
-import { importKlookProducts } from './lib/klook-catalog.js';
+import { importKlookProducts, klookCityCoverage } from './lib/klook-catalog.js';
 import { adoptManualReadyArticles } from './lib/manual-ready-adoption.js';
 import { listTopicCandidates, refreshTopicCandidatesFromGsc } from './lib/topic-candidates.js';
 import { applyIdeaToCandidates, createIdea, listContentStrategy, strategyLinksForTopic } from './lib/content-strategy.js';
@@ -172,6 +172,11 @@ async function importKlook(request, env) {
   return json(result, result.imported > 0 ? 200 : 207);
 }
 
+async function klookCoverage(request, env) {
+  if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+  return json({ cities: await klookCityCoverage(env) });
+}
+
 async function imageDiagnostics(request, env) {
   if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
   return json(await listImageDiagnostics(env));
@@ -252,6 +257,9 @@ export default {
       }
       if (request.method === 'POST' && url.pathname === '/api/operations/klook/import') {
         return await importKlook(request, env);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operations/klook/coverage') {
+        return await klookCoverage(request, env);
       }
       if (request.method === 'POST' && url.pathname === '/api/operations/publish-tick') {
         return await publishTick(request, env, ctx);

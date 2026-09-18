@@ -6,6 +6,7 @@ import {
   extractKlookActivityId,
   findKlookProductsForAttraction,
   importKlookProducts,
+  klookCityCoverage,
   koreanCityNameFor,
   normalizeKlookProductRow,
   parseKlookProductCsv
@@ -112,4 +113,25 @@ test('findKlookProductsForAttraction returns nothing for a city with no English-
   await importKlookProducts(env, SAMPLE_CSV);
   const results = await findKlookProductsForAttraction(env, { cityNameEn: 'Atlantis' });
   assert.deepEqual(results, []);
+});
+
+test('klookCityCoverage reports zero for every known city that has not been imported yet, sorted emptiest first', async (t) => {
+  const { env } = fixture(t);
+  await importKlookProducts(env, SAMPLE_CSV);
+
+  const coverage = await klookCityCoverage(env);
+  const seoul = coverage.find((item) => item.cityNameEn === 'seoul');
+  const busan = coverage.find((item) => item.cityNameEn === 'busan');
+
+  assert.equal(seoul.productCount, 3);
+  assert.equal(seoul.cityNameKo, '서울');
+  assert.equal(busan.productCount, 0);
+  assert.equal(coverage[0].productCount, 0);
+  assert.ok(coverage.length >= 20);
+});
+
+test('klookCityCoverage reports every known city as zero before any import has happened', async (t) => {
+  const { env } = fixture(t);
+  const coverage = await klookCityCoverage(env);
+  assert.ok(coverage.every((item) => item.productCount === 0));
 });
