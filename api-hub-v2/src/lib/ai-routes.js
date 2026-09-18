@@ -4,6 +4,7 @@ import { runPrimaryWithGeminiFallback } from './ai-provider-router.js';
 import { MASTER_V45, parseJsonText } from './contracts.js';
 import { loadMasterV45RolePrompt } from './master-v45-role-prompts.js';
 import { collectWriterResearch } from './tavily-search.js';
+import { buildTourApiResearch, getAttractionDetail } from './tour-api.js';
 
 const WRITER_ADAPTER = `AUTOMATION WRITER ADAPTER — this adapter overrides any interactive/questioning flow in the master prompt for this server call.
 Platform is Google Blogger / Blogspot. Do not ask questions. Do not wait for user selection. Produce one complete publication-ready Article from the supplied topic and language.
@@ -179,16 +180,28 @@ export async function diagnostic(env, aiBinding = env?.AI) {
 }
 
 export async function writer(env, input, aiBinding = env?.AI, fetchImpl = fetch) {
-  const topic = String(input?.topic || '').trim();
   const language = String(input?.language || '').trim();
-  if (!topic) throw Object.assign(new Error('WRITER_TOPIC_REQUIRED'), { status: 400 });
   if (!['ko', 'en'].includes(language)) throw Object.assign(new Error('WRITER_LANGUAGE_INVALID'), { status: 400 });
 
-  const research = await collectWriterResearch(env, {
-    topic,
-    language,
-    researchMode: input?.researchMode || 'auto'
-  }, fetchImpl);
+  // A TourAPI-sourced job (smileatlas) supplies a real attraction instead of a bare topic
+  // string. Fetching it here (not in the caller) keeps this the only place that decides
+  // between real official facts and Tavily search, and lets the attraction's own title
+  // stand in for topic when the caller did not already supply one.
+  const tourApiContentId = String(input?.tourApiContentId || '').trim();
+  const attraction = tourApiContentId
+    ? await getAttractionDetail(env, { contentId: tourApiContentId }, fetchImpl)
+    : null;
+
+  const topic = String(input?.topic || attraction?.title || '').trim();
+  if (!topic) throw Object.assign(new Error('WRITER_TOPIC_REQUIRED'), { status: 400 });
+
+  const research = attraction
+    ? buildTourApiResearch(attraction)
+    : await collectWriterResearch(env, {
+      topic,
+      language,
+      researchMode: input?.researchMode || 'auto'
+    }, fetchImpl);
   const rolePrompt = await loadMasterV45RolePrompt('writer');
   const cloudflareModel = env.WRITER_MODEL || '@cf/openai/gpt-oss-120b';
   const geminiModel = env.GEMINI_WRITER_MODEL || GEMINI_DEFAULT_MODEL;

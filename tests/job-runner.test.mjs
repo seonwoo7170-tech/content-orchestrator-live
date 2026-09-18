@@ -42,3 +42,40 @@ test('existing post fetch rejects changed Blogger Post ID', async () => {
   const fetchImpl = async () => new Response(JSON.stringify({ blogId:'b1', bloggerPostId:'different', article: baseArticle }), { status:200 });
   await assert.rejects(() => fetchExistingBloggerPost({ API_HUB_BASE_URL:'https://hub.example', HUB_API_KEY:'secret' }, { blogId:'b1', bloggerPostId:'p1' }, fetchImpl), /BLOGGER_POST_ID_CHANGED/);
 });
+
+test('a new_article job carrying tourApiContentId passes it straight through to the Hub writer call', async () => {
+  const seen = [];
+  const tourGroundedArticle = { ...baseArticle, title: 'Gyeongbokgung Palace Guide', topic: 'Gyeongbokgung Palace', language: 'en' };
+  const fetchImpl = router([
+    { body: { article: tourGroundedArticle } },
+    { body: { status: 'PASS', score: 100, issues: [] } }
+  ], seen);
+
+  await executeJob(
+    { API_HUB_BASE_URL: 'https://hub.example', HUB_API_KEY: 'secret' },
+    { mode: 'new_article', blogId: 'smileatlas', topic: 'Gyeongbokgung Palace', language: 'en', tourApiContentId: '126508' },
+    fetchImpl
+  );
+
+  const writerCall = seen.find((call) => /\/api\/hub\/ai\/writer$/.test(call.url));
+  assert.ok(writerCall, 'expected a writer call');
+  assert.equal(writerCall.body.tourApiContentId, '126508');
+  assert.equal(writerCall.body.topic, 'Gyeongbokgung Palace');
+});
+
+test('a new_article job without tourApiContentId never sends that field to the Hub writer call', async () => {
+  const seen = [];
+  const fetchImpl = router([
+    { body: { article: { ...baseArticle, topic: 'test topic', language: 'en' } } },
+    { body: { status: 'PASS', score: 100, issues: [] } }
+  ], seen);
+
+  await executeJob(
+    { API_HUB_BASE_URL: 'https://hub.example', HUB_API_KEY: 'secret' },
+    { mode: 'new_article', blogId: 'b1', topic: 'test topic', language: 'en' },
+    fetchImpl
+  );
+
+  const writerCall = seen.find((call) => /\/api\/hub\/ai\/writer$/.test(call.url));
+  assert.equal(Object.hasOwn(writerCall.body, 'tourApiContentId'), false);
+});

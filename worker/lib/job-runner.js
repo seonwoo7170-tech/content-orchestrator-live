@@ -75,7 +75,8 @@ export async function executeJob(env, job, fetchImpl = fetch, hooks = {}) {
       topic: String(job.topic || ''),
       language: job.language || 'ko',
       topicCandidateId: Number(job.topicCandidateId || 0) || null,
-      topicSource: job.topicSource || null
+      topicSource: job.topicSource || null,
+      ...(job.tourApiContentId ? { tourApiContentId: String(job.tourApiContentId) } : {})
     };
     const seoBrief = job.resumeResult?.seoBrief || await seoBriefFor(env, request);
     if (isReviewContinuation(job)) {

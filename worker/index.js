@@ -352,9 +352,18 @@ export default {
         const input = await readJson(request);
         const blogId = String(input.blogId || '').trim();
         if (!blogId) return json({ error: 'BLOG_ID_REQUIRED' }, 400);
-        if (!String(input.topic || '').trim()) return json({ error: 'TOPIC_REQUIRED' }, 400);
+        const tourApiContentId = String(input.tourApiContentId || '').trim();
+        // A TourAPI-sourced job (smileatlas) can omit topic: the Hub writer derives it from
+        // the attraction's own title. Every other blog still must supply one.
+        if (!String(input.topic || '').trim() && !tourApiContentId) return json({ error: 'TOPIC_REQUIRED' }, 400);
         const language = await resolveNewArticleLanguage(env, blogId, input.language);
-        const job = { mode: 'new_article', blogId, topic: String(input.topic), language };
+        const job = {
+          mode: 'new_article',
+          blogId,
+          topic: String(input.topic || ''),
+          language,
+          ...(tourApiContentId ? { tourApiContentId } : {})
+        };
         return json({ accepted: true, jobId: await createJob(env, job), job }, 202);
       }
 
