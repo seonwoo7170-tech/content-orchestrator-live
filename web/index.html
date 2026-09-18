@@ -171,6 +171,17 @@
           <h2>운영 안전장치</h2>
           <p class="muted">기존 운영 큐와 Job은 UI 개발 과정에서 변경하지 않습니다. 신규 글과 기존 발행글 리페어는 Final Critic 이후 ready 상태에서 멈추며, Blogger 쓰기와 자동발행은 별도 안전 게이트가 켜지기 전까지 비활성입니다.</p>
         </section>
+
+        <section class="panel" id="klook-panel">
+          <div class="panel-head"><div><p class="section-kicker">MONETIZATION</p><h2>클룩 제휴 상품</h2></div><span id="klook-state" class="status-pill neutral">확인 중</span></div>
+          <p class="hint">클룩 제휴 대시보드의 "제품 탐색기"에서 내보낸 CSV 파일을 업로드하면 도시별 투어 상품이 자동으로 매칭됩니다. 같은 상품을 다시 올리면 최신 가격/커미션으로 갱신됩니다.</p>
+          <div class="inline-form">
+            <input id="klook-csv-file" type="file" accept=".csv,text/csv" aria-label="클룩 CSV 파일">
+            <button id="klook-upload" class="button primary" type="button">업로드</button>
+            <button id="klook-refresh-coverage" class="button ghost" type="button">현황 새로고침</button>
+          </div>
+          <div id="klook-coverage-list" class="plan-list" aria-live="polite"></div>
+        </section>
       </section>
     </main>
 
@@ -202,6 +213,7 @@
   <script type="module" src="./build-stage.js"></script>
   <script type="module" src="./blogs.js"></script>
   <script type="module" src="./operations.js"></script>
+  <script type="module" src="./klook-panel.js"></script>
   <script type="module" src="./performance.js"></script>
   <script type="module" src="./gsc-interactions.js"></script>
 </body>
