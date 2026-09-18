@@ -1,4 +1,5 @@
 import phase4Entry from './phase4-entry.js';
+import { callHub } from './lib/api-hub.js';
 import { requireAdmin } from './lib/admin-auth.js';
 import { loadConnectedBlogs } from './lib/connected-blogs.js';
 import { readAutomationSettings } from './lib/automation-settings.js';
@@ -172,6 +173,22 @@ async function importKlook(request, env) {
   return json(result, result.imported > 0 ? 200 : 207);
 }
 
+// Admin-facing proxy to the Hub's TourAPI route, purely so an operator can look up a real
+// attraction's contentId (via x-admin-api-key, the credential already used everywhere else
+// in the dashboard) without needing the separate x-hub-api-key that direct Hub calls require.
+async function tourAttractions(request, env) {
+  if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+  const url = new URL(request.url);
+  const areaCode = url.searchParams.get('areaCode') || '';
+  const contentTypeId = url.searchParams.get('contentTypeId') || '';
+  const numOfRows = url.searchParams.get('numOfRows') || '';
+  return json(await callHub(env, '/api/hub/tour/attractions', {
+    areaCode,
+    ...(contentTypeId ? { contentTypeId } : {}),
+    ...(numOfRows ? { numOfRows } : {})
+  }));
+}
+
 async function klookCoverage(request, env) {
   if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
   return json({ cities: await klookCityCoverage(env) });
@@ -260,6 +277,9 @@ export default {
       }
       if (request.method === 'GET' && url.pathname === '/api/operations/klook/coverage') {
         return await klookCoverage(request, env);
+      }
+      if (request.method === 'GET' && url.pathname === '/api/operations/tour/attractions') {
+        return await tourAttractions(request, env);
       }
       if (request.method === 'POST' && url.pathname === '/api/operations/publish-tick') {
         return await publishTick(request, env, ctx);
