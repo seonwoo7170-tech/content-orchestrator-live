@@ -162,7 +162,11 @@ function parseHubResponse({ response, text }) {
     const providerCode = safePersistedProviderCode(providerError);
     const hubCode = `API_HUB_${response.status}`;
     const routeMissing = isRouteMissingProviderCode(response.status, providerError);
-    const error = new Error(providerError ? `${hubCode}:${providerError}` : hubCode);
+    // The Hub already sanitizes/length-caps this (see index.js), so it is safe to fold
+    // straight into the message that ends up in visible job logs, not just error.data.
+    const providerHint = typeof data?.providerValidationHint === 'string' ? data.providerValidationHint : null;
+    const baseMessage = providerError ? `${hubCode}:${providerError}` : hubCode;
+    const error = new Error(providerHint ? `${baseMessage}:${providerHint}` : baseMessage);
     error.status = response.status;
     error.hubStatus = response.status;
     error.code = routeMissing ? hubCode : (providerCode || hubCode);

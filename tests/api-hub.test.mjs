@@ -112,6 +112,42 @@ test('handled provider 503 from service binding preserves the provider code', as
   assert.equal(publicCalls, 0);
 });
 
+test('a provider validation hint from the Hub is folded into the visible error message, not just error.data', async () => {
+  const env = {
+    API_HUB_BASE_URL: 'https://api-hub-v2.example', HUB_API_KEY: 'secret',
+    API_HUB_SERVICE: {
+      async fetch() {
+        return new Response(JSON.stringify({
+          error: 'KIE_VALIDATION_FAILED',
+          providerValidationHint: 'aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16'
+        }), { status: 422 });
+      }
+    }
+  };
+  await assert.rejects(
+    () => callHub(env, '/api/hub/image/generate', { role: 'body' }, async () => new Response('', { status: 404 })),
+    (error) => {
+      assert.equal(error.message, 'API_HUB_422:KIE_VALIDATION_FAILED:aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16');
+      assert.equal(error.data.providerValidationHint, 'aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16');
+      return true;
+    }
+  );
+});
+
+test('no hint suffix is added when the Hub omits providerValidationHint', async () => {
+  const env = {
+    API_HUB_BASE_URL: 'https://api-hub-v2.example', HUB_API_KEY: 'secret',
+    API_HUB_SERVICE: { async fetch() { return new Response(JSON.stringify({ error: 'KIE_AUTH_FAILED' }), { status: 401 }); } }
+  };
+  await assert.rejects(
+    () => callHub(env, '/api/hub/image/generate', { role: 'body' }, async () => new Response('', { status: 404 })),
+    (error) => {
+      assert.equal(error.message, 'API_HUB_401:KIE_AUTH_FAILED');
+      return true;
+    }
+  );
+});
+
 test('service binding transport exception becomes a bounded transient API_HUB_503 and never public-fallbacks', async () => {
   let publicCalls = 0;
   const env = {

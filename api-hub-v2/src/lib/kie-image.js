@@ -131,10 +131,22 @@ function numericCode(value) {
   return Number.isInteger(number) ? number : null;
 }
 
+// KIE's own reason (data.msg, e.g. "prompt is required" or "invalid aspect_ratio") was
+// previously discarded entirely in favor of the generic KIE_VALIDATION_FAILED bucket,
+// leaving no way to tell why a specific request was rejected. Sanitized and length-capped
+// the same way cloudflare-ai.js's providerValidationHint is, so it is safe to log/surface.
+function kieValidationHint(data) {
+  const raw = String(data?.msg || '').trim();
+  if (!raw || raw.toLowerCase() === 'success') return null;
+  const safe = raw.replace(/[^A-Za-z0-9_./,:; -]/g, ' ').replace(/\s+/g, ' ').trim();
+  return safe ? safe.slice(0, 200) : null;
+}
+
 function kieFailure(response, data, safeError) {
   const providerHttpStatus = numericCode(response?.status);
   const providerCode = numericCode(data?.code);
   const signals = new Set([providerHttpStatus, providerCode].filter((value) => value !== null));
+  const validationHint = kieValidationHint(data);
 
   let message = safeError;
   let status = 502;
@@ -155,11 +167,13 @@ function kieFailure(response, data, safeError) {
     status = 502;
   }
 
-  return Object.assign(new Error(message), {
+  const error = Object.assign(new Error(message), {
     status,
     providerHttpStatus,
     providerCode
   });
+  if (message === 'KIE_VALIDATION_FAILED' && validationHint) error.providerValidationHint = validationHint;
+  return error;
 }
 
 function kieTaskFailure(task) {

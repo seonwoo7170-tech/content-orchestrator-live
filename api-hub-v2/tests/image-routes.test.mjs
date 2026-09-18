@@ -295,3 +295,55 @@ for (const sample of [
     );
   });
 }
+
+test('a KIE validation failure keeps its own reason as a sanitized, capped hint instead of discarding it', async () => {
+  const fetchImpl = async () => jsonResponse({ code: 422, msg: 'aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16' }, 422);
+  await assert.rejects(
+    () => generateImage(
+      { KIE_API_KEY: 'test-secret' },
+      { role: 'thumbnail', prompt: 'clean residential repair scene', providerMode: 'kie', aspectRatio: '16:9' },
+      aiMock(async () => ({ image: 'unused' })),
+      fetchImpl
+    ),
+    (error) => {
+      assert.equal(error.message, 'KIE_VALIDATION_FAILED');
+      assert.equal(error.providerValidationHint, 'aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16');
+      return true;
+    }
+  );
+});
+
+test('a KIE validation hint is stripped of characters outside the safe allowlist and length-capped', async () => {
+  const fetchImpl = async () => jsonResponse({ code: 400, msg: `bad<script>${'x'.repeat(250)}` }, 400);
+  await assert.rejects(
+    () => generateImage(
+      { KIE_API_KEY: 'test-secret' },
+      { role: 'body', prompt: 'clean residential repair scene', providerMode: 'kie', aspectRatio: '4:3' },
+      aiMock(async () => ({ image: 'unused' })),
+      fetchImpl
+    ),
+    (error) => {
+      assert.doesNotMatch(error.providerValidationHint, /[<>]/);
+      assert.ok(error.providerValidationHint.length <= 200);
+      return true;
+    }
+  );
+});
+
+test('no validation hint is attached when KIE omits msg or only reports success', async () => {
+  for (const msg of ['success', '', undefined]) {
+    const fetchImpl = async () => jsonResponse({ code: 422, msg }, 422);
+    await assert.rejects(
+      () => generateImage(
+        { KIE_API_KEY: 'test-secret' },
+        { role: 'body', prompt: 'clean residential repair scene', providerMode: 'kie', aspectRatio: '4:3' },
+        aiMock(async () => ({ image: 'unused' })),
+        fetchImpl
+      ),
+      (error) => {
+        assert.equal(error.providerValidationHint, undefined);
+        return true;
+      }
+    );
+  }
+});
