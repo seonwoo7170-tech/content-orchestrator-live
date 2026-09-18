@@ -50,13 +50,24 @@ function safeBaseUrl(env) {
 
 function resultCodeError(resultCode, resultMsg) {
   const code = String(resultCode || '').trim();
-  if (code === '0000' || code === '00') return null;
-  const mapped = RESULT_CODE_MESSAGES[code] || `TOUR_API_ERROR_${code || 'UNKNOWN'}`;
+  if (!code || code === '0000' || code === '00') return null;
+  const mapped = RESULT_CODE_MESSAGES[code] || `TOUR_API_ERROR_${code}`;
   const error = new Error(mapped);
   error.status = code === '30' || code === '32' ? 401 : code === '22' ? 429 : 502;
   error.tourApiResultCode = code;
   error.tourApiResultMsg = String(resultMsg || '').slice(0, 200);
   return error;
+}
+
+// data.go.kr's gateway rejects a request (bad/unregistered key, quota, IP allowlist, etc.)
+// *before* it reaches the actual service, and reports that using a completely different
+// envelope than a normal service-level result: { cmmMsgHeader: { returnReasonCode,
+// returnAuthMsg, errMsg } } instead of { response: { header: { resultCode, resultMsg } } }.
+// Both use the same 01-99 reason-code table, so route it through the same classifier.
+function gatewayFailure(data) {
+  const header = data?.cmmMsgHeader;
+  if (!header) return null;
+  return resultCodeError(header.returnReasonCode, header.returnAuthMsg || header.errMsg);
 }
 
 async function callTourApi(env, operation, params = {}, fetchImpl = fetch) {
@@ -92,10 +103,20 @@ async function callTourApi(env, operation, params = {}, fetchImpl = fetch) {
   }
 
   const header = data?.response?.header;
-  const failure = resultCodeError(header?.resultCode, header?.resultMsg);
-  if (failure) throw failure;
+  if (header) {
+    const failure = resultCodeError(header.resultCode, header.resultMsg);
+    if (failure) throw failure;
+    return data?.response?.body || {};
+  }
 
-  return data?.response?.body || {};
+  const gwFailure = gatewayFailure(data);
+  if (gwFailure) throw gwFailure;
+
+  // Neither the normal { response: { header } } shape nor the gateway { cmmMsgHeader }
+  // fault shape was present. Rather than collapsing to another opaque "UNKNOWN", report
+  // the top-level keys we actually got so a real fix can follow instead of another guess.
+  const keys = Object.keys(data || {}).slice(0, 10).join(',') || 'EMPTY_OBJECT';
+  throw httpError(`TOUR_API_UNEXPECTED_RESPONSE_SHAPE:keys=${keys}`, 502);
 }
 
 export function normalizeTourApiItems(body) {

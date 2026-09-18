@@ -84,6 +84,30 @@ test('a bare XML/SOAP fault body is treated as a provider failure instead of thr
   );
 });
 
+test('a gateway-level fault (JSON cmmMsgHeader envelope, not the normal response.header shape) is classified by its own reason code', async () => {
+  const fetchImpl = async () => jsonResponse({
+    cmmMsgHeader: { errMsg: 'SERVICE ERROR', returnAuthMsg: 'SERVICE_KEY_IS_NOT_REGISTERED_ERROR', returnReasonCode: '30' }
+  });
+
+  await assert.rejects(
+    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    (error) => {
+      assert.equal(error.message, 'TOUR_API_SERVICE_KEY_IS_NOT_REGISTERED_ERROR');
+      assert.equal(error.status, 401);
+      return true;
+    }
+  );
+});
+
+test('a response with neither the normal header shape nor the gateway fault shape reports the actual top-level keys instead of an opaque UNKNOWN', async () => {
+  const fetchImpl = async () => jsonResponse({ somethingUnexpected: true });
+
+  await assert.rejects(
+    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    /TOUR_API_UNEXPECTED_RESPONSE_SHAPE:keys=somethingUnexpected/
+  );
+});
+
 test('getAttractionDetail merges detailCommon2 overview with detailImage2 extra photos, deduplicated', async () => {
   const calls = [];
   const fetchImpl = async (url) => {
