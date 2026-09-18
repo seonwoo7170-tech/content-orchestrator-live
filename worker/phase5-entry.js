@@ -10,6 +10,7 @@ import { listGa4Coverage } from './lib/ga4-coverage.js';
 import { runScheduledImageCompletion } from './lib/image-completion.js';
 import { listImageDiagnostics } from './lib/image-diagnostics.js';
 import { resetFailedImageForRetry } from './lib/image-store.js';
+import { importKlookProducts } from './lib/klook-catalog.js';
 import { adoptManualReadyArticles } from './lib/manual-ready-adoption.js';
 import { listTopicCandidates, refreshTopicCandidatesFromGsc } from './lib/topic-candidates.js';
 import { applyIdeaToCandidates, createIdea, listContentStrategy, strategyLinksForTopic } from './lib/content-strategy.js';
@@ -159,6 +160,18 @@ async function resumeImages(request, env, ctx) {
   return json(result, result.ok ? 200 : 207);
 }
 
+// Klook's affiliate program has no live product-search API; the operator periodically
+// exports a CSV from its "제품 탐색기" (product explorer) tool for whichever cities/keywords
+// are relevant and uploads it here. Upserts by activity id, so re-uploading a refreshed
+// export safely updates prices/commission instead of duplicating rows.
+async function importKlook(request, env) {
+  if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+  const csvText = await request.text();
+  if (!csvText.trim()) return json({ error: 'KLOOK_CSV_BODY_REQUIRED' }, 400);
+  const result = await importKlookProducts(env, csvText);
+  return json(result, result.imported > 0 ? 200 : 207);
+}
+
 async function imageDiagnostics(request, env) {
   if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
   return json(await listImageDiagnostics(env));
@@ -236,6 +249,9 @@ export default {
       }
       if (request.method === 'POST' && url.pathname === '/api/operations/images/reset-failed') {
         return await resetFailedImages(request, env);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/operations/klook/import') {
+        return await importKlook(request, env);
       }
       if (request.method === 'POST' && url.pathname === '/api/operations/publish-tick') {
         return await publishTick(request, env, ctx);
