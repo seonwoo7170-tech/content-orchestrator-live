@@ -7,6 +7,7 @@ import {
   findKlookProductsForAttraction,
   importKlookProducts,
   klookCityCoverage,
+  klookDestinationLink,
   koreanCityNameFor,
   normalizeKlookProductRow,
   parseKlookProductCsv
@@ -151,4 +152,32 @@ test('a non-Korean product is excluded from both matching and coverage even if i
   const coverage = await klookCityCoverage(env);
   const seoul = coverage.find((item) => item.cityNameEn === 'seoul');
   assert.equal(seoul.productCount, 3);
+});
+
+test('klookDestinationLink builds a tracked city page link using the default affiliate id, no env config required', () => {
+  assert.equal(klookDestinationLink({}, 'Seoul'), 'https://www.klook.com/en-US/destination/c13/?aid=135747');
+  assert.equal(klookDestinationLink({}, 'busan'), 'https://www.klook.com/en-US/destination/c46/?aid=135747');
+  assert.equal(klookDestinationLink({}, 'Gangwon-do'), 'https://www.klook.com/en-US/destination/c156/?aid=135747');
+  assert.equal(klookDestinationLink({}, 'Seogwipo'), 'https://www.klook.com/en-US/destination/c25723/?aid=135747');
+});
+
+test('klookDestinationLink honors an explicit env override of the affiliate id', () => {
+  assert.equal(klookDestinationLink({ KLOOK_AFFILIATE_ID: '999999' }, 'Seoul'), 'https://www.klook.com/en-US/destination/c13/?aid=999999');
+});
+
+test('klookDestinationLink returns null for a city with no known destination id, instead of a broken link', () => {
+  assert.equal(klookDestinationLink({}, 'Atlantis'), null);
+});
+
+test('klookDestinationLink returns null when an explicit override is not a valid numeric id', () => {
+  assert.equal(klookDestinationLink({ KLOOK_AFFILIATE_ID: 'not-a-number' }, 'Seoul'), null);
+});
+
+test('this safety-net link is available for a city (Andong) that has no imported products at all', async (t) => {
+  const { env } = fixture(t);
+  await importKlookProducts(env, SAMPLE_CSV);
+
+  const products = await findKlookProductsForAttraction(env, { cityNameEn: 'Andong' });
+  assert.deepEqual(products, []);
+  assert.equal(klookDestinationLink(env, 'Andong'), 'https://www.klook.com/en-US/destination/c8898/?aid=135747');
 });

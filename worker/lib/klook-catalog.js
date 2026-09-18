@@ -136,12 +136,55 @@ const EN_TO_KR_CITY = Object.freeze({
   suncheon: '순천',
   gapyeong: '가평',
   pyeongchang: '평창',
-  geoje: '거제'
+  geoje: '거제',
+  gangwondo: '강원도',
+  seogwipo: '서귀포'
 });
 
+function normalizedCityKey(cityNameEn) {
+  return String(cityNameEn || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+}
+
 export function koreanCityNameFor(cityNameEn) {
-  const key = String(cityNameEn || '').trim().toLowerCase().replace(/[^a-z]/g, '');
-  return EN_TO_KR_CITY[key] || null;
+  return EN_TO_KR_CITY[normalizedCityKey(cityNameEn)] || null;
+}
+
+// Klook's affiliate dashboard ("기타 툴" → city page link list) publishes a stable table of
+// destination-page ids per city. Unlike the product catalog (which needs a fresh manual CSV
+// export per city to have anything to recommend), these ids are a fixed, official mapping:
+// they give a always-available "browse this city on Klook" link even for a city with zero
+// imported products yet, so this is the safety-net tier under findKlookProductsForAttraction.
+const KLOOK_CITY_DESTINATION_ID = Object.freeze({
+  seoul: '13',
+  busan: '46',
+  gangwondo: '156',
+  jeju: '20544',
+  incheon: '158',
+  seogwipo: '25723',
+  gyeongju: '8928',
+  daegu: '545',
+  ulsan: '6955',
+  yeosu: '703649',
+  andong: '8898'
+});
+
+// Free Cloudflare Workers cap total env bindings (vars + secrets) at 64; this worker is
+// already close to that ceiling (see image-production-config.test.mjs). Klook's affiliate
+// id is a stable, non-sensitive account identifier (tied to the approved partner site, not
+// a credential), so it is a source constant here rather than another wrangler var slot.
+// env.KLOOK_AFFILIATE_ID still overrides it if ever explicitly configured.
+const DEFAULT_KLOOK_AFFILIATE_ID = '135747';
+
+export function klookDestinationLink(env, cityNameEn) {
+  const destinationId = KLOOK_CITY_DESTINATION_ID[normalizedCityKey(cityNameEn)];
+  if (!destinationId) return null;
+
+  const affiliateId = String(env?.KLOOK_AFFILIATE_ID || DEFAULT_KLOOK_AFFILIATE_ID).trim();
+  if (!/^\d+$/.test(affiliateId)) return null;
+
+  const url = new URL(`https://www.klook.com/en-US/destination/c${destinationId}/`);
+  url.searchParams.set('aid', affiliateId);
+  return url.href;
 }
 
 // The operator's Klook export can legitimately cover Klook's whole worldwide catalog, not
