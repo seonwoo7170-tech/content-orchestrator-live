@@ -241,6 +241,26 @@ export default {
         return json(await readAutomationSettings(env, blogs));
       }
 
+      // Called by the smileseon-blog-pages Lambda (external service, authenticated the same
+      // way an admin session bootstraps: x-admin-api-key). Returns only the blogs a person has
+      // explicitly opted in via the per-blog automation settings toggle — never every blog the
+      // connected Google account can see, so nothing gets touched without deliberate selection.
+      if (request.method === 'GET' && url.pathname === '/api/automation/required-pages-blogs') {
+        if (!await requireAdmin(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+        const blogs = await connectedBlogsForReadOnlyDashboard(env);
+        const automation = await readAutomationSettings(env, blogs);
+        const enabled = automation.blogs.filter((blog) => blog.effective.requiredPagesEnabled);
+        return json({
+          blogs: enabled.map((blog) => ({
+            blogId: blog.blogId,
+            blogName: blog.name,
+            url: blog.url,
+            language: blog.resolvedLanguage
+          })),
+          count: enabled.length
+        });
+      }
+
       if (request.method === 'PUT' && url.pathname === '/api/automation/settings/global') {
         if (!await requireAdmin(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
         const settings = await saveGlobalAutomationSettings(env, await readJson(request));

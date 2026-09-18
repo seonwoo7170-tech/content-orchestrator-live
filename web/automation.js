@@ -62,6 +62,7 @@ function settingsFields() {
       ${selectField('approvalMode', '처리 방식', [['approval', '승인대기'], ['auto', '자동 예약']])}
       ${checkField('imagesEnabled', '썸네일/본문 이미지 생성')}
       ${field('bodyImageCount', '본문 이미지 수', 'number', 'min="0" max="6" step="1"')}
+      ${checkField('requiredPagesEnabled', '필수페이지 자동 생성 (개인정보처리방침·소개·문의하기)')}
       ${selectField('operationMode', '운영 모드', [['growth', '성장'], ['recovery', '회복'], ['validation', '검증']])}
       <label class="automation-field">시간대<input name="timezone" value="Asia/Seoul" readonly></label>
     </div>`;
@@ -96,6 +97,7 @@ function settingsFromForm(form) {
     maxPublishesPerDay: Number(value('maxPublishesPerDay')),
     imagesEnabled: checked('imagesEnabled'),
     bodyImageCount: Number(value('bodyImageCount')),
+    requiredPagesEnabled: checked('requiredPagesEnabled'),
     approvalMode: value('approvalMode'),
     operationMode: value('operationMode'),
     contentLanguage: value('contentLanguage') || 'auto',
@@ -117,7 +119,8 @@ function summaryText(blog) {
     : '🟡 예약 발행 OFF';
   const newCount = settings.newArticlesEnabled ? settings.newArticlesPerDay : 0;
   const repairCount = settings.repairsEnabled ? settings.repairsPerDay : 0;
-  return `${publish} · ${languageLabel(blog.resolvedLanguage)} · 신규 ${newCount} / 리페어 최대 ${repairCount}`;
+  const requiredPages = settings.requiredPagesEnabled ? ' · 필수페이지 ON' : '';
+  return `${publish} · ${languageLabel(blog.resolvedLanguage)} · 신규 ${newCount} / 리페어 최대 ${repairCount}${requiredPages}`;
 }
 
 function syncPublishControls(form, forceDisabled = false) {

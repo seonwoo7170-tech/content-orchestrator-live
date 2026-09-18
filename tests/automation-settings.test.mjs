@@ -7,9 +7,52 @@ import {
   deterministicPublishJitter,
   normalizeAutomationSettings,
   publishTimeForSlot,
+  readAutomationSettings,
   resolveContentLanguage,
+  saveBlogAutomationSettings,
   scheduledMinuteForPublish
 } from '../worker/lib/automation-settings.js';
+
+function fakeSettingsDb() {
+  const rows = new Map();
+  return {
+    prepare(sql) {
+      if (sql.includes('SELECT scope_key')) {
+        return { all: async () => ({ results: [...rows.values()] }) };
+      }
+      return {
+        bind(...values) {
+          return {
+            run: async () => {
+              const [scopeKey, blogId, inheritGlobal, settingsJson] = values;
+              rows.set(scopeKey, { scope_key: scopeKey, blog_id: blogId, inherit_global: inheritGlobal, settings_json: settingsJson, updated_at: 'now' });
+              return { success: true };
+            }
+          };
+        }
+      };
+    }
+  };
+}
+
+test('required-pages automation defaults to off and is opt-in per blog only', () => {
+  assert.equal(DEFAULT_AUTOMATION_SETTINGS.requiredPagesEnabled, false);
+  assert.equal(normalizeAutomationSettings({}).requiredPagesEnabled, false);
+  assert.equal(normalizeAutomationSettings({ requiredPagesEnabled: true }).requiredPagesEnabled, true);
+});
+
+test('a blog opted into required-pages automation is the only one reported enabled', async () => {
+  const env = { ORCHESTRATOR_DB: fakeSettingsDb() };
+  await saveBlogAutomationSettings(env, '1', { inheritGlobal: false, settings: { requiredPagesEnabled: true } });
+
+  const automation = await readAutomationSettings(env, [
+    { blogId: '1', name: 'Opted In' },
+    { blogId: '2', name: 'Still Off' }
+  ]);
+
+  const byId = Object.fromEntries(automation.blogs.map((blog) => [blog.blogId, blog.effective.requiredPagesEnabled]));
+  assert.deepEqual(byId, { 1: true, 2: false });
+});
 
 test('normalizes safe defaults and validates publish time, jitter and language', () => {
   const value = normalizeAutomationSettings({ publishStartTime: '08:30', publishIntervalMinutes: 30, publishJitterMinutes: 5 });
