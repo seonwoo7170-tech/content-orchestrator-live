@@ -10,7 +10,7 @@ const imageCompletion = fs.readFileSync(new URL('../worker/lib/image-completion.
 const resilientImageExecutor = fs.readFileSync(new URL('../worker/lib/image-executor-resilient.js', import.meta.url), 'utf8');
 const puterProvider = fs.readFileSync(new URL('../worker/lib/puter-image-provider.js', import.meta.url), 'utf8');
 
-test('active production uses Puter-first resumable durable image completion without fixed per-image cooldown', () => {
+test('active production uses KIE-only resumable durable image completion without fixed per-image cooldown', () => {
   assert.equal(config.vars.SYSTEM_PAUSED, 'false');
   assert.equal(config.vars.IMAGE_PROVIDER_MODE, undefined);
   assert.equal(config.vars.PUTER_IMAGE_ENABLED, undefined);
@@ -40,11 +40,12 @@ test('active production uses Puter-first resumable durable image completion with
   assert.match(imageCompletion, /maxImages:\s*positiveLimit\(options\.maxImages, 1, 3\)/);
   assert.match(imageCompletion, /storedBeforeGeneration/);
   assert.match(resilientImageExecutor, /Math\.min\(3, number\)/);
-  assert.match(resilientImageExecutor, /!puterAttempted && puterImageConfigured\(env\)\) return 'puter'/);
-  assert.match(resilientImageExecutor, /modelScopeImageEnabled\(env\) && !modelScopeAlreadyAttempted\(image\)\) return 'modelscope'/);
+  // Every fresh image goes straight to KIE now; Puter/ModelScope/Cloudflare are only
+  // ever resumed to finish an already in-flight legacy task, never started anew.
   assert.match(resilientImageExecutor, /return provider === 'modelscope' \? 'modelscope' : 'kie'/);
-  assert.match(resilientImageExecutor, /IMAGE_PROVIDER_MODE: 'cloudflare'/);
+  assert.doesNotMatch(resilientImageExecutor, /return 'cloudflare';/);
   assert.match(resilientImageExecutor, /isSuccessfulPaidImageCheckpoint/);
+  assert.match(resilientImageExecutor, /isAmbiguousKieSubmission\(image\)\) return 'kie-ambiguous-blocked'/);
   assert.doesNotMatch(resilientImageExecutor, /localFallback:\s*true/);
   assert.match(puterProvider, /puter_output_path/);
   assert.match(puterProvider, /PUTER_OUTCOME_UNKNOWN/);

@@ -73,26 +73,24 @@ test('fresh KIE task is preserved and only polled', async (t) => {
   assert.equal(row().provider_task_id, 'legacy-paid-task');
 });
 
-test('stale KIE task gets one final poll then free fallback without a second paid KIE submission', async (t) => {
+test('stale KIE task gets one final poll then a fresh KIE submission, never a free fallback', async (t) => {
   const { env, row } = fixture(t, { ageMinutes: 180 });
-  // No runtime Puter token in this fixture, so the safe free fallback is Cloudflare.
   delete env.PUTER_AUTH_TOKEN;
   const calls = [];
   const result = await generateResilient(env, 1, { callHubFn: async (_, __, payload) => {
     calls.push(payload);
-    if (payload.providerMode === 'kie') {
-      assert.equal(payload.taskId, 'legacy-paid-task');
+    if (payload.taskId === 'legacy-paid-task') {
+      // The final poll of the old, abandoned task: still not resolved.
       return { pending: true, provider: 'kie-ai', model: 'z-image', taskId: 'legacy-paid-task', state: 'waiting' };
     }
-    assert.equal(payload.providerMode, 'cloudflare');
+    // The fresh submission for the same slot after the old task is abandoned.
+    assert.equal(payload.providerMode, 'kie');
     assert.equal(payload.taskId, undefined);
-    return { provider: 'cloudflare', model: 'flux', mimeType: 'image/png', imageBase64: btoa('free-fallback-image') };
+    return { provider: 'kie-ai', model: 'z-image', mimeType: 'image/png', imageBase64: btoa('fresh-kie-image') };
   } });
 
-  assert.deepEqual(calls.map((call) => call.providerMode), ['kie', 'cloudflare']);
-  assert.equal(calls.filter((call) => call.providerMode === 'kie').length, 1);
+  assert.deepEqual(calls.map((call) => call.providerMode), ['kie', 'kie']);
   assert.equal(result.stored, 1);
   assert.equal(row().status, 'stored');
-  assert.equal(row().provider, 'cloudflare');
-  assert.equal(row().provider_task_id, null);
+  assert.equal(row().provider, 'kie-ai');
 });

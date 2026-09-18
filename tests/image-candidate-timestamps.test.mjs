@@ -52,7 +52,7 @@ test('a provider retry without any attached image yields to the next job in the 
     CREATE TABLE daily_plan_slots (job_id INTEGER, plan_date TEXT, kind TEXT, status TEXT);
     CREATE TABLE job_images (id INTEGER PRIMARY KEY, job_id INTEGER, role TEXT, position INTEGER, status TEXT,
       prompt TEXT, alt_text TEXT, hook_text TEXT, provider TEXT, model TEXT, mime_type TEXT, storage_key TEXT, public_url TEXT,
-      error TEXT, provider_task_id TEXT, provider_status TEXT, provider_attempt_count INTEGER DEFAULT 3,
+      error TEXT, provider_task_id TEXT, provider_status TEXT, provider_attempt_count INTEGER DEFAULT 0,
       provider_error_code TEXT, provider_error_message TEXT, provider_checked_at TEXT, puter_attempted INTEGER DEFAULT 1,
       created_at TEXT, updated_at TEXT, UNIQUE(job_id,role,position));`);
   const result = JSON.stringify({status:'READY_TO_UPDATE_EXISTING',article:{title:'Garden tools',topic:'Garden tools',html:'<h2>Tools</h2><p>Useful tools.</p>'}});
@@ -72,19 +72,22 @@ test('a provider retry without any attached image yields to the next job in the 
   assert.ok(work.items.every(i=>i.retrying===1 && !i.complete));
   assert.equal(calls,2);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM job_images WHERE provider_status='retrying'").get().n,2);
-  // Cloudflare is now the free-first provider. If it is unavailable and KIE also fails,
-  // preserve both causes in the order they were actually attempted.
+  // KIE is the only provider now. A fatal KIE error (auth failure here) stops the
+  // image as failed immediately instead of falling through to another provider.
   db.exec('UPDATE job_images SET provider_attempt_count=0');
+  let kieCalls = 0;
   env.API_HUB_SERVICE.fetch = async request => {
     const {providerMode} = await request.json();
-    return new Response(JSON.stringify({error:providerMode==='kie'?'KIE_AUTH_FAILED':'CLOUDFLARE_AI_ACCOUNT_LIMITED'}),
-      {status:providerMode==='kie'?401:429});
+    assert.equal(providerMode, 'kie');
+    kieCalls += 1;
+    return new Response(JSON.stringify({error:'KIE_AUTH_FAILED'}), {status:401});
   };
   const retried = await runScheduledImageCompletion(env,{maxJobs:2,maxImages:1,staleMinutes:0,articleCooldownMs:0,
     automation:{global:{enabled:true,imagesEnabled:true,bodyImageCount:0},blogs:[]}});
   assert.equal(retried.attempted,2);
-  for (const row of db.prepare('SELECT provider_error_code,provider_attempt_count FROM job_images').all()) {
-    assert.equal(row.provider_error_code,'IMAGE_FALLBACK_FAILED:CLOUDFLARE_AI_ACCOUNT_LIMITED:KIE_AUTH_FAILED');
-    assert.equal(row.provider_attempt_count,1);
+  assert.equal(kieCalls,2);
+  for (const row of db.prepare('SELECT status,provider_error_code FROM job_images').all()) {
+    assert.equal(row.status,'failed');
+    assert.match(row.provider_error_code,/KIE_AUTH_FAILED/);
   }
 });

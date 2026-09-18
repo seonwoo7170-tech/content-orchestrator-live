@@ -90,18 +90,20 @@ test('timed-out KIE submission without a task id is never blindly submitted agai
   const modes = [];
   const result = await generateResilient(env, 1, { callHubFn: async (_, __, payload) => {
     modes.push(payload.providerMode);
-    throw new Error('CLOUDFLARE_AI_ACCOUNT_LIMITED');
+    throw new Error('MUST_NOT_CALL_PROVIDER');
   } });
-  assert.deepEqual(modes, ['cloudflare']);
-  assert.equal(result.retrying, 1);
-  assert.equal(row().provider, 'kie-ai');
+  // KIE-only pipeline: an ambiguous submission is blocked outright, with no provider
+  // call at all (not even KIE itself) rather than diverted to another provider.
+  assert.deepEqual(modes, []);
+  assert.equal(result.failed, 1);
+  assert.equal(row().status, 'failed');
   assert.match(row().provider_error_code, /KIE_SUBMISSION_OUTCOME_UNKNOWN/);
 
   await generateResilient(env, 1, { callHubFn: async (_, __, payload) => {
     modes.push(payload.providerMode);
-    throw new Error('CLOUDFLARE_AI_ACCOUNT_LIMITED');
+    throw new Error('MUST_NOT_CALL_PROVIDER');
   } });
-  assert.deepEqual(modes, ['cloudflare', 'cloudflare']);
+  assert.deepEqual(modes, []);
 });
 
 test('stored successful image never enters generation again', async (t) => {
@@ -114,19 +116,23 @@ test('stored successful image never enters generation again', async (t) => {
   assert.equal(row().status, 'stored');
 });
 
-test('final failed KIE submission hands off to Cloudflare in the same invocation', async (t) => {
+test('KIE retry budget exhaustion stops the image as failed instead of looping forever', async (t) => {
   const { env, row } = fixture(t);
   const modes = [];
   const callHubFn = async (_, __, payload) => {
     modes.push(payload.providerMode);
-    if (payload.providerMode === 'kie') throw new Error('KIE_PROVIDER_ERROR');
-    return { provider: 'cloudflare', model: 'flux', mimeType: 'image/png', imageBase64: btoa('image-bytes') };
+    throw new Error('KIE_PROVIDER_ERROR');
   };
   let result;
   for (let n = 0; n < 3; n++) result = await generateResilient(env, 1, { callHubFn });
+  // KIE-only pipeline: no other provider left to hand off to once the retry budget
+  // (kieGenerationRetryMax, default 3) is exhausted, so the third invocation stops
+  // instead of ever calling another provider.
   assert.equal(row().provider_attempt_count, 3);
-  assert.deepEqual(modes, ['kie', 'kie', 'kie', 'cloudflare']);
-  assert.equal(result.stored, 1);
+  assert.deepEqual(modes, ['kie', 'kie', 'kie']);
+  assert.equal(result.failed, 1);
+  assert.equal(row().status, 'failed');
+  assert.match(row().provider_error_code, /KIE_RETRY_BUDGET_EXHAUSTED/);
 });
 
 test('terminal task failure retires its ID without counting the same task twice', async (t) => {

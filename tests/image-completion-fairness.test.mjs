@@ -38,7 +38,7 @@ test('scheduled image lane polls fresh work quickly, rotates old active tasks, a
   assert.match(source, /await sleep\(pollIntervalMs\)/);
   assert.match(source, /resumedActiveTask = false/);
   assert.match(source, /IMAGE_CONTINUE_NEXT_TICK/);
-  assert.match(source, /if \(!item\?\.complete && !rotateIncomplete\) break/);
-  assert.match(source, /if \(rotateIncomplete\) continue/);
+  assert.match(source, /if \(!item\?\.complete && !rotateIncomplete && !jobFailed\) break/);
+  assert.match(source, /if \(rotateIncomplete \|\| jobFailed\) continue/);
   assert.match(source, /await sleep\(articleCooldownMs\)/);
 });

@@ -1,6 +1,5 @@
 import { generatePlannedImages as generateBaseImages, imageExecutionPriority, isResumableImageStatus } from './image-executor.js';
-import { listJobImages, markImageProviderRetry } from './image-store.js';
-import { puterImageConfigured } from './puter-image-provider.js';
+import { listJobImages, markImageFailed, markImageProviderRetry } from './image-store.js';
 
 const ACTIVE_PROVIDER_STATES = new Set(['waiting', 'queuing', 'generating', 'pending', 'processing', 'running', 'query_retry', 'result_pending', 'result_download_retry']);
 const EXPLICIT_PROVIDER_MODES = new Set(['puter', 'modelscope', 'cloudflare', 'kie']);
@@ -129,34 +128,27 @@ export function scheduledProviderModeForImage(image = {}, env = {}) {
   // A missing taskId here is a recovery/data-integrity problem, not a reason to charge again.
   if (isSuccessfulPaidImageCheckpoint(image)) return 'paid-success-checkpoint';
 
+  // A timed-out KIE create request may already have consumed a paid submission even
+  // though no task id reached D1. Never submit another paid task blindly for it.
+  if (isAmbiguousKieSubmission(image)) return 'kie-ambiguous-blocked';
+
   // Explicit diagnostic/operator modes still win when no durable async task exists.
-  // Production leaves IMAGE_PROVIDER_MODE unset/auto and follows the free/fast chain below.
   const explicit = explicitProviderMode(env);
   if (explicit) return explicit;
 
-  const attempts = asyncAttempts(image);
-  const puterAttempted = Number(image?.puter_attempted || 0) === 1;
-  if (!puterAttempted && puterImageConfigured(env)) return 'puter';
-  if (modelScopeImageEnabled(env) && !modelScopeAlreadyAttempted(image)) return 'modelscope';
-
-  // Cloudflare Workers AI is synchronous and free-first for scheduled production.
-  // Try it before creating a paid/slow KIE task. If it cannot produce an acceptable
-  // image, runOneImage immediately hands off to the existing bounded KIE retry path.
-  return 'cloudflare';
+  // Cloudflare Workers AI hit an account-wide rate limit under normal scheduled load
+  // and got stuck retrying forever with no way out; Puter/ModelScope add no value once
+  // KIE is the standard path. Every fresh image now goes straight to KIE. In-flight
+  // Puter/ModelScope tasks above are still resumed to completion; new ones never start.
+  return 'kie';
 }
 
-function needsImmediateCloudflareFallback(outcome = {}) {
+function isFatalKieError(outcome = {}) {
   const error = String(outcome?.error || '').toUpperCase();
   return error.includes('KIE_AUTH_FAILED')
     || error.includes('KIE_INSUFFICIENT_CREDITS')
     || error.includes('KIE_VALIDATION_FAILED')
     || error.includes('KIE_CONTENT_REJECTED');
-}
-
-export function imageFallbackFailureCode(primary = {}, fallback = {}) {
-  const codes = [primary.error, fallback.error].flatMap(value =>
-    String(value || '').match(/\b(?:KIE|CLOUDFLARE|PUTER|MODELSCOPE)_[A-Z0-9_]+\b/g) || []);
-  return `IMAGE_FALLBACK_FAILED:${[...new Set(codes)].slice(0, 4).join(':') || 'PROVIDER_ERROR'}`.slice(0, 300);
 }
 
 async function refreshedImage(env, jobId, imageId) {
@@ -183,6 +175,43 @@ function protectedCheckpointResult(image) {
   };
 }
 
+async function kieOnlyTerminalFailure(env, image, reason) {
+  await markImageFailed(env, image.id, reason);
+  return {
+    requested: 1,
+    stored: 0,
+    pending: 0,
+    retrying: 0,
+    failed: 1,
+    outcomes: [{ imageId: image.id, status: 'failed', provider: 'kie-ai', taskId: null, error: reason }],
+    images: [{ ...image, status: 'failed', error: reason }]
+  };
+}
+
+// KIE is the only image provider left in the scheduled pipeline (Cloudflare Workers AI
+// and Puter/ModelScope are no longer started fresh; see scheduledProviderModeForImage).
+// This is the single place a retrying/stalled KIE attempt escalates to: either a fresh
+// KIE submission, or a terminal stop when there is nothing safe left to retry.
+async function escalateToKie(env, jobId, image, imageOptions) {
+  if (isAmbiguousKieSubmission(image)) {
+    return kieOnlyTerminalFailure(env, image, 'KIE_SUBMISSION_OUTCOME_UNKNOWN');
+  }
+
+  const current = await refreshedImage(env, jobId, image.id);
+  if (isSuccessfulPaidImageCheckpoint(current || image)) {
+    return protectedCheckpointResult(current || image);
+  }
+  if (!kieRetryAvailable(current || image, env)) {
+    return kieOnlyTerminalFailure(env, current || image, 'KIE_RETRY_BUDGET_EXHAUSTED');
+  }
+
+  return generateBaseImages(
+    { ...env, IMAGE_PROVIDER_MODE: 'kie' },
+    jobId,
+    imageOptions
+  );
+}
+
 async function recoverStaleKieTask(env, jobId, image, imageOptions) {
   const taskId = String(image?.provider_task_id || '').trim();
   await markImageProviderRetry(env, image.id, `KIE_STALE_TASK_ABANDONED:${taskId}`, {
@@ -190,52 +219,14 @@ async function recoverStaleKieTask(env, jobId, image, imageOptions) {
     provider: 'kie-ai'
   });
 
-  // Never create a second paid KIE task for a legacy task that already consumed a
-  // submission. Prefer Puter when its runtime secret is actually present; otherwise
-  // use the free Cloudflare provider so the article can continue.
-  const nextMode = puterImageConfigured(env) ? 'puter' : 'cloudflare';
+  // KIE is the only provider left, so this submits a fresh KIE task for the abandoned
+  // slot. That carries a small risk of double-billing if the orphaned task later turns
+  // out to have actually completed; there is no free provider left to divert to instead.
   return generateBaseImages(
-    { ...env, IMAGE_PROVIDER_MODE: nextMode },
-    jobId,
-    imageOptions
-  );
-}
-
-async function runCloudflareThenKie(env, jobId, image, imageOptions, cloudflareResult = null) {
-  const cloudflare = cloudflareResult || await generateBaseImages(
-    { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
-    jobId,
-    imageOptions
-  );
-  const cloudflareOutcome = Array.isArray(cloudflare?.outcomes) ? cloudflare.outcomes[0] : null;
-  if (cloudflareOutcome?.status !== 'retrying') return cloudflare;
-  // A timed-out KIE create request may already have consumed a paid submission even
-  // though no task id reached D1. Do not submit another paid task blindly.
-  if (isAmbiguousKieSubmission(image)) {
-    const error = imageFallbackFailureCode({ error: 'KIE_SUBMISSION_OUTCOME_UNKNOWN' }, cloudflareOutcome);
-    await markImageProviderRetry(env, image.id, error, { countAttempt: false, provider: 'kie-ai' });
-    cloudflareOutcome.error = error;
-    return cloudflare;
-  }
-
-  const current = await refreshedImage(env, jobId, image.id);
-  if (isSuccessfulPaidImageCheckpoint(current || image)) return cloudflare;
-  if (!kieRetryAvailable(current || image, env)) return cloudflare;
-
-  const kie = await generateBaseImages(
     { ...env, IMAGE_PROVIDER_MODE: 'kie' },
     jobId,
     imageOptions
   );
-  const kieOutcome = Array.isArray(kie?.outcomes) ? kie.outcomes[0] : null;
-  if (kieOutcome?.status === 'retrying') {
-    // Preserve both failure families for diagnostics while keeping the durable KIE
-    // retry counter written by the base executor intact.
-    const error = imageFallbackFailureCode(cloudflareOutcome, kieOutcome);
-    await markImageProviderRetry(env, image.id, error, { countAttempt: false, provider: 'kie-ai' });
-    kieOutcome.error = error;
-  }
-  return kie;
 }
 
 async function runOneImage(env, jobId, image, options = {}) {
@@ -246,6 +237,10 @@ async function runOneImage(env, jobId, image, options = {}) {
   // If it is missing, stop here and preserve the checkpoint for operator/data recovery.
   if (providerMode === 'paid-success-checkpoint') {
     return protectedCheckpointResult(image);
+  }
+
+  if (providerMode === 'kie-ambiguous-blocked') {
+    return kieOnlyTerminalFailure(env, image, 'KIE_SUBMISSION_OUTCOME_UNKNOWN');
   }
 
   const imageOptions = {
@@ -264,39 +259,24 @@ async function runOneImage(env, jobId, image, options = {}) {
 
   const firstOutcome = Array.isArray(first?.outcomes) ? first.outcomes[0] : null;
 
+  // These three only ever fire for a legacy Puter/ModelScope/Cloudflare task that was
+  // already in flight before the pipeline moved to KIE-only; nothing starts fresh on
+  // these providers anymore (see scheduledProviderModeForImage).
   if (providerMode === 'puter' && firstOutcome?.status === 'pending') {
     return first;
   }
 
   if (providerMode === 'puter' && firstOutcome?.status === 'retrying') {
     const current = await refreshedImage(env, jobId, image.id);
-    const attempts = asyncAttempts(current || image);
-    if (attempts === 0 && modelScopeImageEnabled(env)) {
-      const modelScope = await generateBaseImages(
-        { ...env, IMAGE_PROVIDER_MODE: 'modelscope' },
-        jobId,
-        imageOptions
-      );
-      const modelScopeOutcome = Array.isArray(modelScope?.outcomes) ? modelScope.outcomes[0] : null;
-      if (modelScopeOutcome?.status !== 'retrying') return modelScope;
-      return runCloudflareThenKie(env, jobId, current || image, imageOptions);
-    }
-    return runCloudflareThenKie(env, jobId, current || image, imageOptions);
+    return escalateToKie(env, jobId, current || image, imageOptions);
   }
 
   if (providerMode === 'modelscope' && firstOutcome?.status === 'retrying') {
-    const fallback = await runCloudflareThenKie(env, jobId, image, imageOptions);
-    const fallbackOutcome = Array.isArray(fallback?.outcomes) ? fallback.outcomes[0] : null;
-    if (fallbackOutcome?.status === 'retrying') {
-      const error = imageFallbackFailureCode(firstOutcome, { error: `MODELSCOPE_ATTEMPTED:${fallbackOutcome.error || 'PROVIDER_ERROR'}` });
-      await markImageProviderRetry(env, image.id, error, { countAttempt: false, provider: 'modelscope' });
-      fallbackOutcome.error = error;
-    }
-    return fallback;
+    return escalateToKie(env, jobId, image, imageOptions);
   }
 
   if (providerMode === 'cloudflare' && firstOutcome?.status === 'retrying') {
-    return runCloudflareThenKie(env, jobId, image, imageOptions, first);
+    return escalateToKie(env, jobId, image, imageOptions);
   }
 
   if (providerMode === 'kie' && firstOutcome?.status === 'pending' && staleKieBeforePoll) {
@@ -326,21 +306,12 @@ async function runOneImage(env, jobId, image, options = {}) {
     }
 
     const retryBudgetExhausted = !kieRetryAvailable(current || image, env);
-    if (needsImmediateCloudflareFallback(firstOutcome) || retryBudgetExhausted) {
-      const fallback = await generateBaseImages(
-        { ...env, IMAGE_PROVIDER_MODE: 'cloudflare' },
-        jobId,
-        imageOptions
-      );
-      const fallbackOutcome = fallback?.outcomes?.[0];
-      if (fallbackOutcome?.status === 'retrying') {
-        // The fallback writes its own error. Retain the original KIE failure too,
-        // so an authentication/credit/input problem is not hidden by a free quota error.
-        const error = imageFallbackFailureCode(firstOutcome, fallbackOutcome);
-        await markImageProviderRetry(env, image.id, error, { countAttempt: false });
-        fallbackOutcome.error = error;
-      }
-      return fallback;
+    if (isFatalKieError(firstOutcome) || retryBudgetExhausted) {
+      // KIE-only pipeline: nothing left to hand off to. A fatal KIE error (auth/
+      // credits/validation/content) or an exhausted retry budget stops here instead
+      // of looping forever against a provider that will never succeed for this image.
+      const reason = retryBudgetExhausted ? 'KIE_RETRY_BUDGET_EXHAUSTED' : String(firstOutcome?.error || 'KIE_FATAL_ERROR');
+      return kieOnlyTerminalFailure(env, current || image, reason);
     }
   }
 
@@ -362,14 +333,17 @@ function combineExecutionResults(results = [], images = []) {
 
 /**
  * Scheduled publishing policy:
- * - Puter is the free/user-allowance-first provider when configured;
- * - ModelScope Z-Image Turbo remains optional when explicitly enabled;
- * - Cloudflare Workers AI is the synchronous free/fast provider before KIE;
- * - an active async task always resumes on the provider that created it;
- * - a KIE task that remains non-terminal beyond the stale window gets one final poll,
- *   then exits to Puter/Cloudflare without submitting another paid KIE task;
+ * - KIE is the only provider a fresh image ever starts on (Cloudflare Workers AI hit an
+ *   account-wide rate limit with no way out; Puter/ModelScope add no value once KIE is
+ *   the standard path);
+ * - an active async task always resumes on the provider that created it, so an in-flight
+ *   Puter/ModelScope/Cloudflare task from before this policy is still finished, not abandoned;
+ * - a KIE task that remains non-terminal beyond the stale window gets one final poll, then
+ *   a fresh KIE submission for that slot (never a second paid task while the original still
+ *   might complete);
  * - a successful KIE checkpoint is never regenerated or replaced;
- * - Cloudflare failure hands off immediately to the bounded KIE retry path;
+ * - a fatal KIE error (auth/credits/validation/content) or an exhausted KIE retry budget
+ *   stops that image as failed instead of retrying forever;
  * - explicit operator provider modes remain respected;
  * - up to three images for the same post may be selected, while the scheduled watchdog can cap this to one;
  * - provider-chain failure stays retryable/planned;

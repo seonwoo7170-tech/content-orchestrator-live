@@ -20,8 +20,8 @@ test('an already-active provider task gets one status refresh and rotates instea
   assert.match(source, /AWAITING_PROVIDER_REPOLL/);
   assert.match(source, /rotateIncomplete = true/);
   assert.match(source, /resumedActiveTask = false/);
-  assert.match(source, /if \(!item\?\.complete && !rotateIncomplete\) break/);
-  assert.match(source, /if \(rotateIncomplete\) continue/);
+  assert.match(source, /if \(!item\?\.complete && !rotateIncomplete && !jobFailed\) break/);
+  assert.match(source, /if \(rotateIncomplete \|\| jobFailed\) continue/);
 });
 
 test('auto image routing resumes the provider that owns an existing task before any new provider', async () => {

@@ -16,22 +16,24 @@ test('base automatic image routing remains compatible for direct callers', () =>
   assert.deepEqual(imageProviderSequence('cloudflare'), ['cloudflare']);
 });
 
-test('scheduled routing uses Puter once, then synchronous Cloudflare before creating a KIE task', () => {
-  const env = { PUTER_AUTH_TOKEN: 'test-secret', KIE_IMAGE_GENERATION_RETRY_MAX: '3', MODELSCOPE_IMAGE_ENABLED: 'false' };
-  assert.equal(scheduledProviderModeForImage({ puter_attempted: 0, provider_attempt_count: 0 }, env), 'puter');
-  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 0 }, env), 'cloudflare');
-  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 2 }, env), 'cloudflare');
-  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 3 }, env), 'cloudflare');
+test('scheduled routing sends every fresh image straight to KIE (no Puter/Cloudflare start)', () => {
+  const env = { PUTER_AUTH_TOKEN: 'test-secret', KIE_IMAGE_GENERATION_RETRY_MAX: '3', MODELSCOPE_IMAGE_ENABLED: 'true' };
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 0, provider_attempt_count: 0 }, env), 'kie');
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 0 }, env), 'kie');
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 2 }, env), 'kie');
+  assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider_attempt_count: 3 }, env), 'kie');
+  // An in-flight Puter/ModelScope/KIE async task from before this policy still resumes
+  // on the provider that created it, rather than being abandoned mid-flight.
   assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider: 'kie-ai', provider_task_id: 'kie-task', provider_status: 'generating' }, env), 'kie');
   assert.equal(scheduledProviderModeForImage({ puter_attempted: 1, provider: 'puter', provider_task_id: 'puterfs:~/checkpoint.png', provider_status: 'outcome_unknown' }, env), 'puter');
+  assert.equal(scheduledProviderModeForImage({ provider: 'modelscope', provider_task_id: 'ms-task', provider_status: 'generating' }, env), 'modelscope');
 });
 
-test('scheduled routing keeps optional ModelScope ahead of Cloudflare when explicitly enabled', () => {
-  const env = { MODELSCOPE_IMAGE_ENABLED: 'true' };
-  assert.equal(scheduledProviderModeForImage({ provider_attempt_count: 0, puter_attempted: 1 }, env), 'modelscope');
-  assert.equal(scheduledProviderModeForImage({ provider: 'kie-ai', provider_attempt_count: 4, puter_attempted: 1 }, env), 'modelscope');
-  assert.equal(scheduledProviderModeForImage({ provider: 'modelscope', provider_attempt_count: 1, puter_attempted: 1 }, env), 'cloudflare');
-  assert.equal(modelScopeAlreadyAttempted({ provider: 'cloudflare', provider_attempt_count: 4, provider_error_code: 'IMAGE_FALLBACK_FAILED:MODELSCOPE_ATTEMPTED:CLOUDFLARE_AI_ACCOUNT_LIMITED' }), true);
+test('a timed-out KIE submission with no task id is blocked instead of being resubmitted blindly', () => {
+  const env = {};
+  const ambiguous = { provider: 'kie-ai', provider_task_id: null, provider_attempt_count: 1, provider_error_code: 'API_HUB_TIMEOUT' };
+  assert.equal(scheduledProviderModeForImage(ambiguous, env), 'kie-ambiguous-blocked');
+  assert.equal(modelScopeAlreadyAttempted({ provider: 'modelscope', provider_attempt_count: 4 }), true);
 });
 
 test('scheduled retries rotate to the oldest waiting image instead of starving later positions', () => {

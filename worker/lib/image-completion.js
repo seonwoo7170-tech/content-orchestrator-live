@@ -415,9 +415,13 @@ export async function runScheduledImageCompletion(env, options = {}) {
       items.push(item);
     }
 
-    if (!item?.complete && !rotateIncomplete) break;
+    // A permanently failed image (KIE-only pipeline: fatal error or exhausted retry
+    // budget) is done for this job, same as rotateIncomplete — it must not stop the
+    // rest of the batch from getting its turn.
+    const jobFailed = Number(item?.failed || 0) > 0;
+    if (!item?.complete && !rotateIncomplete && !jobFailed) break;
     if (items.length >= maxJobs) break;
-    if (rotateIncomplete) continue;
+    if (rotateIncomplete || jobFailed) continue;
 
     // Keep the requested 10-second gap between completed posts, not between
     // individual images inside the same post.
