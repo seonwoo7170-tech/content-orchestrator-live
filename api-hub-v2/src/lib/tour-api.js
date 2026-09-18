@@ -28,6 +28,30 @@ function httpError(code, status = 502) {
   return Object.assign(new Error(code), { status });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// apis.data.go.kr (and any CDN in front of it) is known to intermittently return a bare
+// gateway-timeout status with no body under load, especially on EngService2. These are
+// transient, not a configuration problem, so retry a couple of times before giving up.
+const TRANSIENT_HTTP_STATUSES = new Set([502, 503, 504, 522, 524]);
+
+async function fetchWithRetry(url, fetchImpl, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchImpl(url);
+      if (response.ok || !TRANSIENT_HTTP_STATUSES.has(response.status)) return response;
+      lastError = httpError(`TOUR_API_HTTP_${response.status}`, 502);
+    } catch (cause) {
+      lastError = Object.assign(httpError('TOUR_API_NETWORK_ERROR', 502), { cause });
+    }
+    if (attempt < attempts) await sleep(300 * attempt);
+  }
+  throw lastError;
+}
+
 export function tourApiConfigured(env) {
   return Boolean(String(env?.TOUR_API_KEY || '').trim());
 }
@@ -84,12 +108,7 @@ async function callTourApi(env, operation, params = {}, fetchImpl = fetch) {
     query.set(name, String(value));
   }
 
-  let response;
-  try {
-    response = await fetchImpl(`${base}/${operation}?${query.toString()}`);
-  } catch {
-    throw httpError('TOUR_API_NETWORK_ERROR', 502);
-  }
+  const response = await fetchWithRetry(`${base}/${operation}?${query.toString()}`, fetchImpl);
   const text = await response.text();
   if (!response.ok) throw httpError(`TOUR_API_HTTP_${response.status}`, 502);
 

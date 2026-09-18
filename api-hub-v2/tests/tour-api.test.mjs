@@ -108,6 +108,41 @@ test('a response with neither the normal header shape nor the gateway fault shap
   );
 });
 
+test('a transient gateway timeout (e.g. 522) is retried and succeeds once the upstream recovers', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls < 3) return new Response('', { status: 522 });
+    return jsonResponse(okBody([{ contentid: '1', title: 'Recovered Spot', addr1: 'Seoul' }]));
+  };
+
+  const results = await listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl);
+  assert.equal(calls, 3);
+  assert.equal(results[0].title, 'Recovered Spot');
+});
+
+test('a transient gateway timeout that never recovers still fails with the real status after retrying', async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return new Response('', { status: 522 }); };
+
+  await assert.rejects(
+    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    /TOUR_API_HTTP_522/
+  );
+  assert.equal(calls, 3);
+});
+
+test('a non-transient HTTP failure (e.g. 404) is not retried', async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; return new Response('', { status: 404 }); };
+
+  await assert.rejects(
+    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    /TOUR_API_HTTP_404/
+  );
+  assert.equal(calls, 1);
+});
+
 test('getAttractionDetail merges detailCommon2 overview with detailImage2 extra photos, deduplicated', async () => {
   const calls = [];
   const fetchImpl = async (url) => {
