@@ -182,11 +182,18 @@ async function tourAttractions(request, env) {
   const areaCode = url.searchParams.get('areaCode') || '';
   const contentTypeId = url.searchParams.get('contentTypeId') || '';
   const numOfRows = url.searchParams.get('numOfRows') || '';
-  return json(await callHub(env, '/api/hub/tour/attractions', {
-    areaCode,
-    ...(contentTypeId ? { contentTypeId } : {}),
-    ...(numOfRows ? { numOfRows } : {})
-  }));
+  try {
+    return json(await callHub(env, '/api/hub/tour/attractions', {
+      areaCode,
+      ...(contentTypeId ? { contentTypeId } : {}),
+      ...(numOfRows ? { numOfRows } : {})
+    }));
+  } catch (error) {
+    // This is an admin-only diagnostic route (find a real attraction contentId), so unlike
+    // the generic fetch()-level catch below it must not collapse the message at the first
+    // ":" — that's the whole point of surfacing the underlying TOUR_API_* / Hub detail here.
+    return json({ error: String(error?.message || 'TOUR_ATTRACTIONS_LOOKUP_FAILED').slice(0, 200) }, error?.status || 502);
+  }
 }
 
 async function klookCoverage(request, env) {
