@@ -51,6 +51,27 @@ test('listAreaBasedAttractions calls the EngService2 endpoint with a raw (non-do
   assert.equal(results[0].firstImage, 'https://img.example/pal.jpg');
 });
 
+test('none of the legacy v1 *YN flag params are sent, since TourAPI4.0 v2 endpoints reject them with INVALID_REQUEST_PARAMETER_ERROR', async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(String(url));
+    if (String(url).includes('/areaBasedList2')) return jsonResponse(okBody([]));
+    if (String(url).includes('/detailCommon2')) return jsonResponse(okBody({ contentid: '1', title: 'Spot', addr1: 'Seoul' }));
+    if (String(url).includes('/detailImage2')) return jsonResponse(okBody([]));
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  await listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl);
+  await getAttractionDetail(ENV, { contentId: '1' }, fetchImpl);
+
+  for (const url of urls) {
+    const query = new URL(url).searchParams;
+    for (const key of query.keys()) {
+      assert.ok(!key.endsWith('YN'), `unexpected legacy *YN param "${key}" sent to ${url}`);
+    }
+  }
+});
+
 test('a single-item response (item as an object, not an array) is normalized into a one-element list', () => {
   const summary = normalizeAttractionSummary({ contentid: '1', title: 'Solo Spot', addr1: 'Busan' });
   assert.equal(summary.contentId, '1');

@@ -246,9 +246,12 @@ export async function listAreaBasedAttractions(env, {
   numOfRows = 20,
   pageNo = 1
 } = {}, fetchImpl = fetch) {
+  // TourAPI4.0's v2 endpoints reject the legacy *YN flag params (listYN, defaultYN, etc.)
+  // from the older v1 API with INVALID_REQUEST_PARAMETER_ERROR — v2 always returns the
+  // full field set, so those flags are simply omitted rather than passed as 'Y'/'N'.
   const body = await callTourApi(env, 'areaBasedList2', {
     areaCode, sigunguCode, contentTypeId, numOfRows, pageNo,
-    arrange: 'A', listYN: 'Y'
+    arrange: 'A'
   }, fetchImpl);
   return normalizeTourApiItems(body).map(normalizeAttractionSummary).filter(Boolean);
 }
@@ -259,19 +262,13 @@ export async function getAttractionDetail(env, { contentId, contentTypeId } = {}
 
   const commonBody = await callTourApi(env, 'detailCommon2', {
     contentId: id,
-    contentTypeId,
-    defaultYN: 'Y',
-    firstImageYN: 'Y',
-    areacodeYN: 'Y',
-    addrinfoYN: 'Y',
-    mapinfoYN: 'Y',
-    overviewYN: 'Y'
+    contentTypeId
   }, fetchImpl);
   const common = normalizeTourApiItems(commonBody)[0] || {};
 
   let images = [];
   try {
-    const imageBody = await callTourApi(env, 'detailImage2', { contentId: id, imageYN: 'Y' }, fetchImpl);
+    const imageBody = await callTourApi(env, 'detailImage2', { contentId: id }, fetchImpl);
     images = normalizeAttractionImages(normalizeTourApiItems(imageBody));
   } catch {
     images = [];
