@@ -86,7 +86,7 @@ jobs:
           const fs=require('node:fs');
           const text=fs.readFileSync('wrangler.jsonc','utf8');
           for(const needle of [
-            '"TEXT_PRIMARY_PROVIDER": "gemini"',
+            '"TEXT_PRIMARY_PROVIDER": "cloudflare"',
             '"TEXT_CLOUDFLARE_FALLBACK_ENABLED": "true"',
             '"GEMINI_REQUEST_TIMEOUT_MS": "60000"',
             '"AI_PROVIDER_RETRY_DELAY_MS": "4000"',
@@ -125,17 +125,22 @@ jobs:
           const base=process.env.API_HUB_V2_BASE_URL;
           const h=await fetch(`${base}/health?managed=${Date.now()}`,{cache:'no-store'}).then(r=>r.json());
           if(h.bloggerWritesEnabled!==true||h.bloggerWriteMode!=='managed_allowlist') throw new Error('MANAGED_WRITE_GATE_READBACK_FAILED');
-          if(h.textPrimaryProvider!=='google-gemini') throw new Error('TEXT_PRIMARY_PROVIDER_READBACK_FAILED');
+          if(h.textPrimaryProvider!=='cloudflare-workers-ai') throw new Error('TEXT_PRIMARY_PROVIDER_READBACK_FAILED');
           if(h.textCloudflareFallbackEnabled!==true) throw new Error('TEXT_FALLBACK_READBACK_FAILED');
           if(Number(h.geminiRequestTimeoutMs)!==60000) throw new Error('GEMINI_TIMEOUT_READBACK_FAILED');
           const freeConfigured=Boolean(String(process.env.FREE_AI_API_KEY||'').trim());
-          for(const [name,order] of [['writer',h.writerProviderOrder],['critic',h.criticProviderOrder],['repair',h.repairProviderOrder]]){
-            if(!Array.isArray(order)||order[0]!=='google-gemini'||!order.includes('cloudflare-workers-ai')) throw new Error(`${name.toUpperCase()}_PROVIDER_ORDER_INVALID`);
-            if(freeConfigured && order[1]!=='free-ai') throw new Error(`${name.toUpperCase()}_FREE_AI_ORDER_INVALID`);
-            if(!freeConfigured && order.includes('free-ai')) throw new Error(`${name.toUpperCase()}_FREE_AI_SHOULD_BE_INACTIVE`);
+          // Writer and repair are cloudflare-primary (2-step: cloudflare-workers-ai -> google-gemini, no
+          // free-ai stop). Critic always forces gemini-primary regardless of TEXT_PRIMARY_PROVIDER so it
+          // never grades the same model that wrote the article; only its chain keeps the free-ai stop.
+          for(const [name,order] of [['writer',h.writerProviderOrder],['repair',h.repairProviderOrder]]){
+            if(!Array.isArray(order)||order[0]!=='cloudflare-workers-ai'||!order.includes('google-gemini')) throw new Error(`${name.toUpperCase()}_PROVIDER_ORDER_INVALID`);
+            if(order.includes('free-ai')) throw new Error(`${name.toUpperCase()}_FREE_AI_SHOULD_BE_INACTIVE`);
           }
+          if(!Array.isArray(h.criticProviderOrder)||h.criticProviderOrder[0]!=='google-gemini'||!h.criticProviderOrder.includes('cloudflare-workers-ai')) throw new Error('CRITIC_PROVIDER_ORDER_INVALID');
+          if(freeConfigured && h.criticProviderOrder[1]!=='free-ai') throw new Error('CRITIC_FREE_AI_ORDER_INVALID');
+          if(!freeConfigured && h.criticProviderOrder.includes('free-ai')) throw new Error('CRITIC_FREE_AI_SHOULD_BE_INACTIVE');
           if(Boolean(h.freeAiConfigured)!==freeConfigured) throw new Error('FREE_AI_CONFIG_READBACK_FAILED');
-          console.log(`API_HUB_AI_FAILOVER_GATE_OK|primary=google-gemini|freeAi=${freeConfigured?'enabled':'inactive'}|final=cloudflare-workers-ai|geminiTimeoutMs=60000|geminiRetryDelayMs=4000`);
+          console.log(`API_HUB_AI_FAILOVER_GATE_OK|writerPrimary=cloudflare-workers-ai|criticPrimary=google-gemini|freeAi=${freeConfigured?'enabled':'inactive'}|geminiTimeoutMs=60000|geminiRetryDelayMs=4000`);
           console.log(`MODELSCOPE_DEPLOY_CONFIG|token=${process.env.MODELSCOPE_TOKEN?'configured':'missing-fallback-only'}|endpoint=https://api-inference.modelscope.ai|model=Tongyi-MAI/Z-Image-Turbo`);
           console.log('API_HUB_WRITE_GATE_OK|enabled=true|mode=managed_allowlist|count=7');
           const headers={'content-type':'application/json','x-hub-api-key':process.env.ORCHESTRATOR_API_KEY};
