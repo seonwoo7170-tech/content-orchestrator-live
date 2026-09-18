@@ -88,6 +88,19 @@ test('runGeminiAi never exposes provider error bodies when rate limited', async 
   });
 });
 
+test('runGeminiAi attaches the real 400 rejection reason as providerValidationHint, without changing error.message', async () => {
+  await assert.rejects(() => runGeminiAi({ GEMINI_API_KEY: 'secret-key' }, {
+    model: 'gemini-3.5-flash-lite', systemInstruction: 'system', userContent: 'user'
+  }, async () => jsonResponse({
+    error: { message: 'The input token count (123456) exceeds the maximum number of tokens allowed (100000).' }
+  }, 400)), (error) => {
+    assert.equal(error.message, 'GEMINI_REQUEST_REJECTED');
+    assert.equal(error.status, 400);
+    assert.match(error.providerValidationHint, /exceeds the maximum number of tokens allowed/);
+    return true;
+  });
+});
+
 test('runGeminiAi classifies upstream outages without raw provider text', async () => {
   await assert.rejects(() => runGeminiAi({ GEMINI_API_KEY: 'secret-key' }, {
     model: 'gemini-3.5-flash-lite', systemInstruction: 'system', userContent: 'user'

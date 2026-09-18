@@ -90,6 +90,21 @@ function classifyHttpFailure(status) {
   return { message: 'GEMINI_API_FAILED', status: 502 };
 }
 
+// Gemini's 400 error body (data.error.message) almost always says exactly why the request
+// was rejected (safety block, token limit exceeded, bad field) — without it, a 400 collapses
+// into a bare "GEMINI_REQUEST_REJECTED" with no way to diagnose it. error.message itself must
+// stay the bare classified code, since shouldFallbackFromGemini() matches it by exact string,
+// so the detail rides along as providerValidationHint instead (the same sanctioned side-channel
+// cloudflare-ai.js and kie-image.js already use), which the Hub surfaces in job logs. Limited to
+// 400 only — the other classified statuses (401/403/408/429/5xx) intentionally never surface
+// the raw provider body (see the "never exposes provider error bodies" tests).
+function geminiFailureHint(status, data) {
+  if (status !== 400) return null;
+  const detail = String(data?.error?.message || '').replace(/[\r\n]+/g, ' ').trim();
+  if (!detail) return null;
+  return detail.replace(/[^A-Za-z0-9_./,:; -]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) || null;
+}
+
 function candidateText(data) {
   const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
   const parts = [];
@@ -185,6 +200,8 @@ export async function runGeminiAi(
     const classified = classifyHttpFailure(response.status);
     const error = new Error(classified.message);
     error.status = classified.status;
+    const hint = geminiFailureHint(response.status, data);
+    if (hint) error.providerValidationHint = hint;
     throw error;
   }
 
