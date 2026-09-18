@@ -25,6 +25,17 @@ function safeErrorCode(value) {
   return safeImageErrorCodes(value)[0] || null;
 }
 
+// safeImageErrorCodes() only keeps tokens shaped like a known code prefix, silently
+// dropping the free-text reason a provider actually gave (e.g. KIE's own validation
+// message, already sanitized to a safe charset before it ever reached job_images.error
+// — see kieValidationHint() in kie-image.js and the providerValidationHint passthrough
+// in worker/lib/api-hub.js). Without this, "why did this keep failing" is unanswerable
+// from the diagnostics endpoint even though the real reason was captured all along.
+export function safeErrorDetail(value) {
+  const text = String(value || '').replace(/[^A-Za-z0-9_./,:; -]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return text ? text.slice(0, 300) : null;
+}
+
 function aggregateCounts(rows, key) {
   const result = {};
   for (const row of rows || []) {
@@ -155,6 +166,7 @@ export async function listImageDiagnostics(env, options = {}) {
     position: Number(row.position || 0),
     errorCode: safeErrorCode(row.error),
     errorCodes: safeImageErrorCodes(row.error),
+    errorDetail: safeErrorDetail(row.error),
     updatedAt: row.updated_at || null
   }));
 
