@@ -9,6 +9,7 @@ import { collectAnalyticsForBlogs } from './lib/ga4-collector.js';
 import { listGa4Coverage } from './lib/ga4-coverage.js';
 import { runScheduledImageCompletion } from './lib/image-completion.js';
 import { listImageDiagnostics } from './lib/image-diagnostics.js';
+import { resetFailedImageForRetry } from './lib/image-store.js';
 import { adoptManualReadyArticles } from './lib/manual-ready-adoption.js';
 import { listTopicCandidates, refreshTopicCandidatesFromGsc } from './lib/topic-candidates.js';
 import { applyIdeaToCandidates, createIdea, listContentStrategy, strategyLinksForTopic } from './lib/content-strategy.js';
@@ -163,6 +164,33 @@ async function imageDiagnostics(request, env) {
   return json(await listImageDiagnostics(env));
 }
 
+// A permanently-failed image (retry budget exhausted, or an ambiguous/fatal KIE outcome)
+// is never picked up by the scheduled pipeline again by design (see image-executor-resilient.js),
+// so clearing a stuck backlog after investigating why needs an explicit operator action rather
+// than waiting on the scheduler. Each image is reset individually and reported so a caller can
+// tell exactly which ones were not in a resettable ('failed') state.
+async function resetFailedImages(request, env) {
+  if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+  const body = await request.json().catch(() => ({}));
+  const imageIds = Array.isArray(body?.imageIds)
+    ? [...new Set(body.imageIds.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0))]
+    : [];
+  if (imageIds.length === 0) return json({ error: 'IMAGE_IDS_REQUIRED' }, 400);
+  if (imageIds.length > 50) return json({ error: 'TOO_MANY_IMAGE_IDS' }, 400);
+
+  const results = [];
+  for (const imageId of imageIds) {
+    try {
+      await resetFailedImageForRetry(env, imageId);
+      results.push({ imageId, reset: true });
+    } catch (error) {
+      results.push({ imageId, reset: false, error: String(error?.message || 'IMAGE_RESET_FAILED') });
+    }
+  }
+  const resetCount = results.filter((item) => item.reset).length;
+  return json({ ok: resetCount === imageIds.length, resetCount, results }, resetCount === imageIds.length ? 200 : 207);
+}
+
 async function publishTick(request, env, ctx) {
   if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
   const url = new URL(request.url);
@@ -205,6 +233,9 @@ export default {
       }
       if (request.method === 'POST' && url.pathname === '/api/operations/images/resume') {
         return await resumeImages(request, env, ctx);
+      }
+      if (request.method === 'POST' && url.pathname === '/api/operations/images/reset-failed') {
+        return await resetFailedImages(request, env);
       }
       if (request.method === 'POST' && url.pathname === '/api/operations/publish-tick') {
         return await publishTick(request, env, ctx);

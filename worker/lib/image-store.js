@@ -200,6 +200,24 @@ export async function markImageAttached(env, imageId) {
   await appendImageEvent(env, id, { eventType: 'image_attached', level: 'success', message: `이미지 #${id} 본문 첨부 완료` });
 }
 
+export async function resetFailedImageForRetry(env, imageId) {
+  const db = requireDb(env);
+  const id = normalizeId(imageId, 'IMAGE_ID_INVALID');
+  const result = await db.prepare(
+    `UPDATE job_images
+        SET status = 'planned', provider_task_id = NULL, provider_status = NULL,
+            provider_attempt_count = 0, provider_error_code = NULL, provider_error_message = NULL,
+            error = NULL, provider_checked_at = NULL, updated_at = datetime('now')
+      WHERE id = ? AND status = 'failed'`
+  ).bind(id).run();
+  if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_NOT_RESETTABLE');
+  await appendImageEvent(env, id, {
+    eventType: 'image_retry_reset', level: 'info',
+    message: `이미지 #${id} 재시도 예산 수동 초기화`
+  });
+  return { id, reset: true };
+}
+
 export async function markImageFailed(env, imageId, error) {
   const db = requireDb(env);
   const id = normalizeId(imageId, 'IMAGE_ID_INVALID');
