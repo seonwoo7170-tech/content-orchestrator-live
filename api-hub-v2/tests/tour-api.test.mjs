@@ -99,6 +99,23 @@ test('a gateway-level fault (JSON cmmMsgHeader envelope, not the normal response
   );
 });
 
+test('a flat gateway fault (top-level resultCode/resultMsg, no response or cmmMsgHeader wrapper) is classified by its own reason code', async () => {
+  const fetchImpl = async () => jsonResponse({
+    resultCode: '22',
+    resultMsg: 'LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR',
+    responseTime: '2026-09-18 18:10:00'
+  });
+
+  await assert.rejects(
+    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    (error) => {
+      assert.equal(error.message, 'TOUR_API_LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR');
+      assert.equal(error.status, 429);
+      return true;
+    }
+  );
+});
+
 test('a response with neither the normal header shape nor the gateway fault shape reports the actual top-level keys instead of an opaque UNKNOWN', async () => {
   const fetchImpl = async () => jsonResponse({ somethingUnexpected: true });
 

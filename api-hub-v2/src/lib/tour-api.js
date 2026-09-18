@@ -94,6 +94,15 @@ function gatewayFailure(data) {
   return resultCodeError(header.returnReasonCode, header.returnAuthMsg || header.errMsg);
 }
 
+// A third envelope, seen live: the newer data.go.kr gateway reports some faults (daily
+// traffic/quota exceeded, unregistered key) as flat top-level fields — { resultCode,
+// resultMsg, responseTime } — with no response/header or cmmMsgHeader wrapper at all.
+function flatGatewayFailure(data) {
+  if (!data || typeof data !== 'object' || data.response || data.cmmMsgHeader) return null;
+  if (!('resultCode' in data)) return null;
+  return resultCodeError(data.resultCode, data.resultMsg);
+}
+
 async function callTourApi(env, operation, params = {}, fetchImpl = fetch) {
   const key = requiredKey(env);
   const base = safeBaseUrl(env);
@@ -131,8 +140,11 @@ async function callTourApi(env, operation, params = {}, fetchImpl = fetch) {
   const gwFailure = gatewayFailure(data);
   if (gwFailure) throw gwFailure;
 
-  // Neither the normal { response: { header } } shape nor the gateway { cmmMsgHeader }
-  // fault shape was present. Rather than collapsing to another opaque "UNKNOWN", report
+  const flatFailure = flatGatewayFailure(data);
+  if (flatFailure) throw flatFailure;
+
+  // None of the three known shapes ({ response: { header } }, { cmmMsgHeader }, or a flat
+  // { resultCode }) were present. Rather than collapsing to another opaque "UNKNOWN", report
   // the top-level keys we actually got so a real fix can follow instead of another guess.
   const keys = Object.keys(data || {}).slice(0, 10).join(',') || 'EMPTY_OBJECT';
   throw httpError(`TOUR_API_UNEXPECTED_RESPONSE_SHAPE:keys=${keys}`, 502);
