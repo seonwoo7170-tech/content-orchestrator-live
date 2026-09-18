@@ -243,6 +243,20 @@ async function runOneImage(env, jobId, image, options = {}) {
     return kieOnlyTerminalFailure(env, image, 'KIE_SUBMISSION_OUTCOME_UNKNOWN');
   }
 
+  // A fresh KIE submission (no active task to resume) must never spend a real attempt
+  // once the retry budget is already exhausted. Without this upfront check, an image
+  // already marked KIE_RETRY_BUDGET_EXHAUSTED gets resubmitted to KIE again every time
+  // the scheduled cooldown makes it eligible for retry — burning real KIE credits forever
+  // and, because each real submission blocks the watchdog's per-job time budget, starving
+  // brand-new jobs of their first attempt. The budget is only ever checked *after* firstOutcome
+  // comes back below, which is too late to prevent the wasted call.
+  const hasActiveKieTask = ['kie', 'kie-ai'].includes(normalizedProvider(image))
+    && Boolean(String(image?.provider_task_id || '').trim())
+    && ACTIVE_PROVIDER_STATES.has(String(image?.provider_status || '').trim().toLowerCase());
+  if (providerMode === 'kie' && !hasActiveKieTask && !kieRetryAvailable(image, env)) {
+    return kieOnlyTerminalFailure(env, image, 'KIE_RETRY_BUDGET_EXHAUSTED');
+  }
+
   const imageOptions = {
     ...options,
     imageIds: [image.id],

@@ -133,6 +133,14 @@ test('KIE retry budget exhaustion stops the image as failed instead of looping f
   assert.equal(result.failed, 1);
   assert.equal(row().status, 'failed');
   assert.match(row().provider_error_code, /KIE_RETRY_BUDGET_EXHAUSTED/);
+
+  // Once exhausted, a later scheduler tick (e.g. after the failed-image retry cooldown
+  // elapses) must not spend another real KIE call on this image — it stays terminally
+  // failed for free and instantly, exactly like an already-stored image does.
+  const resumed = await generateResilient(env, 1, { callHubFn });
+  assert.deepEqual(modes, ['kie', 'kie', 'kie']);
+  assert.equal(resumed.failed, 1);
+  assert.equal(row().provider_attempt_count, 3);
 });
 
 test('terminal task failure retires its ID without counting the same task twice', async (t) => {
