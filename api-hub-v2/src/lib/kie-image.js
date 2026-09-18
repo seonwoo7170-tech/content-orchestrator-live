@@ -116,6 +116,23 @@ export function normalizeAspectRatio(value, role) {
   return fallback;
 }
 
+// The gpt4o-image endpoint mirrors OpenAI's gpt-image-1 contract, which takes a literal
+// pixel size ("1024x1024" / "1024x1536" / "1536x1024"), never an aspect-ratio string like
+// z-image's "16:9". Sending the ratio string through as `size` is rejected by KIE as a
+// validation error, so every ratio normalizeAspectRatio can produce is mapped to a size here.
+const GPT4O_IMAGE_SIZE_BY_ASPECT_RATIO = Object.freeze({
+  '1:1': '1024x1024',
+  '4:3': '1536x1024',
+  '16:9': '1536x1024',
+  '3:4': '1024x1536',
+  '9:16': '1024x1536'
+});
+
+export function gpt4oImageSize(aspectRatio, role) {
+  const ratio = normalizeAspectRatio(aspectRatio, role);
+  return GPT4O_IMAGE_SIZE_BY_ASPECT_RATIO[ratio] || '1024x1024';
+}
+
 export function safePromptForKie(value) {
   const prompt = String(value || '').replace(/\s+/g, ' ').trim();
   if (!prompt) return prompt;
@@ -362,7 +379,7 @@ async function startGpt4oImageTask(env, { role, prompt, aspectRatio }, apiKey, b
   const body = {
     filesUrl: [],
     prompt: safePromptForKie(prompt),
-    size: normalizeAspectRatio(aspectRatio, role)
+    size: gpt4oImageSize(aspectRatio, role)
   };
   if (callbackUrl) body.callBackUrl = callbackUrl;
 

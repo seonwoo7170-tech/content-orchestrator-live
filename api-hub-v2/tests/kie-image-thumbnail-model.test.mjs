@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   generateKieImage,
+  gpt4oImageSize,
   pollKieImageTask,
   startKieImageTask
 } from '../src/lib/kie-image.js';
@@ -28,9 +29,11 @@ const gptEnv = { KIE_API_KEY: 'test-secret', KIE_THUMBNAIL_MODEL: 'gpt4o-image' 
 test('thumbnail with KIE_THUMBNAIL_MODEL=gpt4o-image calls the 4o image endpoint, not jobs/createTask', async () => {
   let gptCreateCount = 0;
   let zImageCreateCount = 0;
-  const fetchImpl = async (url) => {
+  let requestBody = null;
+  const fetchImpl = async (url, init) => {
     if (String(url).endsWith('/api/v1/gpt4o-image/generate')) {
       gptCreateCount += 1;
+      requestBody = JSON.parse(init.body);
       return response({ code: 200, msg: 'success', data: { taskId: 'task_gpt' } });
     }
     if (String(url).endsWith('/api/v1/jobs/createTask')) {
@@ -47,6 +50,24 @@ test('thumbnail with KIE_THUMBNAIL_MODEL=gpt4o-image calls the 4o image endpoint
   assert.equal(result.model, 'gpt4o-image');
   assert.equal(result.taskId, 'task_gpt');
   assert.equal(result.pending, true);
+  // gpt4o-image mirrors OpenAI's gpt-image-1 contract: `size` must be a literal pixel
+  // dimension, never an aspect-ratio string like z-image's "16:9" (KIE rejects that with
+  // a size validation error — this regressed production thumbnails before this fix).
+  assert.equal(requestBody.size, '1536x1024');
+  assert.doesNotMatch(requestBody.size, /:/);
+});
+
+test('gpt4oImageSize maps every normalized aspect ratio to a valid OpenAI-style pixel size, never a ratio string', () => {
+  assert.equal(gpt4oImageSize('1:1', 'thumbnail'), '1024x1024');
+  assert.equal(gpt4oImageSize('16:9', 'thumbnail'), '1536x1024');
+  assert.equal(gpt4oImageSize('4:3', 'body'), '1536x1024');
+  assert.equal(gpt4oImageSize('9:16', 'thumbnail'), '1024x1536');
+  assert.equal(gpt4oImageSize('3:4', 'body'), '1024x1536');
+  assert.equal(gpt4oImageSize('', 'thumbnail'), '1536x1024');
+  assert.equal(gpt4oImageSize('garbage', 'body'), '1536x1024');
+  for (const size of ['1024x1024', '1536x1024', '1024x1536']) {
+    assert.match(size, /^\d+x\d+$/);
+  }
 });
 
 test('body images stay on z-image even when KIE_THUMBNAIL_MODEL=gpt4o-image is configured', async () => {
