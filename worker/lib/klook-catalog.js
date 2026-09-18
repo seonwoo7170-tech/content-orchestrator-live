@@ -144,6 +144,13 @@ export function koreanCityNameFor(cityNameEn) {
   return EN_TO_KR_CITY[key] || null;
 }
 
+// The operator's Klook export can legitimately cover Klook's whole worldwide catalog, not
+// just Korea (the CSV carries its own Country Name per row either way). smileatlas is
+// Korea-only, so this is a defensive belt-and-suspenders filter in case some other
+// country's city ever happens to share a Korean city's romanized/Korean name — city_name
+// matching alone should already be Korea-specific in practice.
+const KOREA_COUNTRY_NAME = '대한민국';
+
 export async function findKlookProductsForAttraction(env, { cityNameEn, limit = 3 } = {}) {
   const db = requireDb(env);
   const cityNameKo = koreanCityNameFor(cityNameEn);
@@ -154,10 +161,10 @@ export async function findKlookProductsForAttraction(env, { cityNameEn, limit = 
     `SELECT activity_id, country_name, city_name, product_name, product_image, currency,
             sell_price, commission_rate, instant_confirmation, affiliate_link
        FROM klook_products
-      WHERE city_name = ?
+      WHERE city_name = ? AND (country_name = ? OR country_name IS NULL)
       ORDER BY commission_rate DESC, sell_price ASC
       LIMIT ?`
-  ).bind(cityNameKo, safeLimit).all();
+  ).bind(cityNameKo, KOREA_COUNTRY_NAME, safeLimit).all();
 
   return (rows.results || []).map((row) => ({
     activityId: row.activity_id,
@@ -181,8 +188,10 @@ export async function findKlookProductsForAttraction(env, { cityNameEn, limit = 
 export async function klookCityCoverage(env) {
   const db = requireDb(env);
   const rows = await db.prepare(
-    `SELECT city_name, COUNT(*) as count FROM klook_products GROUP BY city_name`
-  ).bind().all();
+    `SELECT city_name, COUNT(*) as count FROM klook_products
+      WHERE country_name = ? OR country_name IS NULL
+      GROUP BY city_name`
+  ).bind(KOREA_COUNTRY_NAME).all();
   const counts = new Map((rows.results || []).map((row) => [row.city_name, Number(row.count || 0)]));
 
   return Object.entries(EN_TO_KR_CITY)

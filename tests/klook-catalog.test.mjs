@@ -135,3 +135,20 @@ test('klookCityCoverage reports every known city as zero before any import has h
   const coverage = await klookCityCoverage(env);
   assert.ok(coverage.every((item) => item.productCount === 0));
 });
+
+test('a non-Korean product is excluded from both matching and coverage even if its city name happens to collide', async (t) => {
+  const { env } = fixture(t);
+  await importKlookProducts(env, SAMPLE_CSV);
+  const foreignCsv = `Country Name,City Name,Product Name (Activity name or Hotel name),Product Image,Currency,Sell Price,Commission Rate,Instant Confirmation tag,Affiliate Link
+태국,서울,Fake foreign product sharing the Seoul city name,https://res.klook.com/image/upload/activities/foreign.jpg,USD,99.00,0.999,즉시 확정,https://affiliate.klook.com/redirect?aid=135747&_currency=USD&k_site=https%3A%2F%2Fwww.klook.com%2Fko%2Factivity%2F999999-foreign-product
+`;
+  await importKlookProducts(env, foreignCsv);
+
+  const results = await findKlookProductsForAttraction(env, { cityNameEn: 'Seoul', limit: 10 });
+  assert.equal(results.length, 3);
+  assert.ok(!results.some((item) => item.activityId === '999999'));
+
+  const coverage = await klookCityCoverage(env);
+  const seoul = coverage.find((item) => item.cityNameEn === 'seoul');
+  assert.equal(seoul.productCount, 3);
+});
