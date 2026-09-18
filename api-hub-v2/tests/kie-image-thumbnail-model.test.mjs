@@ -50,23 +50,23 @@ test('thumbnail with KIE_THUMBNAIL_MODEL=gpt4o-image calls the 4o image endpoint
   assert.equal(result.model, 'gpt4o-image');
   assert.equal(result.taskId, 'task_gpt');
   assert.equal(result.pending, true);
-  // gpt4o-image mirrors OpenAI's gpt-image-1 contract: `size` must be a literal pixel
-  // dimension, never an aspect-ratio string like z-image's "16:9" (KIE rejects that with
-  // a size validation error — this regressed production thumbnails before this fix).
-  assert.equal(requestBody.size, '1536x1024');
-  assert.doesNotMatch(requestBody.size, /:/);
+  // KIE's gpt4o-image `size` field only accepts its own aspect-ratio enum (1:1/3:2/2:3),
+  // never a literal pixel dimension and never a z-image-style ratio like "16:9" verbatim
+  // (KIE rejects both with the same generic size validation error — confirmed live: this
+  // was a deterministic 100%-of-the-time rejection, not a transient provider flake).
+  assert.equal(requestBody.size, '3:2');
 });
 
-test('gpt4oImageSize maps every normalized aspect ratio to a valid OpenAI-style pixel size, never a ratio string', () => {
-  assert.equal(gpt4oImageSize('1:1', 'thumbnail'), '1024x1024');
-  assert.equal(gpt4oImageSize('16:9', 'thumbnail'), '1536x1024');
-  assert.equal(gpt4oImageSize('4:3', 'body'), '1536x1024');
-  assert.equal(gpt4oImageSize('9:16', 'thumbnail'), '1024x1536');
-  assert.equal(gpt4oImageSize('3:4', 'body'), '1024x1536');
-  assert.equal(gpt4oImageSize('', 'thumbnail'), '1536x1024');
-  assert.equal(gpt4oImageSize('garbage', 'body'), '1536x1024');
-  for (const size of ['1024x1024', '1536x1024', '1024x1536']) {
-    assert.match(size, /^\d+x\d+$/);
+test('gpt4oImageSize maps every normalized aspect ratio onto KIE\'s own size enum (1:1/3:2/2:3), never a pixel dimension', () => {
+  assert.equal(gpt4oImageSize('1:1', 'thumbnail'), '1:1');
+  assert.equal(gpt4oImageSize('16:9', 'thumbnail'), '3:2');
+  assert.equal(gpt4oImageSize('4:3', 'body'), '3:2');
+  assert.equal(gpt4oImageSize('9:16', 'thumbnail'), '2:3');
+  assert.equal(gpt4oImageSize('3:4', 'body'), '2:3');
+  assert.equal(gpt4oImageSize('', 'thumbnail'), '3:2');
+  assert.equal(gpt4oImageSize('garbage', 'body'), '3:2');
+  for (const size of ['1:1', '3:2', '2:3']) {
+    assert.match(size, /^\d:\d$/);
   }
 });
 

@@ -116,21 +116,26 @@ export function normalizeAspectRatio(value, role) {
   return fallback;
 }
 
-// The gpt4o-image endpoint mirrors OpenAI's gpt-image-1 contract, which takes a literal
-// pixel size ("1024x1024" / "1024x1536" / "1536x1024"), never an aspect-ratio string like
-// z-image's "16:9". Sending the ratio string through as `size` is rejected by KIE as a
-// validation error, so every ratio normalizeAspectRatio can produce is mapped to a size here.
+// KIE's gpt4o-image endpoint does NOT mirror OpenAI's gpt-image-1 pixel-dimension contract
+// (a literal size string like "1024x1024") despite wrapping the same underlying model.
+// KIE's own `size` field only accepts its own aspect-ratio enum: "1:1", "3:2", "2:3" — a
+// narrower set than z-image's ratios and in a different shape than OpenAI's own API.
+// Sending a pixel dimension, or a z-image-style ratio like "16:9"/"4:3" verbatim, is
+// rejected with a generic "size error" every single time (confirmed live: this collapsed
+// every thumbnail retry into KIE_RETRY_BUDGET_EXHAUSTED, since a deterministic validation
+// rejection can never succeed no matter how many times it's retried). Map every ratio
+// normalizeAspectRatio can produce onto KIE's actual enum instead.
 const GPT4O_IMAGE_SIZE_BY_ASPECT_RATIO = Object.freeze({
-  '1:1': '1024x1024',
-  '4:3': '1536x1024',
-  '16:9': '1536x1024',
-  '3:4': '1024x1536',
-  '9:16': '1024x1536'
+  '1:1': '1:1',
+  '4:3': '3:2',
+  '16:9': '3:2',
+  '3:4': '2:3',
+  '9:16': '2:3'
 });
 
 export function gpt4oImageSize(aspectRatio, role) {
   const ratio = normalizeAspectRatio(aspectRatio, role);
-  return GPT4O_IMAGE_SIZE_BY_ASPECT_RATIO[ratio] || '1024x1024';
+  return GPT4O_IMAGE_SIZE_BY_ASPECT_RATIO[ratio] || '1:1';
 }
 
 export function safePromptForKie(value) {
