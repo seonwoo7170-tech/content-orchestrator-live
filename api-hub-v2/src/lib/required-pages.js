@@ -27,7 +27,7 @@ function required(value, name) {
 // predictable title. A model choosing a different title each run would break that idempotency check.
 const REQUIRED_PAGES_ADAPTER = `AUTOMATION REQUIRED-PAGES ADAPTER — this adapter overrides any interactive/questioning flow in the master prompt for this server call.
 Platform is Google Blogger / Blogspot. Do not ask questions. Produce content for exactly two static informational pages for the blog described below: "About" and "Contact". These are not blog posts; do not use a listicle or SEO-article structure, do not invent a search topic, and do not add headings that imply this is an article. Do not invent a title for either page; only write the body content described below.
-Tailor both pages specifically to the supplied blog name and theme/purpose. Do not write generic boilerplate that could apply to any blog — reference what this specific blog actually covers.
+Tailor both pages specifically to the supplied blog. You will be given one of: a short topic description, a sample of the blog's actual recent post titles, both, or neither (a brand-new blog with no signal yet). If given post titles, infer the common theme yourself and write about that specific theme — do not just repeat the titles. If given both, prefer the topic description but let the titles sharpen the detail. If given neither, write in general terms about a blog that shares practical, everyday tips and information, without inventing a specific fake niche. Do not write generic boilerplate that could apply to any blog when real signal was supplied — reference what this specific blog actually covers.
 About page: 2-4 short paragraphs. State what the blog covers, who it is useful for, and the general approach or perspective the blog takes. Do not fabricate specific credentials, company history, awards, or team members that were not supplied. If no author/team detail was supplied, speak in terms of the blog's editorial focus and interest rather than inventing a biography.
 Contact page: 1-2 short paragraphs inviting readers to reach out (feedback, corrections, inquiries), plus a short line noting the contact email will be inserted separately. Do not invent a physical address, phone number, or contact email yourself.
 Also write ONE short paragraph (2-4 sentences, in the requested language) introducing this specific blog for the Privacy Policy page — what kind of site it is and what it is generally about. Do not write about cookies, advertising, or data collection in this paragraph; that boilerplate is added separately.
@@ -94,14 +94,24 @@ ${email ? `<p>본 방침에 대해 문의사항이 있으시면 <a href="mailto:
 export async function generateRequiredPages(env, input = {}, aiBinding = env?.AI, fetchImpl = fetch) {
   const blogName = required(input?.blogName, 'BLOG_NAME');
   const blogUrl = required(input?.blogUrl, 'BLOG_URL');
-  const topic = required(input?.topic, 'TOPIC');
+  const topic = input?.topic ? String(input.topic).trim() : '';
+  const recentPostTitles = Array.isArray(input?.recentPostTitles)
+    ? input.recentPostTitles.map((title) => String(title || '').trim()).filter(Boolean).slice(0, 20)
+    : [];
   const language = String(input?.language || '').trim();
   if (!ALLOWED_LANGUAGES.has(language)) throw Object.assign(new Error('REQUIRED_PAGES_LANGUAGE_INVALID'), { status: 400 });
   const contactEmail = input?.contactEmail ? String(input.contactEmail).trim() : '';
 
   const masterText = await loadMasterV45();
   const systemInstruction = `${masterText}\n\n--- REQUIRED PAGES ADAPTER ---\n${REQUIRED_PAGES_ADAPTER}`;
-  const userContent = JSON.stringify({ platform: 'Blogger', blogName, blogUrl, topic, language });
+  const userContent = JSON.stringify({
+    platform: 'Blogger',
+    blogName,
+    blogUrl,
+    language,
+    ...(topic ? { topic } : {}),
+    ...(recentPostTitles.length ? { recentPostTitles } : {})
+  });
 
   const cloudflareModel = env.WRITER_MODEL || '@cf/openai/gpt-oss-120b';
   const geminiModel = env.GEMINI_WRITER_MODEL || GEMINI_DEFAULT_MODEL;

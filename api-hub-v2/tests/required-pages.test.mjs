@@ -79,8 +79,28 @@ test('rejects missing required input before calling the model', async () => {
   const mustNotFetch = async () => { throw new Error('must not fetch'); };
   await assert.rejects(() => generateRequiredPages(ENV, { blogUrl: 'https://x.com', topic: 't', language: 'ko' }, workersMustNotRun(), mustNotFetch), /BLOG_NAME_REQUIRED/);
   await assert.rejects(() => generateRequiredPages(ENV, { blogName: 'x', topic: 't', language: 'ko' }, workersMustNotRun(), mustNotFetch), /BLOG_URL_REQUIRED/);
-  await assert.rejects(() => generateRequiredPages(ENV, { blogName: 'x', blogUrl: 'https://x.com', language: 'ko' }, workersMustNotRun(), mustNotFetch), /TOPIC_REQUIRED/);
   await assert.rejects(() => generateRequiredPages(ENV, { blogName: 'x', blogUrl: 'https://x.com', topic: 't', language: 'fr' }, workersMustNotRun(), mustNotFetch), /REQUIRED_PAGES_LANGUAGE_INVALID/);
+});
+
+test('generates pages from recent post titles alone, with no hand-written topic', async () => {
+  const result = await generateRequiredPages(ENV, {
+    blogName: '자취생활 노하우',
+    blogUrl: 'https://example.com',
+    language: 'ko',
+    recentPostTitles: ['원룸 곰팡이 없애는 법', '자취 초기 비용 정리', '1인 가구 냉장고 정리 팁']
+  }, workersMustNotRun(), async () => geminiResponse(JSON.stringify(MODEL_PAYLOAD)));
+
+  assert.equal(result.pages.length, 3);
+});
+
+test('still generates pages for a brand-new blog with neither a topic nor any posts yet', async () => {
+  const result = await generateRequiredPages(ENV, {
+    blogName: '새 블로그',
+    blogUrl: 'https://example.net',
+    language: 'ko'
+  }, workersMustNotRun(), async () => geminiResponse(JSON.stringify(MODEL_PAYLOAD)));
+
+  assert.equal(result.pages.length, 3);
 });
 
 test('rejects a malformed model response instead of publishing a broken page', async () => {
