@@ -28,6 +28,15 @@ const LEGACY_ROUTE_RETRY_CODES = new Set([
   'API_HUB_405'
 ]);
 
+const GEMINI_TRANSIENT_CODES = new Set([
+  'GEMINI_REQUEST_FAILED',
+  'GEMINI_TIMEOUT',
+  'GEMINI_RATE_LIMITED',
+  'GEMINI_UNAVAILABLE',
+  'GEMINI_API_FAILED',
+  'GEMINI_EMPTY_RESPONSE'
+]);
+
 function requireDb(env) {
   if (!env?.ORCHESTRATOR_DB) throw new Error('DB_NOT_BOUND');
   return env.ORCHESTRATOR_DB;
@@ -82,7 +91,8 @@ export function classifyFailureCode(input) {
     || code.includes('DAILY_QUOTA');
   if (quota) return { code, classification: 'quota' };
 
-  const transient = code === 'JOB_EXECUTION_ALREADY_CLAIMED'
+  const transient = GEMINI_TRANSIENT_CODES.has(code)
+    || code === 'JOB_EXECUTION_ALREADY_CLAIMED'
     || code === 'FETCH_FAILED'
     || code === 'NETWORK_ERROR'
     || code === 'ECONNRESET'

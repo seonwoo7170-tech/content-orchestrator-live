@@ -1,3 +1,34 @@
+const TRANSIENT_GEMINI_HOLD_CODES = new Set([
+  'GEMINI_REQUEST_FAILED',
+  'GEMINI_TIMEOUT',
+  'GEMINI_RATE_LIMITED',
+  'GEMINI_UNAVAILABLE',
+  'GEMINI_API_FAILED',
+  'GEMINI_EMPTY_RESPONSE'
+]);
+const REVIEW_CONTINUE_CODE = 'CRITIC_REVIEW_CONTINUE';
+const EXISTING_REWRITE_MODE = 'full_article_same_post_id';
+
+function transientGeminiHold(row) {
+  const hold = String(row?.hold_reason || '').trim().toUpperCase();
+  const error = String(row?.last_error_code || '').trim().toUpperCase();
+  return TRANSIENT_GEMINI_HOLD_CODES.has(hold) || TRANSIENT_GEMINI_HOLD_CODES.has(error);
+}
+
+function safeRepairContinuationResult(value, blogId, bloggerPostId) {
+  try {
+    const result = JSON.parse(String(value || ''));
+    return Boolean(
+      result?.article
+      && result?.rewriteMode === EXISTING_REWRITE_MODE
+      && String(result?.identity?.blogId || '') === String(blogId || '')
+      && String(result?.identity?.bloggerPostId || '') === String(bloggerPostId || '')
+    );
+  } catch {
+    return false;
+  }
+}
+
 function requireDb(env) {
   if (!env?.ORCHESTRATOR_DB) throw new Error('DB_NOT_BOUND');
   return env.ORCHESTRATOR_DB;
@@ -58,6 +89,8 @@ export async function releaseSafeRepairHolds(env, options = {}) {
           OR UPPER(COALESCE(j.last_error_code, '')) LIKE '%MANUAL_RETRY_REQUIRES_PUBLICATION_REVIEW%'
           OR UPPER(COALESCE(j.hold_reason, '')) LIKE '%DUPLICATE_TOPIC_PUBLICATION_BLOCKED%'
           OR UPPER(COALESCE(j.last_error_code, '')) LIKE '%DUPLICATE_TOPIC_PUBLICATION_BLOCKED%'
+          OR UPPER(COALESCE(j.hold_reason, '')) IN ('GEMINI_REQUEST_FAILED', 'GEMINI_TIMEOUT', 'GEMINI_RATE_LIMITED', 'GEMINI_UNAVAILABLE', 'GEMINI_API_FAILED', 'GEMINI_EMPTY_RESPONSE')
+          OR UPPER(COALESCE(j.last_error_code, '')) IN ('GEMINI_REQUEST_FAILED', 'GEMINI_TIMEOUT', 'GEMINI_RATE_LIMITED', 'GEMINI_UNAVAILABLE', 'GEMINI_API_FAILED', 'GEMINI_EMPTY_RESPONSE')
         )
       ORDER BY j.updated_at, j.id
       LIMIT ?`
@@ -80,6 +113,9 @@ export async function releaseSafeRepairHolds(env, options = {}) {
     }
 
     const ready = safeReadyRepairResult(row.result_json, row.blog_id, row.blogger_post_id);
+    const continueReview = transientGeminiHold(row)
+      && safeRepairContinuationResult(row.result_json, row.blog_id, row.blogger_post_id);
+    const now = new Date().toISOString();
     statements.push(ready
       ? db.prepare(
         `UPDATE jobs
@@ -88,13 +124,21 @@ export async function releaseSafeRepairHolds(env, options = {}) {
                 last_failure_at = NULL, updated_at = datetime('now')
           WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`
       ).bind(jobId)
-      : db.prepare(
-        `UPDATE jobs
-            SET status = 'failed', error = 'REPAIR_SAFE_RETRY_RELEASED', recovery_state = 'retry_wait',
-                next_retry_at = ?, hold_reason = NULL, last_error_code = 'REPAIR_SAFE_RETRY_RELEASED',
-                last_failure_at = ?, updated_at = datetime('now')
-          WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`
-      ).bind(new Date().toISOString(), new Date().toISOString(), jobId));
+      : continueReview
+        ? db.prepare(
+          `UPDATE jobs
+              SET status = 'failed', error = 'REPAIR_TRANSIENT_AI_RETRY_RELEASED', recovery_state = 'retry_wait',
+                  next_retry_at = ?, hold_reason = NULL, last_error_code = ?,
+                  last_failure_at = ?, updated_at = datetime('now')
+            WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`
+        ).bind(now, REVIEW_CONTINUE_CODE, now, jobId)
+        : db.prepare(
+          `UPDATE jobs
+              SET status = 'failed', error = 'REPAIR_SAFE_RETRY_RELEASED', recovery_state = 'retry_wait',
+                  next_retry_at = ?, hold_reason = NULL, last_error_code = 'REPAIR_SAFE_RETRY_RELEASED',
+                  last_failure_at = ?, updated_at = datetime('now')
+            WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`
+        ).bind(now, now, jobId));
 
     statements.push(db.prepare(
       `UPDATE daily_plan_slots
@@ -109,7 +153,12 @@ export async function releaseSafeRepairHolds(env, options = {}) {
       items.push({ jobId, action: 'skipped', reason: 'REPAIR_HOLD_RELEASE_RACE' });
       continue;
     }
-    items.push({ jobId, action: ready ? 'released_ready' : 'released_retry', bloggerPostId: String(row.blogger_post_id) });
+    items.push({
+      jobId,
+      action: ready ? 'released_ready' : 'released_retry',
+      resumeStage: continueReview ? 'critic_review' : (ready ? 'ready' : 'writing'),
+      bloggerPostId: String(row.blogger_post_id)
+    });
   }
 
   return {
