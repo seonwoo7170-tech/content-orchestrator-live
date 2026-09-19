@@ -60,8 +60,6 @@ function normalizePrompt(value) {
 }
 function kieRecoveryLevel(raw) { if (/KIE_RECOVERY_LEVEL_3|even tighter close-up|minimum physical elements/i.test(raw)) return 3; if (/KIE_RECOVERY_LEVEL_2|Recovery visual rule|simplify the composition to a closer view|closer view/i.test(raw)) return 2; return 1; }
 function kieComposition(raw) { const level = kieRecoveryLevel(raw); if (level >= 3) return 'Tight close-up, minimal scene elements, soft natural daylight, realistic editorial photography.'; if (level === 2) return 'Close-up view, very simple composition, soft natural daylight, realistic editorial photography.'; return 'Simple uncluttered composition, soft natural daylight, realistic editorial photography.'; }
-function isComputerTechTopic(raw) { return /(?:\bpc\b|컴퓨터|윈도우|windows|노트북|laptop|desktop|블루스크린|blue\s*screen|작업\s*관리자|task\s*manager|렉\s*걸림|버벅|느려|slow\s*(?:pc|computer)|\bcpu\b|\bgpu\b|\bram\b|메모리|드라이버|driver)/i.test(raw); }
-function computerTechScene(raw) { const level = kieRecoveryLevel(raw); if (level >= 3) return 'A realistic editorial photograph in extreme tight close-up of one plain black computer cooling fan housing mounted inside a smooth unbranded metal desktop case, with one sleeved cable and only fingertips or one simple tool visible. All monitors, keyboards, circuit boards, stickers, labels, packaging, documents, and decorative electronics are completely out of frame. Broad unlabeled unmarked surfaces and minimal physical detail.'; if (level === 2) return 'A realistic editorial photograph of an open unbranded desktop computer case on a clean workbench, with a person’s hands checking one plain cooling fan and one sleeved cable connection. No monitor or keyboard is visible, exposed circuit boards are minimized, and the case interior uses broad unlabeled unmarked surfaces.'; return 'A realistic editorial photograph of an open unbranded desktop computer case on a clean workbench, with one pair of hands inspecting a plain cooling fan and a sleeved cable connection. The monitor and keyboard are out of frame, the metal case surfaces are smooth and unmarked, and only a few simple physical components are visible.'; }
 function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   const raw = String(value || '').replace(/\s+/g, ' ').trim(); const composition = kieComposition(raw);
   // Keep the planner's exact PC/troubleshooting subject. The previous replacement
@@ -84,7 +82,15 @@ function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   // images were being asked to depict an unrelated scene in a residential setting, which the
   // Gemini QA gate then rejected as a semantic mismatch far more often than it should have.
   const subject = focused || 'a practical everyday subject';
-  return `A realistic editorial photograph focused on ${subject}. One clear focal subject in natural everyday surroundings. ${composition} ${tail}`;
+  // Confirmed across a wide sample of production SEMANTIC_MISMATCH rejections (job #161,
+  // #162, #165, #166, #171, and others): for a diagnostic/settings topic with no obvious
+  // hands-on physical action (RAM usage, network adapters, Wi-Fi speed, circuit breakers,
+  // power-supply sizing), the model's most common fallback interpretation of "a person's
+  // hands doing something with a device" is the generic stock-photo cliche of wiping or
+  // dusting a screen with a cloth -- completely unrelated to almost every such topic. An
+  // explicit exclusion is far more reliable here than hoping a better subject phrase alone
+  // steers the model away from it.
+  return `A realistic editorial photograph focused on ${subject}. One clear focal subject in natural everyday surroundings. Depict a concrete real-world detail specific to this subject -- do not default to a generic stock scene of a person wiping, dusting, or cleaning a screen or device with a cloth unless the topic is specifically about physically cleaning that device. ${composition} ${tail}`;
 }
 function normalizeSteps(value) { if (value === undefined || value === null || value === '') return undefined; const steps = Number(value); if (!Number.isInteger(steps) || steps < 1 || steps > 8) throw Object.assign(new Error('IMAGE_STEPS_INVALID'), { status: 400 }); return steps; }
 function normalizeSeed(value) { if (value === undefined || value === null || value === '') return undefined; const seed = Number(value); if (!Number.isInteger(seed) || seed < 0 || seed > 2147483647) throw Object.assign(new Error('IMAGE_SEED_INVALID'), { status: 400 }); return seed; }

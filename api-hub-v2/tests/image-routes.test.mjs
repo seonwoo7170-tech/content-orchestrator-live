@@ -305,6 +305,26 @@ test('forced KIE mode does not force an AI-subscription topic into a residential
   assert.doesNotMatch(body.input.prompt, /residential|household repair or maintenance|homeowner inspecting/i);
 });
 
+// Confirmed across a wide sample of production SEMANTIC_MISMATCH rejections (jobs #161
+// power-supply sizing, #162 Wi-Fi router speed, #165 network adapter packet loss, #166 RAM
+// usage/task manager, #171 circuit breaker trips): for a diagnostic/settings topic with no
+// obvious hands-on physical action, the model's most common fallback interpretation was a
+// person wiping/dusting/cleaning a screen with a cloth -- completely unrelated to the topic.
+test('the generic KIE prompt fallback explicitly excludes the screen-wiping stock-photo cliche', async () => {
+  const calls = [];
+  const prompt = 'Photorealistic real-world photograph focused on 램 RAM 용량 부족 현상 원인과 작업관리자 메모리 점유율 분석 방법. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'body', prompt, providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
+  const body = JSON.parse(create.init.body);
+  assert.match(body.input.prompt, /램 RAM 용량 부족 현상 원인과 작업관리자 메모리 점유율 분석 방법/);
+  assert.match(body.input.prompt, /do not default to a generic stock scene of a person wiping, dusting, or cleaning a screen or device/i);
+});
+
 test('forced KIE mode still recognizes a genuine home-repair AI-assistant topic when "home" is explicitly mentioned', async () => {
   const calls = [];
   const prompt = 'Photorealistic real-world photograph focused on ai assistants for home maintenance. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
