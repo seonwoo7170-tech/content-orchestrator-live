@@ -291,6 +291,39 @@ test('forced KIE mode never forces an unrelated topic into a residential repair 
   assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
 });
 
+// Confirmed via production job #167 ("Choosing an AI Subscription Plan as a Freelancer:
+// Financial and Workflow Decision Factors"): mentioning "AI" and "maintenance" in the same
+// sentence used to be enough to trigger the home-repair branch above even with no home or
+// household context at all, producing a vacuum-cleaning thumbnail and screen-wiping body
+// images for a completely unrelated financial-decision article.
+test('forced KIE mode does not force an AI-subscription topic into a residential scene just because it mentions "maintenance"', async () => {
+  const calls = [];
+  const prompt = 'Photorealistic real-world photograph focused on a freelancer weighing AI subscription tiers against long-term maintenance and budget planning. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'thumbnail', prompt, providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
+  const body = JSON.parse(create.init.body);
+  assert.doesNotMatch(body.input.prompt, /residential|household repair or maintenance|homeowner inspecting/i);
+});
+
+test('forced KIE mode still recognizes a genuine home-repair AI-assistant topic when "home" is explicitly mentioned', async () => {
+  const calls = [];
+  const prompt = 'Photorealistic real-world photograph focused on ai assistants for home maintenance. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'body', prompt, providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
+  const body = JSON.parse(create.init.body);
+  assert.match(body.input.prompt, /homeowner inspecting a household fixture with simple hand tools/);
+});
+
 test('forced KIE mode falls back to a neutral generic subject only when the concept could not be extracted at all', async () => {
   const calls = [];
   await generateImage(

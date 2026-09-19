@@ -63,7 +63,12 @@ function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   // converted every computer article into the same fan/ventilation scene.
   if (/\bshower\b[^.]*\bwater pressure\b|\bwater pressure\b[^.]*\bshower\b/i.test(raw)) return `A realistic editorial photograph of a residential chrome showerhead with a steady stream of water against a clean light-colored tiled bathroom wall. ${composition} ${tail}`;
   if (/\bwater shutoff\b|\bshutoff valve\b|\bmain water valve\b/i.test(raw)) return `A realistic editorial photograph of a residential main water shutoff valve connected to exposed household plumbing in a clean utility area. Slightly angled view with a clear focal subject. ${composition} ${tail}`;
-  if (/\bai assistants?\b|\bartificial intelligence\b[^.]*\b(?:home|household|maintenance)\b|\bai\b[^.]*\b(?:home|household|maintenance)\b/i.test(raw)) return `A realistic editorial photograph of a homeowner inspecting a household fixture with simple hand tools in a clean residential setting. Natural candid pose with one clear focal subject. ${composition} ${tail}`;
+  // Requires an explicit home/household mention alongside the ai/assistant term -- "maintenance"
+  // alone used to qualify too, so any unrelated topic that merely said "AI ... maintenance"
+  // (e.g. "AI subscription tiers against long-term maintenance and budget planning") was wrongly
+  // forced into this residential scene, which the Gemini QA gate then rejected as a semantic
+  // mismatch (confirmed on job #167, an AI-subscription-plan article for freelancers).
+  if (/\bartificial intelligence\b[^.]*\b(?:home|household)\b|\bai\b[^.]*\b(?:home|household)\b/i.test(raw)) return `A realistic editorial photograph of a homeowner inspecting a household fixture with simple hand tools in a clean residential setting. Natural candid pose with one clear focal subject. ${composition} ${tail}`;
   const focused = raw.match(/focused on\s+([^.]+)/i)?.[1]?.replace(/\b(?:devices?|screens?|displays?|monitors?|interfaces?|gauges?|meters?)\b/gi, '').replace(/control panels?/gi, '').replace(/\s+/g, ' ').trim();
   // Everything above is genuinely home-repair-specific (shower/water-valve/AI-home-assistant
   // topics), which only ever match a blog actually writing about those things -- harmless
