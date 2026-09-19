@@ -116,7 +116,8 @@
                 <span class="blog-picker-chevron">›</span>
               </button>
             </div>
-            <label>주제<textarea name="topic" required rows="3" placeholder="작성할 글 주제"></textarea></label>
+            <label>TourAPI 콘텐츠 ID (선택)<input name="tourApiContentId" placeholder="예: 264107 — 입력 시 주제 대신 실제 공식 관광정보로 작성"></label>
+            <label>주제<textarea name="topic" rows="3" placeholder="작성할 글 주제 (TourAPI 콘텐츠 ID 입력 시 선택 사항)"></textarea></label>
             <label>언어<select name="language"><option value="auto" selected>블로그 설정 사용</option><option value="ko">한국어 직접 지정</option><option value="en">English 직접 지정</option></select></label>
             <button class="button primary" type="submit" disabled>신규 글 큐에 추가</button>
           </form>

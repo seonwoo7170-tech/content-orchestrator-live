@@ -269,11 +269,13 @@ diagnoseAiButton?.addEventListener('click', async () => {
 newJobForm?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = new FormData(newJobForm);
+  const tourApiContentId = String(form.get('tourApiContentId') || '').trim();
   try {
     const data = await submitJson('/api/jobs/new', {
       blogId: form.get('blogId'),
       topic: form.get('topic'),
-      language: form.get('language') || 'auto'
+      language: form.get('language') || 'auto',
+      ...(tourApiContentId ? { tourApiContentId } : {})
     });
     const language = data?.job?.language === 'en' ? 'English' : '한국어';
     showToast(`신규 글 #${data.jobId} · ${language}로 큐에 추가했습니다.`);
