@@ -51,7 +51,7 @@ test('a provider retry without any attached image yields to the next job in the 
   db.exec(`CREATE TABLE jobs (id INTEGER PRIMARY KEY, mode TEXT, blog_id TEXT, result_json TEXT, updated_at TEXT, status TEXT, archived_at TEXT);
     CREATE TABLE daily_plan_slots (job_id INTEGER, plan_date TEXT, kind TEXT, status TEXT);
     CREATE TABLE job_images (id INTEGER PRIMARY KEY, job_id INTEGER, role TEXT, position INTEGER, status TEXT,
-      prompt TEXT, alt_text TEXT, hook_text TEXT, provider TEXT, model TEXT, mime_type TEXT, storage_key TEXT, public_url TEXT,
+      prompt TEXT, alt_text TEXT, hook_text TEXT, hook_baked INTEGER DEFAULT 0, provider TEXT, model TEXT, mime_type TEXT, storage_key TEXT, public_url TEXT,
       error TEXT, provider_task_id TEXT, provider_status TEXT, provider_attempt_count INTEGER DEFAULT 0,
       provider_error_code TEXT, provider_error_message TEXT, provider_checked_at TEXT, puter_attempted INTEGER DEFAULT 1,
       created_at TEXT, updated_at TEXT, UNIQUE(job_id,role,position));`);

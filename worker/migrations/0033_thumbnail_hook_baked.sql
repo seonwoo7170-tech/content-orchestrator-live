@@ -1,0 +1,1 @@
+ALTER TABLE job_images ADD COLUMN hook_baked INTEGER NOT NULL DEFAULT 0;

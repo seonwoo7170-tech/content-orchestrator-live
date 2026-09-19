@@ -72,7 +72,7 @@ export async function persistImagePlan(env, jobId, images) {
 export async function listJobImages(env, jobId) {
   const db = requireDb(env);
   const rows = await db.prepare(
-    `SELECT id, job_id, role, position, status, prompt, alt_text, hook_text, provider, model, mime_type,
+    `SELECT id, job_id, role, position, status, prompt, alt_text, hook_text, hook_baked, provider, model, mime_type,
             storage_key, public_url, error, provider_task_id, provider_status, provider_attempt_count,
             provider_error_code, provider_error_message, provider_checked_at, puter_attempted,
             created_at, updated_at
@@ -116,10 +116,11 @@ export async function markImageProviderPending(env, imageId, meta = {}) {
     `UPDATE job_images
         SET status = 'planned', provider = ?, model = ?, provider_task_id = ?, provider_status = ?,
             provider_attempt_count = COALESCE(provider_attempt_count, 0) + 1,
+            hook_baked = ?,
             provider_error_code = NULL, provider_error_message = NULL, error = NULL,
             provider_checked_at = datetime('now'), updated_at = datetime('now')
       WHERE id = ?`
-  ).bind(provider, String(meta.model || ''), taskId, String(meta.state || 'waiting'), id).run();
+  ).bind(provider, String(meta.model || ''), taskId, String(meta.state || 'waiting'), meta.hookBaked === true ? 1 : 0, id).run();
   if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_STATE_WRITE_FAILED');
   await appendImageEvent(env, id, {
     eventType: 'image_provider', level: 'info',
@@ -145,6 +146,7 @@ export async function markImageProviderRetry(env, imageId, error, meta = {}) {
     `UPDATE job_images
         SET status = 'planned', provider_task_id = NULL, provider_status = 'retrying',
             provider_attempt_count = COALESCE(provider_attempt_count, 0) + ?, provider = COALESCE(?, provider),
+            hook_baked = 0,
             provider_error_code = ?, provider_error_message = ?, error = NULL,
             provider_checked_at = datetime('now'), updated_at = datetime('now')
       WHERE id = ?`
@@ -206,7 +208,7 @@ export async function resetFailedImageForRetry(env, imageId) {
   const result = await db.prepare(
     `UPDATE job_images
         SET status = 'planned', provider_task_id = NULL, provider_status = NULL,
-            provider_attempt_count = 0, provider_error_code = NULL, provider_error_message = NULL,
+            provider_attempt_count = 0, hook_baked = 0, provider_error_code = NULL, provider_error_message = NULL,
             error = NULL, provider_checked_at = NULL, updated_at = datetime('now')
       WHERE id = ? AND status = 'failed'`
   ).bind(id).run();

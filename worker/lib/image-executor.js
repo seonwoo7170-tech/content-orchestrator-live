@@ -142,6 +142,21 @@ export function imageProviderSequence(providerMode = 'auto') {
   return [mode];
 }
 
+// A thumbnail's hook caption is only worth sending to the Hub on its first-ever attempt
+// (attempt_count === 0, no task yet -- see kie-image.js's gpt4o-image path, the only one
+// that can bake it into the pixels), or while an already-baked attempt's async task is
+// still being polled (hook_baked persists across those polls so the Hub can still run its
+// hook-match QA once the task completes). A retry after either kind of failure never
+// re-attempts baking -- it falls back to the standard prompt plus the HTML-overlay
+// postprocessing step, exactly like this feature never existed for that attempt.
+export function shouldSendThumbnailHookText(image) {
+  if (String(image?.role || '') !== 'thumbnail') return false;
+  if (!String(image?.hook_text || '').trim()) return false;
+  if (Number(image?.hook_baked || 0) === 1) return true;
+  const hasExistingTask = Boolean(String(image?.provider_task_id || '').trim());
+  return !hasExistingTask && Number(image?.provider_attempt_count || 0) === 0;
+}
+
 async function callImageProvider(env, jobId, image, prompt, providerMode, callHubFn) {
   if (providerMode === 'puter') {
     return generatePuterImage(env, jobId, image, prompt);
@@ -151,6 +166,7 @@ async function callImageProvider(env, jobId, image, prompt, providerMode, callHu
     prompt,
     providerMode
   };
+  if (providerMode === 'kie' && shouldSendThumbnailHookText(image)) payload.hookText = image.hook_text;
   const existingProvider = String(image?.provider || '').trim().toLowerCase();
   const existingTaskId = String(image?.provider_task_id || '').trim();
   const sameAsyncProvider = providerMode === 'kie'
@@ -311,7 +327,11 @@ export function shouldPreserveImageTask(image, error) {
     return !/(?:PUTER_(?:AUTH_FAILED|INSUFFICIENT_FUNDS|CONTENT_REJECTED|MODEL_UNAVAILABLE|UPSTREAM_FAILED|RATE_LIMITED|OUTCOME_UNKNOWN_EXPIRED|NOT_CONFIGURED|PROVIDER_ERROR)|IMAGE_QA_REJECTED)/i.test(message);
   }
   // Only explicit terminal provider outcomes or a genuine QA rejection retire a task.
-  return !/(?:KIE_(?:TASK_TIMEOUT|IMAGE_GENERATION_FAILED|PROVIDER_GENERATION_FAILED|CONTENT_REJECTED|AUTH_FAILED|INSUFFICIENT_CREDITS|VALIDATION_FAILED)|MODELSCOPE_(?:IMAGE_GENERATION_FAILED|TASK_FAILED|TASK_TIMEOUT|AUTH_FAILED)|IMAGE_QA_REJECTED)/i.test(message);
+  // IMAGE_HOOK_TEXT_MISMATCH is a genuine terminal outcome too: the task already completed
+  // and was downloaded, Gemini already compared it against the expected hook, and re-polling
+  // the exact same taskId would just re-download the exact same (still-mismatched) image
+  // forever instead of ever moving on to a fresh, non-hook-baked retry.
+  return !/(?:KIE_(?:TASK_TIMEOUT|IMAGE_GENERATION_FAILED|PROVIDER_GENERATION_FAILED|CONTENT_REJECTED|AUTH_FAILED|INSUFFICIENT_CREDITS|VALIDATION_FAILED)|MODELSCOPE_(?:IMAGE_GENERATION_FAILED|TASK_FAILED|TASK_TIMEOUT|AUTH_FAILED)|IMAGE_QA_REJECTED|IMAGE_HOOK_TEXT_MISMATCH)/i.test(message);
 }
 
 export function imageExecutionPriority(image = {}) {
@@ -358,7 +378,8 @@ async function executeImageCandidate(env, jobId, image, index, options, callHubF
           provider: generated?.provider || 'kie-ai',
           model: generated?.model || 'z-image',
           taskId,
-          state: generated?.state || 'waiting'
+          state: generated?.state || 'waiting',
+          hookBaked: generated?.hookBaked === true
         });
       }
       return {
@@ -387,8 +408,15 @@ async function executeImageCandidate(env, jobId, image, index, options, callHubF
     let hookText = null;
     let postprocessed = false;
     let postprocessFallback = false;
+    // GPT4o-image renders the hook caption straight into the pixels when callImageProvider
+    // opted into that (see hookText in the request payload); the durable hook_baked column
+    // is what actually decides this, since it survives the async submit-then-poll gap that
+    // the in-memory `generated` result from this one call cannot see across.
+    const hookBaked = Number(image?.hook_baked || 0) === 1 || generated?.hookBaked === true;
 
-    if (image.role === 'thumbnail') {
+    if (image.role === 'thumbnail' && hookBaked) {
+      hookText = String(image?.hook_text || '').trim() || null;
+    } else if (image.role === 'thumbnail') {
       try {
         const processed = await postprocessThumbnail(
           image,
@@ -424,6 +452,7 @@ async function executeImageCandidate(env, jobId, image, index, options, callHubF
       postprocessed,
       postprocessFallback,
       hookText,
+      hookBaked,
       fallbackFrom: generated.fallbackFrom || null,
       fallbackReason: generated.fallbackReason || null
     };
