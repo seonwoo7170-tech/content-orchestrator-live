@@ -189,7 +189,7 @@ export function inferKlookCityFromText(text) {
 // See DEFAULT_KLOOK_AFFILIATE_ID below for why a stable, non-sensitive id is a source
 // constant here rather than another wrangler var slot; env.SMILEATLAS_BLOG_ID still
 // overrides it if the blog is ever recreated under a different id.
-const DEFAULT_SMILEATLAS_BLOG_ID = '4712699686222371580';
+const DEFAULT_SMILEATLAS_BLOG_ID = '471269968622371580';
 
 export function smileatlasBlogId(env) {
   return String(env?.SMILEATLAS_BLOG_ID || DEFAULT_SMILEATLAS_BLOG_ID).trim();
