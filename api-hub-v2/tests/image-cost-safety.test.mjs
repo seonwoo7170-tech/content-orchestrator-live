@@ -69,7 +69,7 @@ test('paid KIE image is not regenerated when Gemini QA gives a real rejection', 
     if (kie) return kie;
     if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
       counters.geminiCalls += 1;
-      return geminiResponse({ pass: false, detectedText: ['ABC'], violations: ['readable text'], semanticMatch: true, semanticReason: '' });
+      return geminiResponse({ pass: false, detectedText: ['ABC'], violations: ['visible brand logo'], semanticMatch: true, semanticReason: '' });
     }
     throw new Error(`unexpected fetch: ${url}`);
   };

@@ -39,7 +39,7 @@ test('required image QA retries a rejected source with a simpler scene and retur
       const body = JSON.parse(init.body);
       seenBodies.push(body);
       if (qaCount === 1) {
-        return geminiResponse({ pass: false, detectedText: ['MAIN WATER'], violations: ['readable writing'], semanticMatch: true, semanticReason: 'The shutoff valve is visible and central.' });
+        return geminiResponse({ pass: false, detectedText: ['MAIN WATER'], violations: ['visible brand logo'], semanticMatch: true, semanticReason: 'The shutoff valve is visible and central.' });
       }
       return geminiResponse({ pass: true, detectedText: [], violations: [], semanticMatch: true, semanticReason: 'The shutoff valve is clearly visible and central.' });
     }
@@ -121,7 +121,7 @@ test('required image QA fails closed after the configured retry limit', async ()
         generatedPrompts.push(String(body.prompt || ''));
         return { image: `ZmFrZS0taW1hZ2Ut${generatedCount}` };
       }),
-      async () => geminiResponse({ pass: false, detectedText: ['123'], violations: ['visible number'], semanticMatch: true, semanticReason: 'The plumbing repair scene matches.' })
+      async () => geminiResponse({ pass: false, detectedText: ['123'], violations: ['visible brand watermark'], semanticMatch: true, semanticReason: 'The plumbing repair scene matches.' })
     ),
     (error) => {
       assert.equal(error.message, 'IMAGE_QA_REJECTED');

@@ -46,7 +46,7 @@ function kieFetchMock(calls) {
 
 const GLYPH_SEEDING_WORDS = /\b(?:text|letters|numbers|labels|captions|watermarks|signage|poster|document|infographic)\b/i;
 const KIE_RISKY_SCENE_WORDS = /\b(?:devices?|screens?|displays?|monitors?|interfaces?|gauges?|meters?)\b|control panels?|ai assistants?/i;
-const KIE_NO_TEXT_TAIL = /No visible text, logos, branding, or watermark\./i;
+const KIE_NO_TEXT_TAIL = /No logos, branding, or watermark\./i;
 
 test('image generation uses FLUX schnell with a positive-only plain-surface guard', async () => {
   let seen = null;
@@ -453,21 +453,39 @@ test('an image rejected by the Gemini QA gate carries a sanitized providerValida
     }
   );
 
-  const textCalls = [];
-  const textFetch = geminiQaFetchMock(textCalls, {
-    pass: false, detectedText: ['SALE 50% OFF'], violations: ['readable storefront signage text'], semanticMatch: true,
+  const logoCalls = [];
+  const logoFetch = geminiQaFetchMock(logoCalls, {
+    pass: false, detectedText: ['SALE 50% OFF'], violations: ['visible brand logo on the storefront sign'], semanticMatch: true,
     semanticReason: ''
   });
-  const pendingText = await generateImage(env, input, aiMock(async () => ({ image: 'unused' })), textFetch);
+  const pendingLogo = await generateImage(env, input, aiMock(async () => ({ image: 'unused' })), logoFetch);
   await assert.rejects(
-    () => generateImage(env, { ...input, taskId: pendingText.taskId }, aiMock(async () => ({ image: 'unused' })), textFetch),
+    () => generateImage(env, { ...input, taskId: pendingLogo.taskId }, aiMock(async () => ({ image: 'unused' })), logoFetch),
     (error) => {
       assert.equal(error.message, 'IMAGE_QA_REJECTED');
-      assert.match(error.providerValidationHint, /^TEXT_OR_LOGO:readable storefront signage text DETECTED_TEXT:SALE 50 OFF$/);
+      assert.match(error.providerValidationHint, /^TEXT_OR_LOGO:visible brand logo on the storefront sign DETECTED_TEXT:SALE 50 OFF$/);
       // The safe-charset guard the Hub applies before this ever leaves the process (see
       // index.js) would silently drop a hint containing '%' -- confirm none survives.
       assert.doesNotMatch(error.providerValidationHint, /%/);
       return true;
     }
   );
+});
+
+// Readable text used to fail this gate unconditionally -- that rule only ever existed to
+// stop the gpt4o hook-baking feature from producing garbled Korean headline text, which is
+// now prevented at its source (isLatinRenderableHookText). Ordinary text/UI visible in a
+// scene must no longer reject the image on its own; only a brand logo, a watermark, or a
+// topic mismatch still does.
+test('plain readable text with no logo or watermark no longer fails the Gemini QA gate', async () => {
+  const env = { KIE_API_KEY: 'test-secret', GEMINI_API_KEY: 'test-gemini-key', IMAGE_QA_REQUIRED: 'true' };
+  const kieCalls = [];
+  const input = { role: 'body', prompt: 'a hand adjusting a labeled control panel', providerMode: 'kie' };
+  const textFetch = geminiQaFetchMock(kieCalls, {
+    pass: false, detectedText: ['SETTINGS'], violations: ['readable text visible on the control panel'], semanticMatch: true,
+    semanticReason: ''
+  });
+  const pending = await generateImage(env, input, aiMock(async () => ({ image: 'unused' })), textFetch);
+  const result = await generateImage(env, { ...input, taskId: pending.taskId }, aiMock(async () => ({ image: 'unused' })), textFetch);
+  assert.equal(result.imageQa.pass, true);
 });

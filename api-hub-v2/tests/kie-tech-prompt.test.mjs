@@ -38,7 +38,7 @@ const source = 'Photorealistic real-world photograph focused on pc 렉 걸림 �
 test('KIE preserves a Korean PC performance subject instead of replacing it with cleaning', async () => {
   const prompt = await captureKieCreatePrompt(source);
   assert.match(prompt, /pc 렉 걸림 끝판왕 원인별 진단 및 체감 속도 % 개선 최적화 마스터 가이드/i);
-  assert.match(prompt, /No visible text, letters, numbers, logos, icons, UI/i);
+  assert.match(prompt, /No visible logos or watermarks/i);
   assert.doesNotMatch(prompt, /cleaning brush|ventilation grille/i);
 });
 

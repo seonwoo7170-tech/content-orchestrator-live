@@ -9,7 +9,11 @@ const ALLOWED_IMAGE_MODELS = new Set([DEFAULT_IMAGE_MODEL]);
 const IMAGE_ROLES = new Set(['thumbnail', 'body']);
 const PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie', 'modelscope']);
 const PLAIN_SURFACE_GUARD = 'Favor simple generic real-world subjects with broad uniform surfaces, simple geometry, natural textures, and minimal decorative detail.';
-const KIE_NO_TEXT_TAIL = 'No visible text, logos, branding, or watermark.';
+// Used to also say "No visible text" -- that instruction only ever existed to stop the
+// gpt4o hook-baking feature from producing garbled Korean headline text, which is now
+// prevented at its source (isLatinRenderableHookText). Ordinary text/UI in a scene is no
+// longer restricted; brand logos, custom branding, and watermarks still are.
+const KIE_NO_TEXT_TAIL = 'No logos, branding, or watermark.';
 const IMAGE_QA_TRANSIENT_DELAYS_MS = [250, 750];
 const IMAGE_QA_SCHEMA = Object.freeze({
   type: 'object',
@@ -122,14 +126,21 @@ async function inspectGeneratedImage(env, generated, expectedPrompt, fetchImpl) 
   if (!String(env?.GEMINI_API_KEY || '').trim()) throw Object.assign(new Error('IMAGE_QA_GEMINI_REQUIRED'), { status: 503 });
   const model = String(env?.GEMINI_IMAGE_QA_MODEL || env?.GEMINI_CRITIC_MODEL || DEFAULT_IMAGE_QA_MODEL).trim();
   const expected = String(expectedPrompt || '').replace(/\s+/g, ' ').trim().slice(0, 1400);
-  const result = await runGeminiAi(env, { model, systemInstruction: ['You are a strict image compliance and semantic-relevance gate for blog publishing.','Inspect only the supplied image pixels and compare them with the expected visual subject/task supplied by the user.','Set pass=false if any readable or clearly intended writing is visible, including words, letters, numbers, logos, watermarks, captions, labels, signs, packaging marks, interface writing, or title overlays.','Set semanticMatch=false when the main visible subject or action does not clearly correspond to the expected visual subject/task. A generic portrait, posed person, generic workshop, unrelated room, scenery, or merely thematic stock image is a mismatch when the requested repair target, object, material, condition, or action is not visibly central.','Accept reasonable visual interpretations and normal variation when the requested physical subject or task is clearly recognizable and dominant. Do not require an exact composition.','Do not fail harmless abstract shapes, texture, pipes, seams, shadows, or random marks that are not actually readable.','Only list writing/logo/watermark problems in violations. Put topic mismatch reasoning only in semanticReason.','Return only the requested JSON structure.'].join(' '), userContent: `Expected visual subject/task: ${expected}\nInspect this generated source image before publication. Report writing violations and whether the main visible subject/action semantically matches the expectation.`, inlineImage: { mimeType: String(generated?.mimeType || '').split(';')[0].trim().toLowerCase(), data: String(generated?.imageBase64 || '').trim() }, maxOutputTokens: 512, responseSchema: IMAGE_QA_SCHEMA, thinking: 'minimal' }, fetchImpl);
+  // Readable text used to fail this gate unconditionally. That rule only ever existed to
+  // stop the gpt4o thumbnail-hook feature from baking garbled Korean headline text into
+  // images -- it was never meant to apply to body images or to Latin text, but it did,
+  // rejecting any image with any writing on it at all. The actual hook-rendering problem is
+  // now fixed at its source (isLatinRenderableHookText in generateImage()), and thumbnails
+  // that DO bake a hook still get their own exact-match check via inspectThumbnailHookText.
+  // This gate now only fails an image for brand logos/watermarks or a topic mismatch.
+  const result = await runGeminiAi(env, { model, systemInstruction: ['You are a strict image compliance and semantic-relevance gate for blog publishing.','Inspect only the supplied image pixels and compare them with the expected visual subject/task supplied by the user.','Set pass=false if a real brand logo or a watermark is visible. Ordinary readable text, labels, numbers, or on-screen UI writing are NOT violations by themselves and must not be reported.','Set semanticMatch=false when the main visible subject or action does not clearly correspond to the expected visual subject/task. A generic portrait, posed person, generic workshop, unrelated room, scenery, or merely thematic stock image is a mismatch when the requested repair target, object, material, condition, or action is not visibly central.','Accept reasonable visual interpretations and normal variation when the requested physical subject or task is clearly recognizable and dominant. Do not require an exact composition.','Only list logo/watermark problems in violations. Put topic mismatch reasoning only in semanticReason.','Return only the requested JSON structure.'].join(' '), userContent: `Expected visual subject/task: ${expected}\nInspect this generated source image before publication. Report any brand logo or watermark and whether the main visible subject/action semantically matches the expectation.`, inlineImage: { mimeType: String(generated?.mimeType || '').split(';')[0].trim().toLowerCase(), data: String(generated?.imageBase64 || '').trim() }, maxOutputTokens: 512, responseSchema: IMAGE_QA_SCHEMA, thinking: 'minimal' }, fetchImpl);
   let parsed; try { parsed = JSON.parse(String(result.response || '')); } catch { throw Object.assign(new Error('IMAGE_QA_RESPONSE_INVALID'), { status: 502 }); }
   const detectedText = Array.isArray(parsed?.detectedText) ? parsed.detectedText.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12) : [];
   const violations = Array.isArray(parsed?.violations) ? parsed.violations.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 12) : [];
-  const hardViolations = violations.filter((item) => /(readable|text|letter|number|logo|watermark|caption|label|sign|packaging|interface|\bui\b|title|writing|문자|글자|숫자|로고|워터마크|라벨|표지|간판)/i.test(item));
+  const logoViolations = violations.filter((item) => /(logo|watermark|로고|워터마크)/i.test(item));
   const semanticMatch = parsed?.semanticMatch === true;
   const semanticReason = String(parsed?.semanticReason || '').trim().slice(0, 500);
-  return { pass: detectedText.length === 0 && hardViolations.length === 0 && semanticMatch, detectedText, violations: hardViolations, semanticMatch, semanticReason, model: result.model };
+  return { pass: logoViolations.length === 0 && semanticMatch, detectedText, violations: logoViolations, semanticMatch, semanticReason, model: result.model };
 }
 async function inspectGeneratedImageWithRetry(env, generated, expectedPrompt, fetchImpl) { const maxChecks = IMAGE_QA_TRANSIENT_DELAYS_MS.length + 1; let lastError = null; for (let check = 1; check <= maxChecks; check += 1) { try { return { ...(await inspectGeneratedImage(env, generated, expectedPrompt, fetchImpl)), inspectionAttempts: check }; } catch (error) { lastError = error; if (!isTransientImageQaFailure(error) || check >= maxChecks) throw error; await sleep(IMAGE_QA_TRANSIENT_DELAYS_MS[check - 1]); } } throw lastError; }
 // Narrower than inspectGeneratedImage: a gpt4o-image thumbnail with a hook baked in is

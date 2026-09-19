@@ -142,9 +142,12 @@ export function safePromptForKie(value) {
   const prompt = String(value || '').replace(/\s+/g, ' ').trim();
   if (!prompt) return prompt;
 
-  // Preserve the planner's subject and action. Safety shaping may suppress text-bearing
-  // details, but must never replace the requested scene with a generic recovery scene.
-  const commonSafety = 'Preserve the exact subject, action, problem context, objects, and scene requested above. Photorealistic real-world image. Use plain unbranded objects and surfaces. If a screen is visible, keep it blank or featureless unless the requested concept absolutely requires a screen; never invent UI. No visible text, letters, numbers, logos, icons, UI, packaging, labels, documents, signs, or watermarks. Do not substitute a different troubleshooting action, component, or generic cleaning scene.';
+  // Preserve the planner's subject and action; never replace the requested scene with a
+  // generic recovery scene. This used to also ban any visible text/UI/screen entirely, but
+  // that was only ever meant to stop garbled Korean headline text from the gpt4o
+  // hook-baking feature (now fixed at its source) -- it isn't a restriction on ordinary
+  // scene content. Brand logos and watermarks remain restricted.
+  const commonSafety = 'Preserve the exact subject, action, problem context, objects, and scene requested above. Photorealistic real-world image. Use plain unbranded objects and surfaces. No visible logos or watermarks. Do not substitute a different troubleshooting action, component, or generic cleaning scene.';
   return `${prompt}. ${commonSafety}`;
 }
 
