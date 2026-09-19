@@ -21,8 +21,8 @@ jobs:
     timeout-minutes: 40
     environment: production
     env:
-      ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
-      ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       TOURAPI_CONTENT_ID: '264107'
     steps:
       - uses: actions/checkout@v4
@@ -30,65 +30,65 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       - name: Verify source before production action
         shell: bash
         run: |
           set -euo pipefail
-          npm ci
+          npm install --no-audit --no-fund
           npm run verify
           (cd api-hub-v2 && npm test)
+
+      - name: Resolve production D1 database
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Could not resolve content-orchestrator D1 database'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+          echo 'D1_TARGET_OK name=content-orchestrator'
 
       - name: Run guarded SmileAtlas TourAPI E2E and sweep production queue
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$ADMIN_API_KEY"
           node --input-type=module - <<'NODE'
-          const base = process.env.ORCHESTRATOR_BASE_URL;
-          const contentId = process.env.TOURAPI_CONTENT_ID;
-          const headers = {
-            'content-type': 'application/json',
-            'x-admin-api-key': process.env.ADMIN_API_KEY
-          };
+          const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID || '');
+          const token = String(process.env.CLOUDFLARE_API_TOKEN || '');
+          const databaseId = String(process.env.D1_DATABASE_ID || '');
+          const contentId = String(process.env.TOURAPI_CONTENT_ID || '264107');
+          const d1Url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
           const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-          async function request(path, init = {}) {
-            const response = await fetch(`${base}${path}`, {
-              cache: 'no-store',
-              signal: AbortSignal.timeout(120000),
-              ...init,
-              headers: { ...headers, ...(init.headers || {}) }
+          async function query(sql, params = []) {
+            const response = await fetch(d1Url, {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${token}`,
+                'content-type': 'application/json'
+              },
+              body: JSON.stringify({ sql, params }),
+              signal: AbortSignal.timeout(120000)
             });
-            const text = await response.text();
-            let data = null;
-            try { data = text ? JSON.parse(text) : null; }
-            catch { data = { error: 'NON_JSON_RESPONSE' }; }
-            if (!response.ok) {
-              const error = new Error(`${path}:${response.status}:${String(data?.error || 'REQUEST_FAILED').slice(0, 180)}`);
-              error.status = response.status;
-              error.data = data;
-              throw error;
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok || payload?.success !== true) {
+              const message = Array.isArray(payload?.errors)
+                ? payload.errors.map((error) => error?.message || error?.code).filter(Boolean).join(';')
+                : 'D1_QUERY_FAILED';
+              throw new Error(`D1_QUERY_FAILED:${response.status}:${String(message).slice(0, 240)}`);
             }
-            return data;
-          }
-
-          function parseJson(value) {
-            if (!value) return null;
-            try { return typeof value === 'string' ? JSON.parse(value) : value; }
-            catch { return null; }
+            const result = Array.isArray(payload.result) ? payload.result[0] : null;
+            return Array.isArray(result?.results) ? result.results : [];
           }
 
           function safeJob(row, images = []) {
-            const result = parseJson(row?.result_json);
-            const payload = parseJson(row?.payload_json);
             return {
               id: Number(row?.id || 0),
               mode: row?.mode || null,
-              blogId: row?.blog_id || row?.blogId || null,
+              blogId: row?.blog_id || null,
               status: row?.status || null,
-              tourApiContentId: payload?.tourApiContentId || null,
               bloggerPostId: row?.blogger_post_id || null,
               retryCount: Number(row?.retry_count || 0),
               recoveryState: row?.recovery_state || 'none',
@@ -96,24 +96,18 @@ jobs:
               holdReason: row?.hold_reason || null,
               lastErrorCode: row?.last_error_code || null,
               error: row?.error ? String(row.error).slice(0, 180) : null,
-              resultStatus: result?.status || null,
-              finalCritic: result?.finalCritic ? {
-                status: result.finalCritic.status || null,
-                score: Number(result.finalCritic.score || 0),
-                issueCount: Array.isArray(result.finalCritic.issues) ? result.finalCritic.issues.length : null
-              } : null,
-              imagePipeline: result?.imagePipeline ? {
-                status: result.imagePipeline.status || null,
-                requested: Number(result.imagePipeline.requested || 0),
-                stored: Number(result.imagePipeline.stored || 0),
-                failed: Number(result.imagePipeline.failed || 0)
-              } : null,
+              resultStatus: row?.result_status || null,
+              finalCriticStatus: row?.final_critic_status || null,
+              finalCriticScore: row?.final_critic_score == null ? null : Number(row.final_critic_score),
+              finalIssueCount: row?.final_issue_count == null ? null : Number(row.final_issue_count),
               images: images.map((image) => ({
                 id: Number(image.id || 0),
                 role: image.role || null,
                 position: Number(image.position || 0),
                 status: image.status || null,
                 provider: image.provider || null,
+                providerStatus: image.provider_status || null,
+                providerErrorCode: image.provider_error_code || null,
                 error: image.error ? String(image.error).slice(0, 160) : null,
                 hasUrl: Boolean(image.public_url),
                 updatedAt: image.updated_at || null
@@ -123,140 +117,167 @@ jobs:
             };
           }
 
-          async function detailWithImages(jobId) {
-            let job = null;
-            let images = [];
-            try { job = (await request(`/api/jobs/${jobId}?e2e=${Date.now()}`))?.job || null; }
-            catch (error) { return { readError: String(error.message || error), id: Number(jobId) }; }
-            try { images = (await request(`/api/jobs/${jobId}/images?e2e=${Date.now()}`))?.images || []; }
-            catch { images = []; }
-            return safeJob(job, images);
+          async function jobSnapshot(jobId) {
+            const rows = await query(
+              `SELECT id, mode, blog_id, status, blogger_post_id, retry_count, recovery_state,
+                      next_retry_at, hold_reason, last_error_code, error, created_at, updated_at,
+                      json_extract(result_json, '$.status') AS result_status,
+                      json_extract(result_json, '$.finalCritic.status') AS final_critic_status,
+                      json_extract(result_json, '$.finalCritic.score') AS final_critic_score,
+                      json_array_length(json_extract(result_json, '$.finalCritic.issues')) AS final_issue_count
+                 FROM jobs WHERE id = ? LIMIT 1`,
+              [Number(jobId)]
+            );
+            if (!rows.length) return { id: Number(jobId), readError: 'JOB_NOT_FOUND' };
+            const images = await query(
+              `SELECT id, role, position, status, provider, provider_status, provider_error_code,
+                      error, public_url, updated_at
+                 FROM job_images WHERE job_id = ?
+                 ORDER BY CASE role WHEN 'thumbnail' THEN 0 ELSE 1 END, position, id`,
+              [Number(jobId)]
+            );
+            return safeJob(rows[0], images);
           }
 
           async function queueSweep() {
-            const out = { jobs: [], imageDiagnostics: null, job144: null };
-            try {
-              const jobsData = await request(`/api/jobs?limit=100&e2e=${Date.now()}`);
-              const rows = Array.isArray(jobsData?.jobs) ? jobsData.jobs : [];
-              out.jobs = rows
-                .filter((row) => String(row.status || '') !== 'completed')
-                .map((row) => safeJob(row));
-            } catch (error) {
-              out.jobsReadError = String(error.message || error);
-            }
-            try {
-              const d = await request(`/api/operations/images/diagnostics?e2e=${Date.now()}`);
-              out.imageDiagnostics = {
-                health: d?.health || null,
-                pipelineVersion: d?.pipelineVersion || null,
-                configuredProviderMode: d?.configuredProviderMode || null,
-                totals: d?.totals || {},
-                statusCounts: d?.statusCounts || {},
-                providerCounts: d?.providerCounts || {},
-                missing: (Array.isArray(d?.missing) ? d.missing : []).slice(0, 50).map((row) => ({
-                  jobId: Number(row.jobId || 0),
-                  mode: row.mode || null,
-                  current: Number(row.current || 0),
-                  target: Number(row.target || 0),
-                  missing: Number(row.missing || 0),
-                  providers: row.providers || [],
-                  updatedAt: row.updatedAt || null
-                })),
-                failures: (Array.isArray(d?.failures) ? d.failures : []).slice(0, 50).map((row) => ({
-                  jobId: Number(row.jobId || 0),
-                  mode: row.mode || null,
-                  role: row.role || null,
-                  position: Number(row.position || 0),
-                  errorCode: row.errorCode || null,
-                  updatedAt: row.updatedAt || null
-                }))
-              };
-            } catch (error) {
-              out.imageDiagnostics = { readError: String(error.message || error) };
-            }
-            out.job144 = await detailWithImages(144);
-            console.log('QUEUE_SWEEP_SAFE ' + JSON.stringify(out));
-            return out;
+            const active = await query(
+              `SELECT id, mode, blog_id, status, blogger_post_id, retry_count, recovery_state,
+                      next_retry_at, hold_reason, last_error_code, error, created_at, updated_at
+                 FROM jobs
+                WHERE status <> 'completed'
+                ORDER BY id DESC LIMIT 100`
+            );
+            const imageStatusCounts = await query(
+              `SELECT status, COUNT(*) AS count FROM job_images GROUP BY status ORDER BY status`
+            );
+            const imageProviderCounts = await query(
+              `SELECT COALESCE(provider, 'unassigned') AS provider, COUNT(*) AS count
+                 FROM job_images GROUP BY COALESCE(provider, 'unassigned') ORDER BY provider`
+            );
+            const imageFailures = await query(
+              `SELECT job_id, role, position, status, provider, provider_status,
+                      provider_error_code, error, updated_at
+                 FROM job_images
+                WHERE status = 'failed' OR provider_error_code IS NOT NULL
+                ORDER BY updated_at DESC LIMIT 50`
+            );
+            const readyMissing = await query(
+              `SELECT j.id AS job_id, j.mode, j.status,
+                      COUNT(i.id) AS image_count,
+                      SUM(CASE WHEN i.status IN ('stored','attached') THEN 1 ELSE 0 END) AS usable_count,
+                      SUM(CASE WHEN i.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+                      j.updated_at
+                 FROM jobs j
+                 LEFT JOIN job_images i ON i.job_id = j.id
+                WHERE j.status = 'ready'
+                GROUP BY j.id, j.mode, j.status, j.updated_at
+                ORDER BY j.id DESC LIMIT 100`
+            );
+            const job144 = await jobSnapshot(144);
+            const safe = {
+              activeJobs: active.map((row) => safeJob(row)),
+              imageStatusCounts,
+              imageProviderCounts,
+              imageFailures: imageFailures.map((row) => ({
+                jobId: Number(row.job_id || 0), role: row.role || null, position: Number(row.position || 0),
+                status: row.status || null, provider: row.provider || null, providerStatus: row.provider_status || null,
+                providerErrorCode: row.provider_error_code || null,
+                error: row.error ? String(row.error).slice(0, 160) : null,
+                updatedAt: row.updated_at || null
+              })),
+              readyImageSummary: readyMissing.map((row) => ({
+                jobId: Number(row.job_id || 0), mode: row.mode || null, status: row.status || null,
+                imageCount: Number(row.image_count || 0), usableCount: Number(row.usable_count || 0),
+                failedCount: Number(row.failed_count || 0), updatedAt: row.updated_at || null
+              })),
+              job144
+            };
+            console.log('QUEUE_SWEEP_SAFE ' + JSON.stringify(safe));
+            return safe;
           }
 
           let pendingError = null;
           try {
-            const blogsData = await request(`/api/blogs?e2e=${Date.now()}`);
-            const blogs = Array.isArray(blogsData?.blogs) ? blogsData.blogs : [];
-            const candidates = blogs.filter((blog) => {
-              const text = `${blog?.name || blog?.blogName || ''} ${blog?.url || ''}`.toLowerCase();
-              return text.includes('smileatlas') || text.includes('smile atlas');
-            });
-            if (candidates.length !== 1) {
-              const visible = blogs.map((blog) => ({
-                blogId: String(blog?.blogId || blog?.id || ''),
-                name: blog?.name || blog?.blogName || null,
-                host: (() => { try { return new URL(String(blog?.url || '')).hostname; } catch { return null; } })()
-              }));
-              throw new Error(`SMILEATLAS_TARGET_NOT_UNIQUE:${candidates.length}:${JSON.stringify(visible)}`);
+            const blogs = await query(
+              `SELECT blog_id, blog_name, blog_url, language, posts_total, updated_at
+                 FROM managed_blogs
+                WHERE status = 'active'
+                  AND (lower(COALESCE(blog_name,'')) LIKE '%smileatlas%'
+                       OR lower(COALESCE(blog_url,'')) LIKE '%smileatlas%')
+                ORDER BY updated_at DESC`
+            );
+            if (blogs.length !== 1) {
+              const allBlogs = await query(
+                `SELECT blog_id, blog_name, blog_url, language FROM managed_blogs
+                  WHERE status = 'active' ORDER BY blog_id`
+              );
+              throw new Error(`SMILEATLAS_TARGET_NOT_UNIQUE:${blogs.length}:${JSON.stringify(allBlogs)}`);
             }
-            const target = candidates[0];
-            const blogId = String(target?.blogId || target?.id || '').trim();
+            const target = blogs[0];
+            const blogId = String(target.blog_id || '').trim();
             if (!blogId) throw new Error('SMILEATLAS_BLOG_ID_MISSING');
             console.log('E2E_TARGET_SAFE ' + JSON.stringify({
               blogId,
-              name: target?.name || target?.blogName || null,
-              host: (() => { try { return new URL(String(target?.url || '')).hostname; } catch { return null; } })(),
+              name: target.blog_name || null,
+              url: target.blog_url || null,
+              language: target.language || null,
               contentId
             }));
 
-            // Reuse an existing same-content job if a previous interrupted probe already created one.
-            const jobsData = await request(`/api/jobs?limit=100&e2e=${Date.now()}`);
-            const rows = Array.isArray(jobsData?.jobs) ? jobsData.jobs : [];
-            let chosen = null;
-            for (const row of rows.slice(0, 60)) {
-              if (String(row?.blog_id || row?.blogId || '') !== blogId || String(row?.mode || '') !== 'new_article') continue;
-              let detail = row;
-              if (!row?.payload_json) {
-                try { detail = (await request(`/api/jobs/${row.id}?e2e=${Date.now()}`))?.job || row; }
-                catch { detail = row; }
-              }
-              const payload = parseJson(detail?.payload_json);
-              if (String(payload?.tourApiContentId || '') === contentId) {
-                chosen = detail;
-                break;
-              }
-            }
+            const existing = await query(
+              `SELECT id, status, recovery_state, created_at, updated_at
+                 FROM jobs
+                WHERE mode = 'new_article'
+                  AND blog_id = ?
+                  AND json_extract(payload_json, '$.tourApiContentId') = ?
+                ORDER BY id DESC LIMIT 1`,
+              [blogId, contentId]
+            );
 
-            let jobId = Number(chosen?.id || 0);
+            let jobId = Number(existing[0]?.id || 0);
             if (!jobId) {
-              const created = await request('/api/jobs/new', {
-                method: 'POST',
-                body: JSON.stringify({ blogId, topic: '', tourApiContentId: contentId })
+              const payload = JSON.stringify({
+                mode: 'new_article', blogId, topic: '', language: target.language || undefined,
+                tourApiContentId: contentId
               });
-              jobId = Number(created?.jobId || 0);
+              const inserted = await query(
+                `INSERT INTO jobs
+                  (mode, blog_id, blogger_post_id, target_url, topic, status, payload_json, created_at, updated_at)
+                 VALUES ('new_article', ?, NULL, NULL, NULL, 'queued', ?, datetime('now'), datetime('now'))
+                 RETURNING id, status, created_at`,
+                [blogId, payload]
+              );
+              jobId = Number(inserted[0]?.id || 0);
               if (!jobId) throw new Error('E2E_JOB_ID_MISSING');
               console.log('E2E_JOB_CREATED ' + JSON.stringify({ jobId, blogId, contentId }));
             } else {
-              console.log('E2E_JOB_REUSED ' + JSON.stringify({ jobId, blogId, contentId, status: chosen?.status || null }));
+              console.log('E2E_JOB_REUSED ' + JSON.stringify({
+                jobId, blogId, contentId, status: existing[0]?.status || null,
+                recoveryState: existing[0]?.recovery_state || null
+              }));
             }
 
             let lastFingerprint = '';
             let completed = null;
             for (let attempt = 0; attempt < 120; attempt += 1) {
-              const snapshot = await detailWithImages(jobId);
+              const snapshot = await jobSnapshot(jobId);
               const fingerprint = JSON.stringify({
-                status: snapshot?.status,
-                recoveryState: snapshot?.recoveryState,
-                lastErrorCode: snapshot?.lastErrorCode,
-                updatedAt: snapshot?.updatedAt,
-                images: (snapshot?.images || []).map((image) => [image.id, image.status, image.provider, image.updatedAt])
+                status: snapshot.status,
+                recoveryState: snapshot.recoveryState,
+                lastErrorCode: snapshot.lastErrorCode,
+                updatedAt: snapshot.updatedAt,
+                images: (snapshot.images || []).map((image) => [image.id, image.status, image.provider, image.providerStatus, image.updatedAt])
               });
               if (fingerprint !== lastFingerprint) {
                 console.log('E2E_STATE_SAFE ' + JSON.stringify(snapshot));
                 lastFingerprint = fingerprint;
               }
-              if (snapshot?.status === 'completed') {
+              if (snapshot.status === 'completed') {
                 completed = snapshot;
                 break;
               }
-              if (snapshot?.recoveryState === 'held') {
-                throw new Error(`E2E_JOB_HELD:${jobId}:${snapshot?.lastErrorCode || snapshot?.error || 'UNKNOWN'}`);
+              if (snapshot.recoveryState === 'held') {
+                throw new Error(`E2E_JOB_HELD:${jobId}:${snapshot.lastErrorCode || snapshot.error || 'UNKNOWN'}`);
               }
               await sleep(15000);
             }
@@ -265,9 +286,10 @@ jobs:
             console.log('E2E_COMPLETED_SAFE ' + JSON.stringify(completed));
           } catch (error) {
             pendingError = error;
-            console.error('E2E_FAILURE_SAFE ' + String(error?.message || error).slice(0, 500));
+            console.error('E2E_FAILURE_SAFE ' + String(error?.message || error).slice(0, 1000));
           } finally {
-            await queueSweep();
+            try { await queueSweep(); }
+            catch (error) { console.error('QUEUE_SWEEP_FAILED_SAFE ' + String(error?.message || error).slice(0, 500)); }
           }
           if (pendingError) throw pendingError;
           NODE
