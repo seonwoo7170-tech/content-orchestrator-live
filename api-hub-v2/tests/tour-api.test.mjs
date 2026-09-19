@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildTourApiResearch,
+  DEFAULT_ATTRACTION_CONTENT_TYPE_ID,
   fetchAreaBasedAttractionsPage,
   getAttractionDetail,
   listAreaBasedAttractions,
@@ -29,6 +30,35 @@ test('TourAPI configuration is based only on key presence', () => {
   assert.equal(tourApiConfigured({ TOUR_API_KEY: '' }), false);
 });
 
+// Observed live: areaCode=1 (EngService2's old Seoul code) with the default contentTypeId
+// returned {"attractions": []} with no error at all (resultCode 0000). Per the TourAPI
+// manual's v4.4 revision (2026-02-10), areaBasedList2 dropped areaCode/sigunguCode
+// entirely -- replaced by lDongRegnCd/lDongSignguCd, a different code table -- and
+// EngService2's own contentTypeId table uses 76 for "Tourist Spot", not KorService2's 12.
+// Both together meant every request was silently filtering for a nonexistent content
+// type while the region filter did nothing at all.
+test('the default content type targets EngService2\'s own "Tourist Spot" code, not KorService2\'s', () => {
+  assert.equal(DEFAULT_ATTRACTION_CONTENT_TYPE_ID, '76');
+});
+
+test('areaCode/sigunguCode (removed from areaBasedList2) are never sent, even if a caller still passes them', async () => {
+  let requestUrl = null;
+  const fetchImpl = async (url) => { requestUrl = url; return jsonResponse(okBody([])); };
+  await fetchAreaBasedAttractionsPage(ENV, { areaCode: '1', sigunguCode: '1' }, fetchImpl);
+  const query = new URL(requestUrl).searchParams;
+  assert.equal(query.has('areaCode'), false);
+  assert.equal(query.has('sigunguCode'), false);
+});
+
+test('lDongRegnCd/lDongSignguCd are sent as areaBasedList2\'s current region filter', async () => {
+  let requestUrl = null;
+  const fetchImpl = async (url) => { requestUrl = url; return jsonResponse(okBody([])); };
+  await fetchAreaBasedAttractionsPage(ENV, { lDongRegnCd: '11', lDongSignguCd: '140' }, fetchImpl);
+  const query = new URL(requestUrl).searchParams;
+  assert.equal(query.get('lDongRegnCd'), '11');
+  assert.equal(query.get('lDongSignguCd'), '140');
+});
+
 test('listAreaBasedAttractions calls the EngService2 endpoint with a raw (non-double-encoded) service key', async () => {
   let requestUrl = null;
   const fetchImpl = async (url) => {
@@ -38,13 +68,14 @@ test('listAreaBasedAttractions calls the EngService2 endpoint with a raw (non-do
     ]));
   };
 
-  const results = await listAreaBasedAttractions(ENV, { areaCode: '1', contentTypeId: '12' }, fetchImpl);
+  const results = await listAreaBasedAttractions(ENV, { lDongRegnCd: '11', contentTypeId: '76' }, fetchImpl);
 
   assert.equal(new URL(requestUrl).origin + new URL(requestUrl).pathname, 'https://apis.data.go.kr/B551011/EngService2/areaBasedList2');
   const query = new URL(requestUrl).searchParams;
   assert.equal(query.get('serviceKey'), 'test-service-key');
-  assert.equal(query.get('areaCode'), '1');
-  assert.equal(query.get('contentTypeId'), '12');
+  assert.equal(query.get('lDongRegnCd'), '11');
+  assert.equal(query.get('areaCode'), null);
+  assert.equal(query.get('contentTypeId'), '76');
   assert.equal(query.get('_type'), 'json');
   assert.equal(results.length, 1);
   assert.equal(results[0].contentId, '126508');
@@ -56,7 +87,7 @@ test('fetchAreaBasedAttractionsPage surfaces totalCount alongside the normalized
   const fetchImpl = async () => jsonResponse(okBody([
     { contentid: '126508', contenttypeid: '12', title: 'Gyeongbokgung Palace', addr1: 'Seoul' }
   ], 137));
-  const page = await fetchAreaBasedAttractionsPage(ENV, { areaCode: '1' }, fetchImpl);
+  const page = await fetchAreaBasedAttractionsPage(ENV, { lDongRegnCd: '11' }, fetchImpl);
   assert.equal(page.attractions.length, 1);
   assert.equal(page.totalCount, 137);
   assert.equal(page.numOfRows, 1);
@@ -65,7 +96,7 @@ test('fetchAreaBasedAttractionsPage surfaces totalCount alongside the normalized
 
 test('a genuine zero-result page reports totalCount 0, not just an empty list', async () => {
   const fetchImpl = async () => jsonResponse(okBody([], 0));
-  const page = await fetchAreaBasedAttractionsPage(ENV, { areaCode: '1' }, fetchImpl);
+  const page = await fetchAreaBasedAttractionsPage(ENV, { lDongRegnCd: '11' }, fetchImpl);
   assert.deepEqual(page.attractions, []);
   assert.equal(page.totalCount, 0);
 });
@@ -74,7 +105,7 @@ test('listAreaBasedAttractions keeps returning a plain array for existing caller
   const fetchImpl = async () => jsonResponse(okBody([
     { contentid: '1', contenttypeid: '12', title: 'Solo Spot', addr1: 'Busan' }
   ]));
-  const results = await listAreaBasedAttractions(ENV, { areaCode: '6' }, fetchImpl);
+  const results = await listAreaBasedAttractions(ENV, { lDongRegnCd: '26' }, fetchImpl);
   assert.ok(Array.isArray(results));
   assert.equal(results.length, 1);
   assert.equal(results.totalCount, undefined);
@@ -90,7 +121,7 @@ test('none of the legacy v1 *YN flag params are sent, since TourAPI4.0 v2 endpoi
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  await listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl);
+  await listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl);
   await getAttractionDetail(ENV, { contentId: '1' }, fetchImpl);
 
   for (const url of urls) {
@@ -117,7 +148,7 @@ test('data.go.kr result codes other than 0000 are surfaced as classified TourAPI
   });
 
   await assert.rejects(
-    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    () => listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl),
     (error) => {
       assert.equal(error.message, 'TOUR_API_SERVICE_KEY_IS_NOT_REGISTERED_ERROR');
       assert.equal(error.status, 401);
@@ -129,7 +160,7 @@ test('data.go.kr result codes other than 0000 are surfaced as classified TourAPI
 test('a bare XML/SOAP fault body is treated as a provider failure instead of throwing an unhandled parse error', async () => {
   const fetchImpl = async () => new Response('<OpenAPI_ServiceResponse>...</OpenAPI_ServiceResponse>', { status: 200 });
   await assert.rejects(
-    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    () => listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl),
     /TOUR_API_RESPONSE_NOT_JSON/
   );
 });
@@ -140,7 +171,7 @@ test('a gateway-level fault (JSON cmmMsgHeader envelope, not the normal response
   });
 
   await assert.rejects(
-    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    () => listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl),
     (error) => {
       assert.equal(error.message, 'TOUR_API_SERVICE_KEY_IS_NOT_REGISTERED_ERROR');
       assert.equal(error.status, 401);
@@ -157,7 +188,7 @@ test('a flat gateway fault (top-level resultCode/resultMsg, no response or cmmMs
   });
 
   await assert.rejects(
-    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    () => listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl),
     (error) => {
       assert.equal(error.message, 'TOUR_API_LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR');
       assert.equal(error.status, 429);
@@ -170,7 +201,7 @@ test('a response with neither the normal header shape nor the gateway fault shap
   const fetchImpl = async () => jsonResponse({ somethingUnexpected: true });
 
   await assert.rejects(
-    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    () => listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl),
     /TOUR_API_UNEXPECTED_RESPONSE_SHAPE:keys=somethingUnexpected/
   );
 });
@@ -183,7 +214,7 @@ test('a transient gateway timeout (e.g. 522) is retried and succeeds once the up
     return jsonResponse(okBody([{ contentid: '1', title: 'Recovered Spot', addr1: 'Seoul' }]));
   };
 
-  const results = await listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl);
+  const results = await listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl);
   assert.equal(calls, 3);
   assert.equal(results[0].title, 'Recovered Spot');
 });
@@ -193,7 +224,7 @@ test('a transient gateway timeout that never recovers still fails with the real 
   const fetchImpl = async () => { calls += 1; return new Response('', { status: 522 }); };
 
   await assert.rejects(
-    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    () => listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl),
     /TOUR_API_HTTP_522/
   );
   assert.equal(calls, 3);
@@ -204,7 +235,7 @@ test('a non-transient HTTP failure (e.g. 404) is not retried', async () => {
   const fetchImpl = async () => { calls += 1; return new Response('', { status: 404 }); };
 
   await assert.rejects(
-    () => listAreaBasedAttractions(ENV, { areaCode: '1' }, fetchImpl),
+    () => listAreaBasedAttractions(ENV, { lDongRegnCd: '11' }, fetchImpl),
     /TOUR_API_HTTP_404/
   );
   assert.equal(calls, 1);

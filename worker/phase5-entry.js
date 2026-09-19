@@ -179,12 +179,19 @@ async function importKlook(request, env) {
 async function tourAttractions(request, env) {
   if (!await requireAdminOr401(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
   const url = new URL(request.url);
-  const areaCode = url.searchParams.get('areaCode') || '';
+  // areaCode/sigunguCode no longer exist on areaBasedList2 as of the TourAPI manual's
+  // v4.4 revision -- lDongRegnCd/lDongSignguCd (Statistics Korea legal-dong codes, a
+  // different numbering) replaced them. Still accept the old ?areaCode= query name here
+  // since that's what's bookmarked/documented for this admin route, but forward it to the
+  // Hub as lDongRegnCd.
+  const lDongRegnCd = url.searchParams.get('lDongRegnCd') || url.searchParams.get('areaCode') || '';
+  const lDongSignguCd = url.searchParams.get('lDongSignguCd') || url.searchParams.get('sigunguCode') || '';
   const contentTypeId = url.searchParams.get('contentTypeId') || '';
   const numOfRows = url.searchParams.get('numOfRows') || '';
   try {
     return json(await callHub(env, '/api/hub/tour/attractions', {
-      areaCode,
+      lDongRegnCd,
+      ...(lDongSignguCd ? { lDongSignguCd } : {}),
       ...(contentTypeId ? { contentTypeId } : {}),
       ...(numOfRows ? { numOfRows } : {})
     }));

@@ -1,7 +1,11 @@
 const DEFAULT_TOUR_API_BASE_URL = 'https://apis.data.go.kr/B551011/EngService2';
 const DEFAULT_MOBILE_OS = 'ETC';
 const DEFAULT_MOBILE_APP = 'SmileAtlas';
-export const DEFAULT_ATTRACTION_CONTENT_TYPE_ID = '12';
+// EngService2's own contentTypeId table (per the manual's v4.4 areaBasedList2 spec) is
+// NOT the same numbering as KorService2: 75 Leports, 76 Tourist Spot, 77 Transportation,
+// 78 Cultural Facility, 79 Shopping, 80 Lodging, 82 Restaurant, 85 Festival/Performance/Event.
+// '12' (KorService2's Tourist Spot code) matches nothing here and silently returns zero rows.
+export const DEFAULT_ATTRACTION_CONTENT_TYPE_ID = '76';
 
 // data.go.kr's own error codes for this API family. Non-"0000" codes are returned with
 // HTTP 200 inside the JSON body, not as an HTTP error status, so the header must always
@@ -244,15 +248,15 @@ function safeCount(value) {
   return Number.isFinite(number) ? number : null;
 }
 
-// A zero-result list is ambiguous on its own: it could mean this areaCode/contentTypeId
+// A zero-result list is ambiguous on its own: it could mean this lDongRegnCd/contentTypeId
 // combination genuinely has no data in this service (EngService2 covers far fewer
 // listings than the Korean service), or it could mean pagination/filter params are the
 // real problem while data.go.kr's own totalCount says otherwise. Surface the upstream
 // paging fields alongside the normalized list so that distinction is visible instead of
 // having to guess from an empty array alone.
 export async function fetchAreaBasedAttractionsPage(env, {
-  areaCode,
-  sigunguCode,
+  lDongRegnCd,
+  lDongSignguCd,
   contentTypeId = DEFAULT_ATTRACTION_CONTENT_TYPE_ID,
   numOfRows = 20,
   pageNo = 1
@@ -260,8 +264,13 @@ export async function fetchAreaBasedAttractionsPage(env, {
   // TourAPI4.0's v2 endpoints reject the legacy *YN flag params (listYN, defaultYN, etc.)
   // from the older v1 API with INVALID_REQUEST_PARAMETER_ERROR — v2 always returns the
   // full field set, so those flags are simply omitted rather than passed as 'Y'/'N'.
+  // areaCode/sigunguCode (the old TourAPI region filter) were removed from this operation
+  // entirely as of the manual's v4.4 revision (2026-02-10) -- areaBasedList2 no longer
+  // recognizes them at all. lDongRegnCd/lDongSignguCd (Statistics Korea's legal-dong
+  // region/sigungu codes -- see the ldongCode2 operation) replaced them, with their own,
+  // different numbering (e.g. Seoul is 11, not TourAPI's old areaCode=1).
   const body = await callTourApi(env, 'areaBasedList2', {
-    areaCode, sigunguCode, contentTypeId, numOfRows, pageNo,
+    lDongRegnCd, lDongSignguCd, contentTypeId, numOfRows, pageNo,
     arrange: 'A'
   }, fetchImpl);
   return {
