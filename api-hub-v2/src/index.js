@@ -26,7 +26,7 @@ import { planTopic } from './lib/topic-planner.js';
 import { generateRequiredPages } from './lib/required-pages.js';
 import { assertBloggerWriteAllowed } from './lib/write-policy.js';
 import { tavilyConfigured, tavilySearch } from './lib/tavily-search.js';
-import { getAttractionDetail, listAreaBasedAttractions, tourApiConfigured } from './lib/tour-api.js';
+import { fetchAreaBasedAttractionsPage, getAttractionDetail, tourApiConfigured } from './lib/tour-api.js';
 
 function escapeHtml(value) {
   return String(value || '')
@@ -198,7 +198,7 @@ export default {
         return json(result, result.ok ? 200 : 502);
       }
       if (url.pathname === '/api/hub/search/tavily') return json(await tavilySearch(env, await readJson(request)));
-      if (url.pathname === '/api/hub/tour/attractions') return json({ attractions: await listAreaBasedAttractions(env, await readJson(request)) });
+      if (url.pathname === '/api/hub/tour/attractions') return json(await fetchAreaBasedAttractionsPage(env, await readJson(request)));
       if (url.pathname === '/api/hub/tour/attraction') return json(await getAttractionDetail(env, await readJson(request)));
       if (url.pathname === '/api/hub/ai/topic') return json(await planTopic(env, await readJson(request)));
       if (url.pathname === '/api/hub/ai/writer') return json(await writer(env, await readJson(request)));

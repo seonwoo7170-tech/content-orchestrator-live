@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildTourApiResearch,
+  fetchAreaBasedAttractionsPage,
   getAttractionDetail,
   listAreaBasedAttractions,
   normalizeAttractionSummary,
@@ -12,11 +13,11 @@ function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-function okBody(items) {
+function okBody(items, totalCount = Array.isArray(items) ? items.length : 1) {
   return {
     response: {
       header: { resultCode: '0000', resultMsg: 'OK' },
-      body: { items: { item: items }, numOfRows: Array.isArray(items) ? items.length : 1, pageNo: 1 }
+      body: { items: { item: items }, numOfRows: Array.isArray(items) ? items.length : 1, pageNo: 1, totalCount }
     }
   };
 }
@@ -49,6 +50,34 @@ test('listAreaBasedAttractions calls the EngService2 endpoint with a raw (non-do
   assert.equal(results[0].contentId, '126508');
   assert.equal(results[0].title, 'Gyeongbokgung Palace');
   assert.equal(results[0].firstImage, 'https://img.example/pal.jpg');
+});
+
+test('fetchAreaBasedAttractionsPage surfaces totalCount alongside the normalized list, so a zero-result page is distinguishable from a real API failure', async () => {
+  const fetchImpl = async () => jsonResponse(okBody([
+    { contentid: '126508', contenttypeid: '12', title: 'Gyeongbokgung Palace', addr1: 'Seoul' }
+  ], 137));
+  const page = await fetchAreaBasedAttractionsPage(ENV, { areaCode: '1' }, fetchImpl);
+  assert.equal(page.attractions.length, 1);
+  assert.equal(page.totalCount, 137);
+  assert.equal(page.numOfRows, 1);
+  assert.equal(page.pageNo, 1);
+});
+
+test('a genuine zero-result page reports totalCount 0, not just an empty list', async () => {
+  const fetchImpl = async () => jsonResponse(okBody([], 0));
+  const page = await fetchAreaBasedAttractionsPage(ENV, { areaCode: '1' }, fetchImpl);
+  assert.deepEqual(page.attractions, []);
+  assert.equal(page.totalCount, 0);
+});
+
+test('listAreaBasedAttractions keeps returning a plain array for existing callers', async () => {
+  const fetchImpl = async () => jsonResponse(okBody([
+    { contentid: '1', contenttypeid: '12', title: 'Solo Spot', addr1: 'Busan' }
+  ]));
+  const results = await listAreaBasedAttractions(ENV, { areaCode: '6' }, fetchImpl);
+  assert.ok(Array.isArray(results));
+  assert.equal(results.length, 1);
+  assert.equal(results.totalCount, undefined);
 });
 
 test('none of the legacy v1 *YN flag params are sent, since TourAPI4.0 v2 endpoints reject them with INVALID_REQUEST_PARAMETER_ERROR', async () => {

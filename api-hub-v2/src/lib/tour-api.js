@@ -239,7 +239,18 @@ export function buildTourApiResearch(attraction) {
   };
 }
 
-export async function listAreaBasedAttractions(env, {
+function safeCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+// A zero-result list is ambiguous on its own: it could mean this areaCode/contentTypeId
+// combination genuinely has no data in this service (EngService2 covers far fewer
+// listings than the Korean service), or it could mean pagination/filter params are the
+// real problem while data.go.kr's own totalCount says otherwise. Surface the upstream
+// paging fields alongside the normalized list so that distinction is visible instead of
+// having to guess from an empty array alone.
+export async function fetchAreaBasedAttractionsPage(env, {
   areaCode,
   sigunguCode,
   contentTypeId = DEFAULT_ATTRACTION_CONTENT_TYPE_ID,
@@ -253,7 +264,16 @@ export async function listAreaBasedAttractions(env, {
     areaCode, sigunguCode, contentTypeId, numOfRows, pageNo,
     arrange: 'A'
   }, fetchImpl);
-  return normalizeTourApiItems(body).map(normalizeAttractionSummary).filter(Boolean);
+  return {
+    attractions: normalizeTourApiItems(body).map(normalizeAttractionSummary).filter(Boolean),
+    totalCount: safeCount(body?.totalCount),
+    numOfRows: safeCount(body?.numOfRows),
+    pageNo: safeCount(body?.pageNo)
+  };
+}
+
+export async function listAreaBasedAttractions(env, params = {}, fetchImpl = fetch) {
+  return (await fetchAreaBasedAttractionsPage(env, params, fetchImpl)).attractions;
 }
 
 export async function getAttractionDetail(env, { contentId, contentTypeId } = {}, fetchImpl = fetch) {
