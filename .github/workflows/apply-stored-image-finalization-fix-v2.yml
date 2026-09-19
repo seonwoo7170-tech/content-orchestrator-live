@@ -1,0 +1,193 @@
+name: apply-stored-image-finalization-fix-v2
+
+on:
+  push:
+    branches:
+      - 'claude/github-connection-check-umb3pv'
+    paths:
+      - '.github/apply-stored-image-finalization-fix-v2-trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: content-orchestrator-production
+  cancel-in-progress: false
+
+jobs:
+  patch-verify-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'claude/github-connection-check-umb3pv'
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Patch stored image finalization priority
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = 'worker/lib/image-completion.js';
+          let source = fs.readFileSync(path, 'utf8');
+
+          const failedBlock = `            EXISTS(\n              SELECT 1\n                FROM job_images fi\n               WHERE fi.job_id = j.id\n                 AND (fi.status = 'failed' OR fi.provider_status = 'retrying')\n            ) AS has_failed_images,`;
+          const storedBlock = `            EXISTS(\n              SELECT 1\n                FROM job_images si\n               WHERE si.job_id = j.id\n                 AND si.status = 'stored'\n            ) AS has_stored_images,`;
+          if (!source.includes('AS has_stored_images')) {
+            if (!source.includes(failedBlock)) throw new Error('STORED_IMAGE_SELECT_ANCHOR_MISSING');
+            source = source.replace(failedBlock, `${failedBlock}\n${storedBlock}`);
+          }
+
+          const oldOrder = `      ORDER BY CASE\n                 WHEN has_active_provider_task = 1 THEN 0\n                 WHEN has_failed_images = 1 AND datetime(image_activity_at) <= datetime('now', ?) THEN 1\n                 WHEN has_failed_images = 0 THEN 2\n                 ELSE 3\n               END,\n               CASE\n                 WHEN has_active_provider_task = 1 THEN datetime(active_provider_checked_at)\n                 WHEN has_failed_images = 1 THEN datetime(image_activity_at)\n                 ELSE MAX(datetime(j.updated_at), datetime(image_activity_at))\n               END,`;
+          const newOrder = `      ORDER BY CASE\n                 WHEN has_stored_images = 1 THEN 0\n                 WHEN has_active_provider_task = 1 THEN 1\n                 WHEN has_failed_images = 1 AND datetime(image_activity_at) <= datetime('now', ?) THEN 2\n                 WHEN has_failed_images = 0 THEN 3\n                 ELSE 4\n               END,\n               CASE\n                 WHEN has_stored_images = 1 THEN datetime(image_activity_at)\n                 WHEN has_active_provider_task = 1 THEN datetime(active_provider_checked_at)\n                 WHEN has_failed_images = 1 THEN datetime(image_activity_at)\n                 ELSE MAX(datetime(j.updated_at), datetime(image_activity_at))\n               END,`;
+          if (!source.includes(newOrder)) {
+            if (!source.includes(oldOrder)) throw new Error('STORED_IMAGE_ORDER_ANCHOR_MISSING');
+            source = source.replace(oldOrder, newOrder);
+          }
+          fs.writeFileSync(path, source);
+
+          const activeTestPath = 'tests/image-active-task-starvation.test.mjs';
+          let activeTest = fs.readFileSync(activeTestPath, 'utf8');
+          activeTest = activeTest.replace(
+            "test('ready image scheduler prioritizes and rotates durable active provider tasks by oldest provider check', async () => {",
+            "test('ready image scheduler finalizes stored images before rotating durable active provider tasks', async () => {"
+          );
+          activeTest = activeTest.replace(
+            "  assert.match(source, /AS has_active_provider_task/);",
+            "  assert.match(source, /AS has_stored_images/);\n  assert.match(source, /si\\.status = 'stored'/);\n  assert.match(source, /AS has_active_provider_task/);"
+          );
+          activeTest = activeTest.replace(
+            "  assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);",
+            "  assert.match(source, /WHEN has_stored_images = 1 THEN 0/);\n  assert.match(source, /WHEN has_active_provider_task = 1 THEN 1/);\n  assert.match(source, /WHEN has_stored_images = 1 THEN datetime\\(image_activity_at\\)/);"
+          );
+          fs.writeFileSync(activeTestPath, activeTest);
+
+          const fairnessPath = 'tests/image-completion-fairness.test.mjs';
+          let fairness = fs.readFileSync(fairnessPath, 'utf8');
+          fairness = fairness.replace(
+            "test('active provider tasks win first and rotate by oldest provider check before failed and healthy work', () => {",
+            "test('stored image finalization wins first, then active provider tasks rotate before failed and healthy work', () => {"
+          );
+          fairness = fairness.replace(
+            "  assert.match(source, /AS has_active_provider_task/);",
+            "  assert.match(source, /AS has_stored_images/);\n  assert.match(source, /AS has_active_provider_task/);"
+          );
+          fairness = fairness.replace(
+            "  assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);\n  assert.match(source, /WHEN has_failed_images = 1 AND datetime\\(image_activity_at\\) <= datetime\\('now', \\?\\) THEN 1/);\n  assert.match(source, /WHEN has_failed_images = 0 THEN 2/);\n  assert.match(source, /ELSE 3/);\n  assert.match(source, /WHEN has_active_provider_task = 1 THEN datetime\\(active_provider_checked_at\\)/);",
+            "  assert.match(source, /WHEN has_stored_images = 1 THEN 0/);\n  assert.match(source, /WHEN has_active_provider_task = 1 THEN 1/);\n  assert.match(source, /WHEN has_failed_images = 1 AND datetime\\(image_activity_at\\) <= datetime\\('now', \\?\\) THEN 2/);\n  assert.match(source, /WHEN has_failed_images = 0 THEN 3/);\n  assert.match(source, /ELSE 4/);\n  assert.match(source, /WHEN has_stored_images = 1 THEN datetime\\(image_activity_at\\)/);\n  assert.match(source, /WHEN has_active_provider_task = 1 THEN datetime\\(active_provider_checked_at\\)/);"
+          );
+          fs.writeFileSync(fairnessPath, fairness);
+
+          const regression = `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFile } from 'node:fs/promises';\n\ntest('stored R2 image rows are selected for attachment before any paid/provider work', async () => {\n  const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');\n  assert.match(source, /si\\.status = 'stored'/);\n  assert.match(source, /WHEN has_stored_images = 1 THEN 0/);\n  assert.match(source, /const storedBeforeGeneration = images\\.some/);\n  assert.match(source, /if \\(!state\\.complete && !storedBeforeGeneration\\) \\{/);\n  assert.match(source, /const article = attachStoredImages\\(result\\.article, images\\)/);\n});\n`;
+          fs.writeFileSync('tests/image-stored-finalization-priority.test.mjs', regression);
+          NODE
+
+      - name: Install root dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify root source
+        run: npm run verify
+
+      - name: Install API Hub dependencies
+        run: npm --prefix api-hub-v2 install --no-audit --no-fund
+
+      - name: Verify API Hub
+        run: npm --prefix api-hub-v2 test
+
+      - name: Commit verified source change
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add worker/lib/image-completion.js tests/image-active-task-starvation.test.mjs tests/image-completion-fairness.test.mjs tests/image-stored-finalization-priority.test.mjs
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+          else
+            git commit -m 'Prioritize stored image finalization before provider work'
+            git push origin HEAD:'claude/github-connection-check-umb3pv'
+          fi
+
+      - name: Validate Cloudflare credentials
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+
+      - name: Resolve production D1
+        shell: bash
+        run: |
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Could not resolve production D1 database'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render production Wrangler config
+        run: node scripts/render-wrangler.mjs
+
+      - name: Validate production safety gates
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const text=fs.readFileSync('wrangler.jsonc','utf8');
+          for (const needle of [
+            '"SYSTEM_PAUSED": "false"',
+            '"main": "worker/mcp-entry.js"',
+            '"BLOGGER_WRITES_ENABLED": "true"',
+            '"AUTO_PUBLISH_EXECUTION_ENABLED": "true"',
+            '"DAILY_WORK_EXECUTION_ENABLED": "true"',
+            '"JOB_RECOVERY_EXECUTION_ENABLED": "true"',
+            '"KIE_IMAGE_CALLBACK_ENABLED": "false"',
+            '"KIE_IMAGE_FALLBACK_ENABLED": "false"',
+            '"crons": ["*/3 * * * *", "*/5 * * * *"]'
+          ]) if (!text.includes(needle)) throw new Error(`PRODUCTION_GATE_INVALID:${needle}`);
+          NODE
+
+      - name: Deploy production Worker while preserving secrets
+        run: |
+          node scripts/ensure-image-schema.mjs
+          npx --yes wrangler@latest deploy --config wrangler.jsonc
+
+      - name: Production health read-back
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base='https://content-orchestrator.smileseon.workers.dev';
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          for(let i=1;i<=20;i++){
+            const response=await fetch(`${base}/health?storedFinalizeV2=${Date.now()}_${i}`,{cache:'no-store'});
+            const health=await response.json().catch(()=>({}));
+            const ok=response.ok && health.systemPaused!==true && health.bloggerWritesEnabled===true && health.phase2Automation?.autoPublishExecutionEnabled===true;
+            if(ok){ console.log(`PRODUCTION_PUBLIC_HEALTH_OK systemPaused=${health.systemPaused} bloggerWrites=${health.bloggerWritesEnabled}`); process.exit(0); }
+            await sleep(1000);
+          }
+          throw new Error('PRODUCTION_PUBLIC_HEALTH_READBACK_FAILED');
+          NODE
+
+      - name: Observe job 180 after image watchdog windows
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const account=process.env.CLOUDFLARE_ACCOUNT_ID, db=process.env.D1_DATABASE_ID, token=process.env.CLOUDFLARE_API_TOKEN;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function sql(query,params=[]){
+            const r=await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db}/query`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'content-type':'application/json'},body:JSON.stringify({sql:query,params})});
+            const j=await r.json(); if(!r.ok||j.success!==true) throw new Error(`D1_QUERY_FAILED:${r.status}`); return j.result?.[0]?.results||[];
+          }
+          for(let i=0;i<16;i++){
+            const rows=await sql(`SELECT j.status, j.updated_at, ji.status AS image_status, ji.updated_at AS image_updated_at FROM jobs j JOIN job_images ji ON ji.job_id=j.id WHERE j.id=180 AND ji.id=28686`);
+            const row=rows[0]||{};
+            console.log(`JOB180_OBSERVE attempt=${i+1} jobStatus=${row.status||'missing'} image28686=${row.image_status||'missing'} jobUpdated=${row.updated_at||'n/a'} imageUpdated=${row.image_updated_at||'n/a'}`);
+            if(row.image_status==='attached') process.exit(0);
+            if(i<15) await sleep(20000);
+          }
+          throw new Error('JOB180_STORED_IMAGE_NOT_FINALIZED_AFTER_DEPLOY');
+          NODE
