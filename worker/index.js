@@ -26,6 +26,7 @@ import {
 import { attachStoredImages, buildImagePlan } from './lib/image-plan.js';
 import { generatePlannedImages } from './lib/image-executor-resilient.js';
 import { listJobImages, markImageAttached, persistImagePlan } from './lib/image-store.js';
+import { applyRealPhotoFallback } from './lib/real-photo-images.js';
 import { diagnoseCloudflareViaHub } from './lib/provider-diagnostics.js';
 import { getStoredJob, listStoredJobs, persistJobResult, persistJobTransition } from './lib/job-store.js';
 import { processStoredJob } from './lib/stored-job-executor.js';
@@ -404,8 +405,22 @@ export default {
       const generateImagesJobId = matchJobImagePath(url.pathname, 'generate');
       if (request.method === 'POST' && generateImagesJobId !== null) {
         if (!await requireAdmin(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
-        readyJobResult(await getStoredJob(env, generateImagesJobId));
+        const generateImagesRow = await getStoredJob(env, generateImagesJobId);
+        const result = readyJobResult(generateImagesRow);
         const input = await readJson(request);
+        // A manual retry can be the very first chance a job gets to try a real photo --
+        // e.g. one whose images already exhausted their KIE budget before this fallback
+        // existed, reset back to 'planned' via /api/operations/images/reset-failed and
+        // then retried here, same as the scheduled tick in image-completion.js does for
+        // a fresh job. See applyRealPhotoFallback for source priority (TourAPI, then
+        // Klook for a smileatlas job with no tourApiContentId).
+        try {
+          await applyRealPhotoFallback(env, generateImagesJobId, {
+            mode: generateImagesRow.mode, blogId: generateImagesRow.blog_id, result
+          });
+        } catch (error) {
+          console.error('REAL_PHOTO_FILL_FAILED', String(error?.message || error));
+        }
         const outcome = await generatePlannedImages(env, generateImagesJobId, {
           retryFailed: input.retryFailed !== false,
           executionContext: ctx

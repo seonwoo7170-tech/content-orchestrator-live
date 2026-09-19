@@ -1,4 +1,6 @@
 import { requireBucket, publicBaseUrl, storeImageBytes, sourceImageMimeType } from './image-executor.js';
+import { listJobImages } from './image-store.js';
+import { findKlookProductsForAttraction, inferKlookCityFromText, smileatlasBlogId } from './klook-catalog.js';
 
 const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
 
@@ -49,4 +51,29 @@ export async function fillBodyImagesFromRealPhotos(env, jobId, images, photoUrls
     }
   }
   return { attempted, filled };
+}
+
+// The attraction's own TourAPI photos (when the job was grounded by tourApiContentId) take
+// priority; a smileatlas job with no such grounding falls back to Klook's imported catalog
+// for whichever known Korean city its own topic/title names. Shared by both the scheduled
+// image-completion tick (image-completion.js) and the manual "이미지 재시도" admin endpoint
+// (worker/index.js) so a job doesn't need to wait for a fresh scheduler pass to benefit --
+// pointing a stuck job's already-failed images back to 'planned' (see
+// resetFailedImageForRetry in image-store.js) is enough for either caller to try this again.
+export async function resolveRealPhotoUrls(env, { mode, blogId, result } = {}) {
+  if (Array.isArray(result?.attractionImages) && result.attractionImages.length) return result.attractionImages;
+  if (String(mode || '') !== 'new_article') return [];
+  if (String(blogId || '').trim() !== smileatlasBlogId(env)) return [];
+
+  const cityNameEn = inferKlookCityFromText(`${result?.article?.topic || ''} ${result?.article?.title || ''}`);
+  if (!cityNameEn) return [];
+  const products = await findKlookProductsForAttraction(env, { cityNameEn, limit: 6 }).catch(() => []);
+  return products.map((product) => product.productImage).filter(Boolean);
+}
+
+export async function applyRealPhotoFallback(env, jobId, { mode, blogId, result } = {}, options = {}) {
+  const urls = await resolveRealPhotoUrls(env, { mode, blogId, result });
+  if (!urls.length) return { attempted: 0, filled: 0 };
+  const images = await (options.listJobImagesFn || listJobImages)(env, jobId);
+  return fillBodyImagesFromRealPhotos(env, jobId, images, urls, options);
 }
