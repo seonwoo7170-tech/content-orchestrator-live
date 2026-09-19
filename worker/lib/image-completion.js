@@ -107,6 +107,12 @@ export async function listReadyImageCandidates(env, options = {}) {
                WHERE fi.job_id = j.id
                  AND (fi.status = 'failed' OR fi.provider_status = 'retrying')
             ) AS has_failed_images,
+            EXISTS(
+              SELECT 1
+                FROM job_images si
+               WHERE si.job_id = j.id
+                 AND si.status = 'stored'
+            ) AS has_stored_images,
             COALESCE((
               SELECT MAX(datetime(ai.updated_at))
                 FROM job_images ai
@@ -155,12 +161,14 @@ export async function listReadyImageCandidates(env, options = {}) {
           )
         )
       ORDER BY CASE
-                 WHEN has_active_provider_task = 1 THEN 0
-                 WHEN has_failed_images = 1 AND datetime(image_activity_at) <= datetime('now', ?) THEN 1
-                 WHEN has_failed_images = 0 THEN 2
-                 ELSE 3
+                 WHEN has_stored_images = 1 THEN 0
+                 WHEN has_active_provider_task = 1 THEN 1
+                 WHEN has_failed_images = 1 AND datetime(image_activity_at) <= datetime('now', ?) THEN 2
+                 WHEN has_failed_images = 0 THEN 3
+                 ELSE 4
                END,
                CASE
+                 WHEN has_stored_images = 1 THEN datetime(image_activity_at)
                  WHEN has_active_provider_task = 1 THEN datetime(active_provider_checked_at)
                  WHEN has_failed_images = 1 THEN datetime(image_activity_at)
                  ELSE MAX(datetime(j.updated_at), datetime(image_activity_at))

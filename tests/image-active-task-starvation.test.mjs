@@ -2,12 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('ready image scheduler prioritizes and rotates durable active provider tasks by oldest provider check', async () => {
+test('ready image scheduler finalizes stored images before rotating durable active provider tasks', async () => {
   const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
+  assert.match(source, /AS has_stored_images/);
+  assert.match(source, /si\.status = 'stored'/);
   assert.match(source, /AS has_active_provider_task/);
   assert.match(source, /AS active_provider_checked_at/);
   assert.match(source, /MIN\(datetime\(COALESCE\(pi\.provider_checked_at, pi\.updated_at\)\)\)/);
-  assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);
+  assert.match(source, /WHEN has_stored_images = 1 THEN 0/);
+  assert.match(source, /WHEN has_active_provider_task = 1 THEN 1/);
+  assert.match(source, /WHEN has_stored_images = 1 THEN datetime\(image_activity_at\)/);
   assert.match(source, /WHEN has_active_provider_task = 1 THEN datetime\(active_provider_checked_at\)/);
   assert.match(source, /provider_task_id IS NOT NULL/);
   assert.match(source, /provider_status IN \('waiting', 'queuing', 'generating'/);

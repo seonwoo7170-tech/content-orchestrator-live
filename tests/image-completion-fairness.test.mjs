@@ -4,16 +4,19 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');
 
-test('active provider tasks win first and rotate by oldest provider check before failed and healthy work', () => {
+test('stored image finalization wins first, then active provider tasks rotate before failed and healthy work', () => {
+  assert.match(source, /AS has_stored_images/);
   assert.match(source, /AS has_active_provider_task/);
   assert.match(source, /AS active_provider_checked_at/);
   assert.match(source, /AS has_failed_images/);
   assert.match(source, /AS image_activity_at/);
   assert.match(source, /failedRetryCooldownMinutes/);
-  assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);
-  assert.match(source, /WHEN has_failed_images = 1 AND datetime\(image_activity_at\) <= datetime\('now', \?\) THEN 1/);
-  assert.match(source, /WHEN has_failed_images = 0 THEN 2/);
-  assert.match(source, /ELSE 3/);
+  assert.match(source, /WHEN has_stored_images = 1 THEN 0/);
+  assert.match(source, /WHEN has_active_provider_task = 1 THEN 1/);
+  assert.match(source, /WHEN has_failed_images = 1 AND datetime\(image_activity_at\) <= datetime\('now', \?\) THEN 2/);
+  assert.match(source, /WHEN has_failed_images = 0 THEN 3/);
+  assert.match(source, /ELSE 4/);
+  assert.match(source, /WHEN has_stored_images = 1 THEN datetime\(image_activity_at\)/);
   assert.match(source, /WHEN has_active_provider_task = 1 THEN datetime\(active_provider_checked_at\)/);
   assert.match(source, /WHEN has_failed_images = 1 THEN datetime\(image_activity_at\)/);
   assert.match(source, /ELSE MAX\(datetime\(j\.updated_at\), datetime\(image_activity_at\)\)/);
