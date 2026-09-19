@@ -91,3 +91,36 @@ test('failed stored jobs persist only a safe error code and never provider text'
   assert.match(String(failed.patch?.error || ''), /^[A-Z0-9_]+$/);
   assert.doesNotMatch(JSON.stringify(failed), /SENSITIVE_PROVIDER_BODY_SHOULD_NOT_PERSIST/);
 });
+
+test('a Gemini 400 rejection persists the vetted providerValidationHint alongside the bare code', async () => {
+  const states=[];
+  const fetchImpl=async () => new Response(JSON.stringify({
+    error: 'GEMINI_REQUEST_REJECTED',
+    providerValidationHint: 'blocked by safety filters: HARM_CATEGORY_DANGEROUS_CONTENT'
+  }), { status:400 });
+  await assert.rejects(
+    processStoredJob(
+      {API_HUB_BASE_URL:'https://hub',HUB_API_KEY:'k'},
+      {id:10,mode:'new_article',status:'queued',blog_id:'b',topic:'t',payload_json:'{"language":"ko"}'},
+      {fetchImpl,saveState:async(state,patch)=>states.push({state,patch})}
+    )
+  );
+  const failed=states.find((item)=>item.state==='failed');
+  assert.ok(failed);
+  assert.equal(failed.patch?.error, 'GEMINI_REQUEST_REJECTED: blocked by safety filters: HARM_CATEGORY_DANGEROUS_CONTENT');
+});
+
+test('a rejection with no providerValidationHint still persists only the bare code', async () => {
+  const states=[];
+  const fetchImpl=async () => new Response(JSON.stringify({ error: 'GEMINI_REQUEST_REJECTED' }), { status:400 });
+  await assert.rejects(
+    processStoredJob(
+      {API_HUB_BASE_URL:'https://hub',HUB_API_KEY:'k'},
+      {id:11,mode:'new_article',status:'queued',blog_id:'b',topic:'t',payload_json:'{"language":"ko"}'},
+      {fetchImpl,saveState:async(state,patch)=>states.push({state,patch})}
+    )
+  );
+  const failed=states.find((item)=>item.state==='failed');
+  assert.ok(failed);
+  assert.equal(failed.patch?.error, 'GEMINI_REQUEST_REJECTED');
+});

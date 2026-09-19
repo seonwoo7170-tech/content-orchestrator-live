@@ -144,6 +144,10 @@ test('a provider validation hint from the Hub is folded into the visible error m
     (error) => {
       assert.equal(error.message, 'API_HUB_422:KIE_VALIDATION_FAILED:aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16');
       assert.equal(error.data.providerValidationHint, 'aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16');
+      // Exposed as its own property so a caller can use just the vetted hint (e.g.
+      // stored-job-executor.js persisting it to jobs.error) without re-parsing it out
+      // of error.message, which also carries the raw, unvetted providerError.
+      assert.equal(error.providerHint, 'aspect_ratio must be one of 1:1, 4:3, 3:4, 16:9, 9:16');
       return true;
     }
   );
@@ -158,6 +162,7 @@ test('no hint suffix is added when the Hub omits providerValidationHint', async 
     () => callHub(env, '/api/hub/image/generate', { role: 'body' }, async () => new Response('', { status: 404 })),
     (error) => {
       assert.equal(error.message, 'API_HUB_401:KIE_AUTH_FAILED');
+      assert.equal(error.providerHint, null);
       return true;
     }
   );

@@ -172,6 +172,10 @@ function parseHubResponse({ response, text }) {
     error.hubStatus = response.status;
     error.code = routeMissing ? hubCode : (providerCode || hubCode);
     error.providerCode = providerCode;
+    // Exposed separately from error.message so a caller can surface just the vetted
+    // detail (this, already sanitized/length-capped at the source) without ever having
+    // to parse it back out of a string that also contains the raw, unvetted providerError.
+    error.providerHint = providerHint;
     error.routeMissing = routeMissing;
     error.data = data;
     throw error;

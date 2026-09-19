@@ -152,7 +152,17 @@ function progressInfo(row, images = []) {
 }
 
 function reasonText(row) {
-  const value = String(row?.hold_reason || row?.last_error_code || row?.error || '').trim();
+  // hold_reason/last_error_code are the bare classification codes the recovery logic
+  // matches against (e.g. RETRY_LIMIT_REACHED) and must stay short, but jobs.error can
+  // carry a fuller message for the same failure (e.g. "GEMINI_REQUEST_REJECTED: blocked
+  // by safety filters ..." -- see stored-job-executor.js). Prefer it whenever it actually
+  // says more than the bare code, so a code with no friendly translation below doesn't
+  // fall through to showing just the bare code when the real reason was captured.
+  const bare = String(row?.hold_reason || row?.last_error_code || '').trim();
+  const detailed = String(row?.error || '').trim();
+  const value = (detailed && bare && detailed.length > bare.length && detailed.toUpperCase().startsWith(bare.toUpperCase()))
+    ? detailed
+    : (bare || detailed);
   if (!value) return null;
   const code = value.toUpperCase();
   if (code.includes('DUPLICATE_TOPIC_PUBLICATION_BLOCKED')) return '중복 글 발행 위험 때문에 자동 재작성하지 않습니다.';

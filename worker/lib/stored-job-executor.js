@@ -2,6 +2,7 @@ import { executeJob } from './job-runner.js';
 import { claimStoredJobExecution } from './job-store.js';
 import { appendJobEvent } from './job-events.js';
 import { safeFailureCode } from './job-recovery.js';
+import { safeErrorDetail } from './image-diagnostics.js';
 import { assertTransition } from './state-machine.js';
 
 const REVIEW_CONTINUE_CODE = 'CRITIC_REVIEW_CONTINUE';
@@ -155,12 +156,22 @@ export async function processStoredJob(env, row, options = {}) {
   } catch (error) {
     if (current !== 'failed') {
       const errorCode = safeFailureCode(error);
-      try { await transition('failed', { error: errorCode }); } catch { /* keep original error */ }
+      // safeFailureCode() intentionally collapses the caught error down to its bare
+      // classification token (needed for hold/retry decisions downstream), which is
+      // exactly what previously hid Gemini's own rejection reason behind a bare
+      // GEMINI_REQUEST_REJECTED with no way to diagnose it -- see providerValidationHint
+      // in gemini-ai.js, surfaced here as error.providerHint (api-hub.js). Only that
+      // vetted, already-sanitized/length-capped hint is used -- never error.message or
+      // error.data, which can carry an arbitrary, unvetted provider response body (see
+      // "failed stored jobs persist only a safe error code and never provider text").
+      const errorDetail = safeErrorDetail(error?.providerHint);
+      const errorForDisplay = errorDetail ? `${errorCode}: ${errorDetail}` : errorCode;
+      try { await transition('failed', { error: errorForDisplay }); } catch { /* keep original error */ }
       try {
         await appendJobEvent(env, job.id, {
           eventType: 'error', stage: current, level: 'error',
-          message: `작업 오류 · ${errorCode}`,
-          meta: { errorCode }
+          message: `작업 오류 · ${errorForDisplay}`,
+          meta: { errorCode, errorDetail }
         });
       } catch { /* logging must not hide original failure */ }
     }
