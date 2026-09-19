@@ -91,13 +91,23 @@ async function generateCloudflareImage(env, { role, prompt, steps, seed }, aiBin
   let result; try { result = await aiBinding.run(model, providerInput); } catch (cause) { const classified = classifyWorkersAiFailure(cause); const error = Object.assign(new Error(classified.message), { status: classified.status }); if (Number.isInteger(classified.providerCode)) error.providerCode = classified.providerCode; throw error; }
   const imageBase64 = String(result?.image || '').trim(); if (!imageBase64) throw Object.assign(new Error('IMAGE_EMPTY_RESPONSE'), { status: 502 }); return { ok: true, role, provider: 'cloudflare-workers-ai', model, mimeType: 'image/jpeg', imageBase64, steps, seed };
 }
+// gpt4o-image reliably renders Latin-script headlines but not Hangul -- a Korean hookText
+// (buildThumbnailHook in image-plan.js defaults to Korean whenever the article's language
+// isn't 'en') comes back as garbled pseudo-characters instead of legible text. There is no
+// prompt wording that fixes this; it is a model-level limitation. Never spend a KIE
+// gpt4o-image attempt on a hook the model cannot render -- go straight to the plain no-text
+// path below instead, which the HTML-overlay post-processing step then captions for real.
+function isLatinRenderableHookText(hookText) {
+  return !/[가-힣ᄀ-ᇿ㄰-㆏]/.test(String(hookText || ''));
+}
+
 async function generateProviderImage(env, { role, prompt, steps, seed, providerMode, aspectRatio, taskId, hookText }, aiBinding, fetchImpl) {
   // hookText only ever affects gpt4o-image specifically (the one KIE model that can
   // reliably render legible text) -- see prepareKiePrompt's tail swap and
   // startGpt4oImageTask in kie-image.js. z-image, modelscope, and cloudflare all keep the
   // standard "no visible text" prompt: appending the hook-render tail there as well would
   // leave two contradictory text instructions in the same prompt.
-  const targetsGpt4o = role === 'thumbnail' && Boolean(hookText) && resolveModelForRole(env, role) === GPT4O_IMAGE_MODEL;
+  const targetsGpt4o = role === 'thumbnail' && Boolean(hookText) && isLatinRenderableHookText(hookText) && resolveModelForRole(env, role) === GPT4O_IMAGE_MODEL;
   const hookTail = targetsGpt4o ? gpt4oHookRenderTail(hookText) : KIE_NO_TEXT_TAIL;
   if (providerMode === 'kie') { const result = await generateKieImage(env, { role, prompt: prepareKiePrompt(prompt, hookTail), aspectRatio, taskId, hookText: targetsGpt4o ? hookText : '' }, fetchImpl); return { ...result, role, providerMode: 'kie' }; }
   if (providerMode === 'modelscope') { const result = await generateModelScopeImage(env, { role, prompt: prepareKiePrompt(prompt), aspectRatio, taskId }, fetchImpl); return { ...result, role, providerMode: 'modelscope' }; }
@@ -165,7 +175,14 @@ export async function generateImage(env, input, aiBinding = env?.AI, fetchImpl =
   // Only relevant for role='thumbnail': the caller opts into hook-baking by sending
   // hookText, and only for a fresh (never-yet-attempted) submission -- see the worker's
   // callImageProvider(), which is the single place that decides when to include it.
-  const hookText = role === 'thumbnail' ? String(input?.hookText || '').trim() : '';
+  // A non-Latin-renderable hook (buildThumbnailHook in the worker's image-plan.js defaults
+  // to Korean for any non-'en' article) is treated as if no hook were given at all: gpt4o-
+  // image cannot reliably render Hangul, so the hook-match QA branch below would otherwise
+  // compare Korean text against an image that was never asked to contain it and fail every
+  // single time with IMAGE_HOOK_TEXT_MISMATCH.
+  const hookText = role === 'thumbnail' && isLatinRenderableHookText(input?.hookText)
+    ? String(input?.hookText || '').trim()
+    : '';
   if (providerMode !== 'kie' && providerMode !== 'modelscope') { const model = String(env?.IMAGE_MODEL || DEFAULT_IMAGE_MODEL).trim(); if (!ALLOWED_IMAGE_MODELS.has(model)) throw Object.assign(new Error('IMAGE_MODEL_NOT_ALLOWED'), { status: 500 }); }
   let lastQa = null; let lastGenerated = null; let providerAttempts = 0; let lastHookQa = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

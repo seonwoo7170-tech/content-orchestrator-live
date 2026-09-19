@@ -112,6 +112,42 @@ test('hookText is ignored for a z-image (non-gpt4o) thumbnail, since z-image can
   assert.equal(result.hookBaked, undefined);
 });
 
+// buildThumbnailHook in the worker's image-plan.js defaults to a Korean hook whenever the
+// article's language isn't 'en' -- gpt4o-image cannot reliably render Hangul (it comes back
+// as garbled pseudo-characters, confirmed against a real production thumbnail), so a Korean
+// hook must never be sent down the gpt4o hook-render path even when gpt4o-image is the
+// configured thumbnail model. The real caption still gets applied afterward by the
+// worker's HTML-overlay post-processing step (postprocessThumbnail), which uses a real font
+// and renders Korean correctly -- this only concerns the KIE image-generation prompt itself.
+test('a Korean hookText is never sent down the gpt4o text-render path, even when gpt4o-image is the configured thumbnail model', async () => {
+  // resolveModelForRole still routes every thumbnail to gpt4o-image when that's the
+  // configured model -- it has no view of hookText or its language. What must change for
+  // a Korean hook is the *instruction* sent to it: the standard "no visible text" tail
+  // instead of the render-this-exact-headline tail, so it never attempts Hangul at all.
+  const { fetchImpl, calls } = combinedFetchMock();
+  const submitted = await generateImage(gptEnv, { role: 'thumbnail', prompt: 'A clean kitchen scene', providerMode: 'kie', aspectRatio: '16:9', hookText: '이것부터 확인' }, undefined, fetchImpl);
+  assert.equal(submitted.pending, true);
+
+  const createCall = calls.find((call) => call.url.endsWith('/api/v1/gpt4o-image/generate'));
+  const body = JSON.parse(createCall.init.body);
+  assert.match(body.prompt, /No visible text/i);
+  assert.doesNotMatch(body.prompt, /이것부터 확인/);
+
+  const result = await generateImage(gptEnv, { role: 'thumbnail', prompt: 'A clean kitchen scene', providerMode: 'kie', taskId: submitted.taskId, hookText: '이것부터 확인' }, undefined, fetchImpl);
+  // Never asked it to match Korean text, so no hook-match QA call and no hookBaked flag --
+  // the worker's HTML-overlay post-processing step captions it for real afterward.
+  assert.equal(result.hookBaked, undefined);
+  assert.ok(!calls.some((call) => call.url.includes('generativelanguage.googleapis.com')));
+});
+
+test('an English hookText still bakes normally when gpt4o-image is configured, unaffected by the Korean-script check', async () => {
+  const { fetchImpl, calls } = combinedFetchMock();
+  const submitted = await generateImage(gptEnv, { role: 'thumbnail', prompt: 'A clean kitchen scene', providerMode: 'kie', aspectRatio: '16:9', hookText: 'Try This First' }, undefined, fetchImpl);
+  assert.equal(submitted.pending, true);
+  const createCall = calls.find((call) => call.url.endsWith('/api/v1/gpt4o-image/generate'));
+  assert.match(JSON.parse(createCall.init.body).prompt, /Try This First/);
+});
+
 test('hookText is ignored for a body-role image even when supplied by mistake', async () => {
   const calls = [];
   const fetchImpl = async (url, init = {}) => {
