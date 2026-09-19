@@ -249,9 +249,17 @@ export async function writer(env, input, aiBinding = env?.AI, fetchImpl = fetch)
     throw Object.assign(new Error('WRITER_JSON_INVALID'), { status: 502, meta: MASTER_V45 });
   }
   const article = validateWriterArticle(parsed, { topic, language });
+  // The attraction's own real photos (from TourAPI's detailImage2) ride along here so a
+  // TourAPI-grounded job can use them for body images instead of an AI-generated substitute
+  // -- without this, generateSourceImage() has no idea real photos exist and always falls
+  // back to generating a plausible-looking stand-in scene from the prompt text alone.
+  const attractionImages = Array.isArray(attraction?.images)
+    ? attraction.images.filter((url) => /^https:\/\//i.test(String(url || ''))).slice(0, 8)
+    : [];
   return {
     article,
     ...providerMetadata(result),
+    ...(attractionImages.length ? { attractionImages } : {}),
     research: {
       requested: research.requested,
       used: research.used,

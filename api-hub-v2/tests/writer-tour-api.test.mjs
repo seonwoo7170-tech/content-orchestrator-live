@@ -72,6 +72,32 @@ test('a tourApiContentId input grounds the writer in real TourAPI facts instead 
   assert.equal(result.article.title, baseArticle().title);
 });
 
+test('the attraction\'s real photos ride along on the writer response so image planning can use them instead of generating stand-ins', async () => {
+  const binding = aiMock(() => ({ response: JSON.stringify({ article: baseArticle() }) }));
+
+  const result = await writer(
+    { WRITER_MODEL: '@cf/openai/gpt-oss-120b', TOUR_API_KEY: 'test-key' },
+    { blogId: 'smileatlas', language: 'en', tourApiContentId: '126508' },
+    binding,
+    tourApiFetch()
+  );
+
+  assert.deepEqual(result.attractionImages, ['https://img.example/pal.jpg', 'https://img.example/pal-2.jpg']);
+});
+
+test('a non-TourAPI-grounded writer call never reports attractionImages at all', async () => {
+  const binding = aiMock(() => ({ response: JSON.stringify({ article: baseArticle({ topic: 'test topic' }) }) }));
+
+  const result = await writer(
+    { WRITER_MODEL: '@cf/openai/gpt-oss-120b' },
+    { blogId: '11', topic: 'test topic', language: 'en' },
+    binding,
+    async () => { throw new Error('must not fetch TourAPI'); }
+  );
+
+  assert.equal('attractionImages' in result, false);
+});
+
 test('an explicit topic still overrides the attraction title when both are supplied', async () => {
   let userContent = null;
   const binding = aiMock((model, body) => {
