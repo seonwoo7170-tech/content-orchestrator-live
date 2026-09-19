@@ -158,6 +158,25 @@ async function queuedAfterConflict(jobId) {
   }
 }
 
+const RETRY_CONFLICT_STATUS_LABELS = {
+  ready: '작성 완료', completed: '완료', writing: '작성 중', critic_review: '딴지 검수',
+  repairing: '리페어', final_critic: '최종 딴지', needs_review: '확인 필요',
+  updating_existing: '기존글 업데이트', publishing_new: '신규 발행'
+};
+
+// A JOB_NOT_RETRYABLE/JOB_RETRY_ALREADY_CLAIMED conflict means the job's status column
+// changed between the click and this request landing -- most often because it already
+// recovered on its own (e.g. an automatic retry moved it from failed to ready) before the
+// user's manual click reached the server. queuedAfterConflict() handles the one case worth
+// re-queuing for (it ended up 'queued'); every other status here just means "nothing to do,
+// it already moved on," which deserves a plain explanation instead of the bare error code.
+async function describeRetryConflict(jobId) {
+  const job = await getJob(jobId).catch(() => null);
+  const status = String(job?.status || '');
+  const label = RETRY_CONFLICT_STATUS_LABELS[status] || status || '알 수 없음';
+  return `작업 #${jobId}은 다시 시도를 접수하는 사이 이미 상태가 바뀌었습니다 (현재: ${label}). 새로 시도할 필요는 없습니다.`;
+}
+
 async function resetAndQueue(jobId, button) {
   const originalText = button.textContent;
   button.disabled = true;
@@ -176,8 +195,14 @@ async function resetAndQueue(jobId, button) {
         window.dispatchEvent(new CustomEvent('orchestrator:jobs-changed', { detail: { jobId } }));
         return;
       }
-      if ((code.includes('JOB_NOT_RETRYABLE') || code.includes('JOB_RETRY_ALREADY_CLAIMED')) && await queuedAfterConflict(jobId)) {
-        queueRun = true;
+      if (code.includes('JOB_NOT_RETRYABLE') || code.includes('JOB_RETRY_ALREADY_CLAIMED')) {
+        if (await queuedAfterConflict(jobId)) {
+          queueRun = true;
+        } else {
+          notify(await describeRetryConflict(jobId));
+          window.dispatchEvent(new CustomEvent('orchestrator:jobs-changed', { detail: { jobId } }));
+          return;
+        }
       } else {
         throw error;
       }
