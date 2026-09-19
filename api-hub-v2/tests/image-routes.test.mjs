@@ -347,3 +347,57 @@ test('no validation hint is attached when KIE omits msg or only reports success'
     );
   }
 });
+
+function geminiQaFetchMock(kieCalls, qaResult) {
+  const kie = kieFetchMock(kieCalls);
+  return async (url, init = {}) => {
+    if (String(url).includes('generativelanguage.googleapis.com')) {
+      return jsonResponse({ candidates: [{ content: { parts: [{ text: JSON.stringify(qaResult) }] } }] });
+    }
+    return kie(url, init);
+  };
+}
+
+// This is the gap the "이미지 재시도" button's fix exposed live: KIE_RETRY_BUDGET_EXHAUSTED
+// only ever wraps IMAGE_QA_REJECTED, and until now that code carried no providerValidationHint
+// -- an operator (or Claude) reading the job's event log had no way to tell a QA rejection
+// (wrong subject, or KIE rendered readable text/a watermark) from any other 502 apart from
+// re-deriving it from D1 by hand.
+test('an image rejected by the Gemini QA gate carries a sanitized providerValidationHint, not just the bare code', async () => {
+  const env = { KIE_API_KEY: 'test-secret', GEMINI_API_KEY: 'test-gemini-key', IMAGE_QA_REQUIRED: 'true' };
+  const kieCalls = [];
+  const input = { role: 'body', prompt: 'clean residential repair scene', providerMode: 'kie' };
+
+  const semanticFetch = geminiQaFetchMock(kieCalls, {
+    pass: false, detectedText: [], violations: [], semanticMatch: false,
+    semanticReason: 'Shows an empty office desk, not the requested kitchen sink repair'
+  });
+  const pending = await generateImage(env, input, aiMock(async () => ({ image: 'unused' })), semanticFetch);
+  await assert.rejects(
+    () => generateImage(env, { ...input, taskId: pending.taskId }, aiMock(async () => ({ image: 'unused' })), semanticFetch),
+    (error) => {
+      assert.equal(error.message, 'IMAGE_QA_REJECTED');
+      assert.equal(error.status, 502);
+      assert.match(error.providerValidationHint, /^SEMANTIC_MISMATCH:Shows an empty office desk, not the requested kitchen sink repair$/);
+      return true;
+    }
+  );
+
+  const textCalls = [];
+  const textFetch = geminiQaFetchMock(textCalls, {
+    pass: false, detectedText: ['SALE 50% OFF'], violations: ['readable storefront signage text'], semanticMatch: true,
+    semanticReason: ''
+  });
+  const pendingText = await generateImage(env, input, aiMock(async () => ({ image: 'unused' })), textFetch);
+  await assert.rejects(
+    () => generateImage(env, { ...input, taskId: pendingText.taskId }, aiMock(async () => ({ image: 'unused' })), textFetch),
+    (error) => {
+      assert.equal(error.message, 'IMAGE_QA_REJECTED');
+      assert.match(error.providerValidationHint, /^TEXT_OR_LOGO:readable storefront signage text DETECTED_TEXT:SALE 50 OFF$/);
+      // The safe-charset guard the Hub applies before this ever leaves the process (see
+      // index.js) would silently drop a hint containing '%' -- confirm none survives.
+      assert.doesNotMatch(error.providerValidationHint, /%/);
+      return true;
+    }
+  );
+});

@@ -135,6 +135,21 @@ async function inspectThumbnailHookText(env, generated, hookText, fetchImpl) {
   return { matches: parsed?.matches === true, detectedText: String(parsed?.detectedText || '').trim().slice(0, 200), model: result.model };
 }
 async function inspectThumbnailHookWithRetry(env, generated, hookText, fetchImpl) { const maxChecks = IMAGE_QA_TRANSIENT_DELAYS_MS.length + 1; let lastError = null; for (let check = 1; check <= maxChecks; check += 1) { try { return { ...(await inspectThumbnailHookText(env, generated, hookText, fetchImpl)), inspectionAttempts: check }; } catch (error) { lastError = error; if (!isTransientImageQaFailure(error) || check >= maxChecks) throw error; await sleep(IMAGE_QA_TRANSIENT_DELAYS_MS[check - 1]); } } throw lastError; }
+
+// index.js's providerValidationHint passthrough only forwards a value matching this exact
+// charset (see the regex guard there), so any free-text Gemini reasoning must be sanitized
+// to it -- otherwise the actual "why" (text detected vs. topic mismatch, and the model's own
+// explanation) never leaves this function and every caller only ever sees the bare
+// IMAGE_QA_REJECTED code, same gap this session already closed for the writer/critic path.
+function imageQaRejectionHint(lastQa) {
+  const parts = [];
+  if (lastQa?.violations?.length) parts.push(`TEXT_OR_LOGO:${lastQa.violations.join('|')}`);
+  if (lastQa?.detectedText?.length) parts.push(`DETECTED_TEXT:${lastQa.detectedText.join('|')}`);
+  if (lastQa?.semanticMatch === false) parts.push(`SEMANTIC_MISMATCH:${lastQa.semanticReason || ''}`);
+  const detail = parts.join(' ').replace(/[\r\n]+/g, ' ').trim();
+  if (!detail) return null;
+  return detail.replace(/[^A-Za-z0-9_./,:; -]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200) || null;
+}
 export async function generateImage(env, input, aiBinding = env?.AI, fetchImpl = fetch) {
   const role = String(input?.role || 'body').trim(); if (!IMAGE_ROLES.has(role)) throw Object.assign(new Error('IMAGE_ROLE_INVALID'), { status: 400 });
   const basePrompt = normalizePrompt(input?.prompt); const prompt = `${basePrompt}\n\n${PLAIN_SURFACE_GUARD}`; const steps = normalizeSteps(input?.steps); const seed = normalizeSeed(input?.seed); const providerMode = normalizeProviderMode(input?.providerMode); const qaRequired = imageQaRequired(env); const maxAttempts = qaRequired ? imageQaAttempts(env) : 1;
@@ -166,6 +181,8 @@ export async function generateImage(env, input, aiBinding = env?.AI, fetchImpl =
     throw error;
   }
   const error = new Error('IMAGE_QA_REJECTED'); error.status = 502; error.qaAttempts = providerAttempts; error.qaViolationCount = Number(lastQa?.violations?.length || 0); error.qaDetectedTextCount = Number(lastQa?.detectedText?.length || 0); error.qaDetectedText = Array.isArray(lastQa?.detectedText) ? lastQa.detectedText.slice(0, 8) : []; error.qaViolations = Array.isArray(lastQa?.violations) ? lastQa.violations.slice(0, 8) : []; error.qaSemanticMismatch = lastQa?.semanticMatch === false; error.qaSemanticReason = String(lastQa?.semanticReason || '').slice(0, 500);
+  const qaHint = imageQaRejectionHint(lastQa);
+  if (qaHint) error.providerValidationHint = qaHint;
   if (lastGenerated?.provider === 'kie-ai' && /^https:\/\//i.test(String(lastGenerated?.sourceUrl || ''))) { error.rejectedImageUrl = String(lastGenerated.sourceUrl); error.rejectedImageMimeType = String(lastGenerated.mimeType || 'image/jpeg'); error.rejectedProvider = 'kie-ai'; error.rejectedModel = String(lastGenerated.model || 'z-image'); error.rejectedTaskId = String(lastGenerated.taskId || ''); }
   throw error;
 }
