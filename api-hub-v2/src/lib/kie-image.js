@@ -1,6 +1,6 @@
 const DEFAULT_KIE_BASE_URL = 'https://api.kie.ai';
 const DEFAULT_KIE_MODEL = 'z-image';
-const GPT4O_IMAGE_MODEL = 'gpt4o-image';
+export const GPT4O_IMAGE_MODEL = 'gpt4o-image';
 const DEFAULT_KIE_THUMBNAIL_MODEL = 'z-image';
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 const DEFAULT_KIE_TASK_TIMEOUT_MS = 15 * 60 * 1000;
@@ -48,7 +48,7 @@ function safeThumbnailModel(env) {
   return model;
 }
 
-function resolveModelForRole(env, role) {
+export function resolveModelForRole(env, role) {
   return role === 'thumbnail' ? safeThumbnailModel(env) : safeModel(env);
 }
 
@@ -380,10 +380,16 @@ async function downloadKieResult(env, fetchImpl, resultUrl) {
   throw lastError || Object.assign(new Error('KIE_RESULT_DOWNLOAD_FAILED'), { status: 502, transient: true });
 }
 
-async function startGpt4oImageTask(env, { role, prompt, aspectRatio }, apiKey, baseUrl, callbackUrl, fetchImpl) {
+async function startGpt4oImageTask(env, { role, prompt, aspectRatio, hookText }, apiKey, baseUrl, callbackUrl, fetchImpl) {
+  const hook = String(hookText || '').trim();
+  // When a hook is being baked in, `prompt` (built by the caller with a hook-render
+  // instruction instead of the usual "no visible text" tail) must reach KIE verbatim.
+  // Re-applying safePromptForKie's own "no visible text" line here would directly
+  // contradict the instruction to render this exact headline.
+  const finalPrompt = hook ? String(prompt || '').replace(/\s+/g, ' ').trim() : safePromptForKie(prompt);
   const body = {
     filesUrl: [],
-    prompt: safePromptForKie(prompt),
+    prompt: finalPrompt,
     size: gpt4oImageSize(aspectRatio, role)
   };
   if (callbackUrl) body.callBackUrl = callbackUrl;
@@ -412,20 +418,24 @@ async function startGpt4oImageTask(env, { role, prompt, aspectRatio }, apiKey, b
     state: 'waiting',
     pending: true,
     complete: false,
-    callback: Boolean(callbackUrl)
+    callback: Boolean(callbackUrl),
+    hookBaked: Boolean(hook)
   };
 }
 
-export async function startKieImageTask(env, { role, prompt, aspectRatio }, fetchImpl = fetch) {
+export async function startKieImageTask(env, { role, prompt, aspectRatio, hookText }, fetchImpl = fetch) {
   const apiKey = requiredKey(env);
   const baseUrl = safeBaseUrl(env);
   const model = resolveModelForRole(env, role);
   const callbackUrl = kieCallbackUrl(env);
 
   if (model === GPT4O_IMAGE_MODEL) {
-    return startGpt4oImageTask(env, { role, prompt, aspectRatio }, apiKey, baseUrl, callbackUrl, fetchImpl);
+    return startGpt4oImageTask(env, { role, prompt, aspectRatio, hookText }, apiKey, baseUrl, callbackUrl, fetchImpl);
   }
 
+  // z-image cannot reliably render legible text, so hookText is intentionally ignored on
+  // this path — thumbnails on this model always use the standard "no visible text" prompt
+  // plus the separate HTML-overlay post-processing step.
   const body = {
     model,
     input: {
@@ -656,7 +666,7 @@ export async function pollKieImageTask(env, taskId, fetchImpl = fetch, role) {
   };
 }
 
-export async function generateKieImage(env, { role, prompt, aspectRatio, taskId }, fetchImpl = fetch) {
+export async function generateKieImage(env, { role, prompt, aspectRatio, taskId, hookText }, fetchImpl = fetch) {
   if (String(taskId || '').trim()) return pollKieImageTask(env, taskId, fetchImpl, role);
-  return startKieImageTask(env, { role, prompt, aspectRatio }, fetchImpl);
+  return startKieImageTask(env, { role, prompt, aspectRatio, hookText }, fetchImpl);
 }

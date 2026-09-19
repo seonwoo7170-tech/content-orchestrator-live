@@ -1,6 +1,6 @@
 import { classifyWorkersAiFailure } from './cloudflare-ai.js';
 import { runGeminiAi } from './gemini-ai.js';
-import { generateKieImage } from './kie-image.js';
+import { generateKieImage, resolveModelForRole, GPT4O_IMAGE_MODEL } from './kie-image.js';
 import { generateModelScopeImage } from './modelscope-image.js';
 
 const DEFAULT_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
@@ -22,6 +22,23 @@ const IMAGE_QA_SCHEMA = Object.freeze({
   },
   required: ['pass', 'detectedText', 'violations', 'semanticMatch', 'semanticReason']
 });
+const HOOK_MATCH_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    detectedText: { type: 'string' },
+    matches: { type: 'boolean' }
+  },
+  required: ['detectedText', 'matches']
+});
+
+// GPT4o-image is the one KIE model that reliably renders legible text, so a thumbnail's
+// first-ever attempt bakes the hook caption straight into the image instead of relying on
+// the separate HTML-overlay post-processing step. This tail replaces KIE_NO_TEXT_TAIL --
+// it must not coexist with it, since the two instructions directly contradict each other.
+function gpt4oHookRenderTail(hookText) {
+  const hook = String(hookText || '').replace(/\s+/g, ' ').trim();
+  return `Render the exact headline text "${hook}" as a bold, highly legible caption near the bottom third of the image, in a clean modern sans-serif font with strong color contrast against the background. Spell it exactly as given, in that language, with no other letters, words, numbers, or logos anywhere else in the image.`;
+}
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function isLegacyGuardLine(line) {
@@ -40,15 +57,15 @@ function kieRecoveryLevel(raw) { if (/KIE_RECOVERY_LEVEL_3|even tighter close-up
 function kieComposition(raw) { const level = kieRecoveryLevel(raw); if (level >= 3) return 'Tight close-up, minimal scene elements, soft natural daylight, realistic editorial photography.'; if (level === 2) return 'Close-up view, very simple composition, soft natural daylight, realistic editorial photography.'; return 'Simple uncluttered composition, soft natural daylight, realistic editorial photography.'; }
 function isComputerTechTopic(raw) { return /(?:\bpc\b|컴퓨터|윈도우|windows|노트북|laptop|desktop|블루스크린|blue\s*screen|작업\s*관리자|task\s*manager|렉\s*걸림|버벅|느려|slow\s*(?:pc|computer)|\bcpu\b|\bgpu\b|\bram\b|메모리|드라이버|driver)/i.test(raw); }
 function computerTechScene(raw) { const level = kieRecoveryLevel(raw); if (level >= 3) return 'A realistic editorial photograph in extreme tight close-up of one plain black computer cooling fan housing mounted inside a smooth unbranded metal desktop case, with one sleeved cable and only fingertips or one simple tool visible. All monitors, keyboards, circuit boards, stickers, labels, packaging, documents, and decorative electronics are completely out of frame. Broad unlabeled unmarked surfaces and minimal physical detail.'; if (level === 2) return 'A realistic editorial photograph of an open unbranded desktop computer case on a clean workbench, with a person’s hands checking one plain cooling fan and one sleeved cable connection. No monitor or keyboard is visible, exposed circuit boards are minimized, and the case interior uses broad unlabeled unmarked surfaces.'; return 'A realistic editorial photograph of an open unbranded desktop computer case on a clean workbench, with one pair of hands inspecting a plain cooling fan and a sleeved cable connection. The monitor and keyboard are out of frame, the metal case surfaces are smooth and unmarked, and only a few simple physical components are visible.'; }
-function prepareKiePrompt(value) {
+function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   const raw = String(value || '').replace(/\s+/g, ' ').trim(); const composition = kieComposition(raw);
   // Keep the planner's exact PC/troubleshooting subject. The previous replacement
   // converted every computer article into the same fan/ventilation scene.
-  if (/\bshower\b[^.]*\bwater pressure\b|\bwater pressure\b[^.]*\bshower\b/i.test(raw)) return `A realistic editorial photograph of a residential chrome showerhead with a steady stream of water against a clean light-colored tiled bathroom wall. ${composition} ${KIE_NO_TEXT_TAIL}`;
-  if (/\bwater shutoff\b|\bshutoff valve\b|\bmain water valve\b/i.test(raw)) return `A realistic editorial photograph of a residential main water shutoff valve connected to exposed household plumbing in a clean utility area. Slightly angled view with a clear focal subject. ${composition} ${KIE_NO_TEXT_TAIL}`;
-  if (/\bai assistants?\b|\bartificial intelligence\b[^.]*\b(?:home|household|maintenance)\b|\bai\b[^.]*\b(?:home|household|maintenance)\b/i.test(raw)) return `A realistic editorial photograph of a homeowner inspecting a household fixture with simple hand tools in a clean residential setting. Natural candid pose with one clear focal subject. ${composition} ${KIE_NO_TEXT_TAIL}`;
+  if (/\bshower\b[^.]*\bwater pressure\b|\bwater pressure\b[^.]*\bshower\b/i.test(raw)) return `A realistic editorial photograph of a residential chrome showerhead with a steady stream of water against a clean light-colored tiled bathroom wall. ${composition} ${tail}`;
+  if (/\bwater shutoff\b|\bshutoff valve\b|\bmain water valve\b/i.test(raw)) return `A realistic editorial photograph of a residential main water shutoff valve connected to exposed household plumbing in a clean utility area. Slightly angled view with a clear focal subject. ${composition} ${tail}`;
+  if (/\bai assistants?\b|\bartificial intelligence\b[^.]*\b(?:home|household|maintenance)\b|\bai\b[^.]*\b(?:home|household|maintenance)\b/i.test(raw)) return `A realistic editorial photograph of a homeowner inspecting a household fixture with simple hand tools in a clean residential setting. Natural candid pose with one clear focal subject. ${composition} ${tail}`;
   const focused = raw.match(/focused on\s+([^.]+)/i)?.[1]?.replace(/\b(?:devices?|screens?|displays?|monitors?|interfaces?|gauges?|meters?)\b/gi, '').replace(/control panels?/gi, '').replace(/\s+/g, ' ').trim();
-  const subject = focused || 'a practical household repair or maintenance scene'; return `A realistic editorial photograph focused on ${subject}. One clear focal subject in a clean residential setting. ${composition} ${KIE_NO_TEXT_TAIL}`;
+  const subject = focused || 'a practical household repair or maintenance scene'; return `A realistic editorial photograph focused on ${subject}. One clear focal subject in a clean residential setting. ${composition} ${tail}`;
 }
 function normalizeSteps(value) { if (value === undefined || value === null || value === '') return undefined; const steps = Number(value); if (!Number.isInteger(steps) || steps < 1 || steps > 8) throw Object.assign(new Error('IMAGE_STEPS_INVALID'), { status: 400 }); return steps; }
 function normalizeSeed(value) { if (value === undefined || value === null || value === '') return undefined; const seed = Number(value); if (!Number.isInteger(seed) || seed < 0 || seed > 2147483647) throw Object.assign(new Error('IMAGE_SEED_INVALID'), { status: 400 }); return seed; }
@@ -65,10 +82,17 @@ async function generateCloudflareImage(env, { role, prompt, steps, seed }, aiBin
   let result; try { result = await aiBinding.run(model, providerInput); } catch (cause) { const classified = classifyWorkersAiFailure(cause); const error = Object.assign(new Error(classified.message), { status: classified.status }); if (Number.isInteger(classified.providerCode)) error.providerCode = classified.providerCode; throw error; }
   const imageBase64 = String(result?.image || '').trim(); if (!imageBase64) throw Object.assign(new Error('IMAGE_EMPTY_RESPONSE'), { status: 502 }); return { ok: true, role, provider: 'cloudflare-workers-ai', model, mimeType: 'image/jpeg', imageBase64, steps, seed };
 }
-async function generateProviderImage(env, { role, prompt, steps, seed, providerMode, aspectRatio, taskId }, aiBinding, fetchImpl) {
-  if (providerMode === 'kie') { const result = await generateKieImage(env, { role, prompt: prepareKiePrompt(prompt), aspectRatio, taskId }, fetchImpl); return { ...result, role, providerMode: 'kie' }; }
+async function generateProviderImage(env, { role, prompt, steps, seed, providerMode, aspectRatio, taskId, hookText }, aiBinding, fetchImpl) {
+  // hookText only ever affects gpt4o-image specifically (the one KIE model that can
+  // reliably render legible text) -- see prepareKiePrompt's tail swap and
+  // startGpt4oImageTask in kie-image.js. z-image, modelscope, and cloudflare all keep the
+  // standard "no visible text" prompt: appending the hook-render tail there as well would
+  // leave two contradictory text instructions in the same prompt.
+  const targetsGpt4o = role === 'thumbnail' && Boolean(hookText) && resolveModelForRole(env, role) === GPT4O_IMAGE_MODEL;
+  const hookTail = targetsGpt4o ? gpt4oHookRenderTail(hookText) : KIE_NO_TEXT_TAIL;
+  if (providerMode === 'kie') { const result = await generateKieImage(env, { role, prompt: prepareKiePrompt(prompt, hookTail), aspectRatio, taskId, hookText: targetsGpt4o ? hookText : '' }, fetchImpl); return { ...result, role, providerMode: 'kie' }; }
   if (providerMode === 'modelscope') { const result = await generateModelScopeImage(env, { role, prompt: prepareKiePrompt(prompt), aspectRatio, taskId }, fetchImpl); return { ...result, role, providerMode: 'modelscope' }; }
-  try { return { ...(await generateCloudflareImage(env, { role, prompt, steps, seed }, aiBinding)), providerMode }; } catch (cloudflareError) { if (providerMode === 'cloudflare' || !String(env?.KIE_API_KEY || '').trim()) throw cloudflareError; const kie = await generateKieImage(env, { role, prompt: prepareKiePrompt(prompt), aspectRatio, taskId }, fetchImpl); return { ...kie, role, providerMode: 'auto', fallbackFrom: 'cloudflare-workers-ai', fallbackReason: String(cloudflareError?.message || 'CLOUDFLARE_IMAGE_FAILED') }; }
+  try { return { ...(await generateCloudflareImage(env, { role, prompt, steps, seed }, aiBinding)), providerMode }; } catch (cloudflareError) { if (providerMode === 'cloudflare' || !String(env?.KIE_API_KEY || '').trim()) throw cloudflareError; const kie = await generateKieImage(env, { role, prompt: prepareKiePrompt(prompt, hookTail), aspectRatio, taskId, hookText: targetsGpt4o ? hookText : '' }, fetchImpl); return { ...kie, role, providerMode: 'auto', fallbackFrom: 'cloudflare-workers-ai', fallbackReason: String(cloudflareError?.message || 'CLOUDFLARE_IMAGE_FAILED') }; }
 }
 async function inspectGeneratedImage(env, generated, expectedPrompt, fetchImpl) {
   if (!String(env?.GEMINI_API_KEY || '').trim()) throw Object.assign(new Error('IMAGE_QA_GEMINI_REQUIRED'), { status: 503 });
@@ -84,18 +108,62 @@ async function inspectGeneratedImage(env, generated, expectedPrompt, fetchImpl) 
   return { pass: detectedText.length === 0 && hardViolations.length === 0 && semanticMatch, detectedText, violations: hardViolations, semanticMatch, semanticReason, model: result.model };
 }
 async function inspectGeneratedImageWithRetry(env, generated, expectedPrompt, fetchImpl) { const maxChecks = IMAGE_QA_TRANSIENT_DELAYS_MS.length + 1; let lastError = null; for (let check = 1; check <= maxChecks; check += 1) { try { return { ...(await inspectGeneratedImage(env, generated, expectedPrompt, fetchImpl)), inspectionAttempts: check }; } catch (error) { lastError = error; if (!isTransientImageQaFailure(error) || check >= maxChecks) throw error; await sleep(IMAGE_QA_TRANSIENT_DELAYS_MS[check - 1]); } } throw lastError; }
+// Narrower than inspectGeneratedImage: a gpt4o-image thumbnail with a hook baked in is
+// expected to contain exactly the requested headline, so this only verifies that text
+// matches -- it does not re-run the full no-text/semantic-match gate (see the "텍스트 일치
+// 검증만" decision this feature shipped with).
+async function inspectThumbnailHookText(env, generated, hookText, fetchImpl) {
+  if (!String(env?.GEMINI_API_KEY || '').trim()) throw Object.assign(new Error('IMAGE_QA_GEMINI_REQUIRED'), { status: 503 });
+  const model = String(env?.GEMINI_IMAGE_QA_MODEL || env?.GEMINI_CRITIC_MODEL || DEFAULT_IMAGE_QA_MODEL).trim();
+  const expected = String(hookText || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const result = await runGeminiAi(env, {
+    model,
+    systemInstruction: [
+      'You are checking whether an AI-generated thumbnail image correctly rendered a specific headline caption.',
+      'Report the exact headline text visible in the image, as best you can read it.',
+      'Then decide whether it matches the expected headline below, allowing minor differences in case, spacing, or punctuation, but the words and their order must match.',
+      'If no legible headline text is visible at all, or it says something substantially different, matches must be false.',
+      'Return only the requested JSON structure.'
+    ].join(' '),
+    userContent: `Expected headline: "${expected}"\nInspect the visible headline text in this image and report whether it matches.`,
+    inlineImage: { mimeType: String(generated?.mimeType || '').split(';')[0].trim().toLowerCase(), data: String(generated?.imageBase64 || '').trim() },
+    maxOutputTokens: 256,
+    responseSchema: HOOK_MATCH_SCHEMA,
+    thinking: 'minimal'
+  }, fetchImpl);
+  let parsed; try { parsed = JSON.parse(String(result.response || '')); } catch { throw Object.assign(new Error('IMAGE_QA_RESPONSE_INVALID'), { status: 502 }); }
+  return { matches: parsed?.matches === true, detectedText: String(parsed?.detectedText || '').trim().slice(0, 200), model: result.model };
+}
+async function inspectThumbnailHookWithRetry(env, generated, hookText, fetchImpl) { const maxChecks = IMAGE_QA_TRANSIENT_DELAYS_MS.length + 1; let lastError = null; for (let check = 1; check <= maxChecks; check += 1) { try { return { ...(await inspectThumbnailHookText(env, generated, hookText, fetchImpl)), inspectionAttempts: check }; } catch (error) { lastError = error; if (!isTransientImageQaFailure(error) || check >= maxChecks) throw error; await sleep(IMAGE_QA_TRANSIENT_DELAYS_MS[check - 1]); } } throw lastError; }
 export async function generateImage(env, input, aiBinding = env?.AI, fetchImpl = fetch) {
   const role = String(input?.role || 'body').trim(); if (!IMAGE_ROLES.has(role)) throw Object.assign(new Error('IMAGE_ROLE_INVALID'), { status: 400 });
   const basePrompt = normalizePrompt(input?.prompt); const prompt = `${basePrompt}\n\n${PLAIN_SURFACE_GUARD}`; const steps = normalizeSteps(input?.steps); const seed = normalizeSeed(input?.seed); const providerMode = normalizeProviderMode(input?.providerMode); const qaRequired = imageQaRequired(env); const maxAttempts = qaRequired ? imageQaAttempts(env) : 1;
+  // Only relevant for role='thumbnail': the caller opts into hook-baking by sending
+  // hookText, and only for a fresh (never-yet-attempted) submission -- see the worker's
+  // callImageProvider(), which is the single place that decides when to include it.
+  const hookText = role === 'thumbnail' ? String(input?.hookText || '').trim() : '';
   if (providerMode !== 'kie' && providerMode !== 'modelscope') { const model = String(env?.IMAGE_MODEL || DEFAULT_IMAGE_MODEL).trim(); if (!ALLOWED_IMAGE_MODELS.has(model)) throw Object.assign(new Error('IMAGE_MODEL_NOT_ALLOWED'), { status: 500 }); }
-  let lastQa = null; let lastGenerated = null; let providerAttempts = 0;
+  let lastQa = null; let lastGenerated = null; let providerAttempts = 0; let lastHookQa = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const attemptPrompt = promptForAttempt(prompt, attempt);
-    const generated = await generateProviderImage(env, { role, prompt: attemptPrompt, steps, seed: nextSeed(seed, attempt), providerMode, aspectRatio: input?.aspectRatio, taskId: input?.taskId }, aiBinding, fetchImpl); lastGenerated = generated; providerAttempts = attempt;
+    const generated = await generateProviderImage(env, { role, prompt: attemptPrompt, steps, seed: nextSeed(seed, attempt), providerMode, aspectRatio: input?.aspectRatio, taskId: input?.taskId, hookText }, aiBinding, fetchImpl); lastGenerated = generated; providerAttempts = attempt;
     if (generated?.pending === true || generated?.complete === false) return { ...generated, imageQa: { enabled: qaRequired, pass: null, attempts: 0, pending: true } };
+    if (hookText && generated.model === GPT4O_IMAGE_MODEL) {
+      const hookQa = await inspectThumbnailHookWithRetry(env, generated, hookText, fetchImpl); lastHookQa = hookQa;
+      if (hookQa.matches) return { ...generated, hookBaked: true, imageQa: { enabled: true, pass: true, mode: 'hook-match', attempts: attempt, inspectionAttempts: hookQa.inspectionAttempts, detectedText: hookQa.detectedText, model: hookQa.model } };
+      break;
+    }
     if (!qaRequired) return { ...generated, imageQa: { enabled: false, pass: null, attempts: 0 } };
     const qa = await inspectGeneratedImageWithRetry(env, generated, attemptPrompt, fetchImpl); lastQa = qa; if (qa.pass) return { ...generated, imageQa: { enabled: true, pass: true, attempts: attempt, inspectionAttempts: qa.inspectionAttempts, semanticMatch: true, model: qa.model } };
     if (generated.provider === 'kie-ai' || generated.provider === 'modelscope') break;
+  }
+  if (lastHookQa) {
+    // A hook-text mismatch is never treated as a fatal/unrecoverable image error -- the
+    // worker's own retry path (attempt_count > 0) simply omits hookText on the next try,
+    // which falls back to the standard no-text prompt plus the HTML-overlay post-process.
+    const error = new Error('IMAGE_HOOK_TEXT_MISMATCH'); error.status = 502;
+    error.detectedText = lastHookQa.detectedText || '';
+    throw error;
   }
   const error = new Error('IMAGE_QA_REJECTED'); error.status = 502; error.qaAttempts = providerAttempts; error.qaViolationCount = Number(lastQa?.violations?.length || 0); error.qaDetectedTextCount = Number(lastQa?.detectedText?.length || 0); error.qaDetectedText = Array.isArray(lastQa?.detectedText) ? lastQa.detectedText.slice(0, 8) : []; error.qaViolations = Array.isArray(lastQa?.violations) ? lastQa.violations.slice(0, 8) : []; error.qaSemanticMismatch = lastQa?.semanticMatch === false; error.qaSemanticReason = String(lastQa?.semanticReason || '').slice(0, 500);
   if (lastGenerated?.provider === 'kie-ai' && /^https:\/\//i.test(String(lastGenerated?.sourceUrl || ''))) { error.rejectedImageUrl = String(lastGenerated.sourceUrl); error.rejectedImageMimeType = String(lastGenerated.mimeType || 'image/jpeg'); error.rejectedProvider = 'kie-ai'; error.rejectedModel = String(lastGenerated.model || 'z-image'); error.rejectedTaskId = String(lastGenerated.taskId || ''); }
