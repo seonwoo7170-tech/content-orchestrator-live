@@ -45,6 +45,24 @@ test('the image-only retry button calls the images/generate endpoint, never the 
   assert.doesNotMatch(source, /\/api\/jobs\/\$\{jobId\}\/run/);
 });
 
+test('the retry button resets the KIE retry budget on failed images before regenerating, or generate() would silently no-op', () => {
+  // kieRetryAvailable() in image-executor-resilient.js gates on provider_attempt_count,
+  // which a bare /images/generate call never clears -- a 'failed' image (budget already
+  // exhausted) would immediately re-fail with the same KIE_RETRY_BUDGET_EXHAUSTED without
+  // ever calling KIE again unless the button resets that count first.
+  const start = workCards.indexOf('async function retryJobImages');
+  const end = workCards.indexOf('async function showReadableDetail');
+  assert.ok(start >= 0 && end > start);
+  const source = workCards.slice(start, end);
+  assert.match(source, /adminApi\(`\/api\/jobs\/\$\{jobId\}\/images`\)/);
+  assert.match(source, /status === 'failed'/);
+  assert.match(source, /adminApi\('\/api\/operations\/images\/reset-failed', \{/);
+  assert.match(source, /imageIds: failedImageIds/);
+  const resetIndex = source.indexOf('reset-failed');
+  const generateIndex = source.indexOf('/images/generate');
+  assert.ok(resetIndex >= 0 && generateIndex > resetIndex, 'reset-failed must run before the generate call');
+});
+
 test('the click handler routes retry-images to retryJobImages', () => {
   assert.match(workCards, /\['detail', 'retry-readable', 'preview-readable', 'retry-images'\]/);
   assert.match(workCards, /if \(action === 'retry-images'\) return retryJobImages\(jobId, button\)/);

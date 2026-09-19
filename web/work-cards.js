@@ -211,6 +211,20 @@ async function retryJobImages(jobId, button) {
   const original = button.textContent;
   button.textContent = '재시도 중';
   try {
+    // A 'failed' image already spent its KIE retry budget (provider_attempt_count reached
+    // the ceiling), so generatePlannedImages() would just re-hit KIE_RETRY_BUDGET_EXHAUSTED
+    // again without ever calling KIE -- the budget must be reset first for this button to
+    // actually attempt a new KIE generation instead of silently no-op'ing.
+    const { images } = await adminApi(`/api/jobs/${jobId}/images`);
+    const failedImageIds = (images || [])
+      .filter((image) => image?.status === 'failed')
+      .map((image) => image.id);
+    if (failedImageIds.length > 0) {
+      await adminApi('/api/operations/images/reset-failed', {
+        method: 'POST',
+        body: JSON.stringify({ imageIds: failedImageIds })
+      });
+    }
     const outcome = await adminApi(`/api/jobs/${jobId}/images/generate`, {
       method: 'POST',
       body: JSON.stringify({ retryFailed: true })
