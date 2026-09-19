@@ -41,7 +41,7 @@ jobs:
           let source = fs.readFileSync(path, 'utf8');
 
           const failedBlock = `            EXISTS(\n              SELECT 1\n                FROM job_images fi\n               WHERE fi.job_id = j.id\n                 AND (fi.status = 'failed' OR fi.provider_status = 'retrying')\n            ) AS has_failed_images,`;
-          const storedBlock = `            EXISTS(\n              SELECT 1\n                FROM job_images si\n               WHERE si.job_id = j.id\n                 AND si.status = 'stored'\n                 AND si.public_url IS NOT NULL\n                 AND si.public_url <> ''\n            ) AS has_stored_images,`;
+          const storedBlock = `            EXISTS(\n              SELECT 1\n                FROM job_images si\n               WHERE si.job_id = j.id\n                 AND si.status = 'stored'\n            ) AS has_stored_images,`;
           if (!source.includes('AS has_stored_images')) {
             if (!source.includes(failedBlock)) throw new Error('STORED_IMAGE_SELECT_ANCHOR_MISSING');
             source = source.replace(failedBlock, `${failedBlock}\n${storedBlock}`);
@@ -63,7 +63,7 @@ jobs:
           );
           activeTest = activeTest.replace(
             "  assert.match(source, /AS has_active_provider_task/);",
-            "  assert.match(source, /AS has_stored_images/);\n  assert.match(source, /si\\.status = 'stored'/);\n  assert.match(source, /si\\.public_url IS NOT NULL/);\n  assert.match(source, /AS has_active_provider_task/);"
+            "  assert.match(source, /AS has_stored_images/);\n  assert.match(source, /si\\.status = 'stored'/);\n  assert.match(source, /AS has_active_provider_task/);"
           );
           activeTest = activeTest.replace(
             "  assert.match(source, /WHEN has_active_provider_task = 1 THEN 0/);",
@@ -87,7 +87,7 @@ jobs:
           );
           fs.writeFileSync(fairnessPath, fairness);
 
-          const regression = `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFile } from 'node:fs/promises';\n\ntest('stored R2 image rows are selected for attachment before any paid/provider work', async () => {\n  const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');\n  assert.match(source, /si\\.status = 'stored'/);\n  assert.match(source, /si\\.public_url IS NOT NULL/);\n  assert.match(source, /WHEN has_stored_images = 1 THEN 0/);\n  assert.match(source, /const storedBeforeGeneration = beforeGeneration\\.some/);\n  assert.match(source, /if \\(!storedBeforeGeneration\\) \\{/);\n  assert.match(source, /attachStoredImages\\(env, jobId/);\n});\n`;
+          const regression = `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFile } from 'node:fs/promises';\n\ntest('stored R2 image rows are selected for attachment before any paid/provider work', async () => {\n  const source = await readFile(new URL('../worker/lib/image-completion.js', import.meta.url), 'utf8');\n  assert.match(source, /si\\.status = 'stored'/);\n  assert.match(source, /WHEN has_stored_images = 1 THEN 0/);\n  assert.match(source, /const storedBeforeGeneration = images\\.some/);\n  assert.match(source, /if \\(!storedBeforeGeneration\\) \\{/);\n  assert.match(source, /attachStoredImages\\(env, jobId/);\n});\n`;
           fs.writeFileSync('tests/image-stored-finalization-priority.test.mjs', regression);
           NODE
 
