@@ -1,0 +1,272 @@
+name: fix-gemini-transient-recovery
+
+on:
+  push:
+    branches: [claude/github-connection-check-umb3pv]
+    paths:
+      - '.github/workflows/fix-gemini-transient-recovery.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: content-orchestrator-gemini-recovery-rollout
+  cancel-in-progress: false
+
+jobs:
+  rollout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/github-connection-check-umb3pv
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Patch Gemini transient recovery
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('worker/lib/job-recovery.js')
+          s = p.read_text()
+          needle = """const LEGACY_ROUTE_RETRY_CODES = new Set([\n  'API_HUB_404',\n  'API_HUB_405'\n]);\n"""
+          insert = needle + """\nconst GEMINI_TRANSIENT_CODES = new Set([\n  'GEMINI_REQUEST_FAILED',\n  'GEMINI_TIMEOUT',\n  'GEMINI_RATE_LIMITED',\n  'GEMINI_UNAVAILABLE',\n  'GEMINI_API_FAILED',\n  'GEMINI_EMPTY_RESPONSE'\n]);\n"""
+          if 'GEMINI_TRANSIENT_CODES' not in s:
+              if needle not in s: raise SystemExit('job-recovery insertion point missing')
+              s = s.replace(needle, insert, 1)
+          old = """  const transient = code === 'JOB_EXECUTION_ALREADY_CLAIMED'\n"""
+          new = """  const transient = GEMINI_TRANSIENT_CODES.has(code)\n    || code === 'JOB_EXECUTION_ALREADY_CLAIMED'\n"""
+          if new not in s:
+              if old not in s: raise SystemExit('job-recovery transient point missing')
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('worker/lib/repair-hold-recovery.js')
+          s = p.read_text()
+          if 'TRANSIENT_GEMINI_HOLD_CODES' not in s:
+              marker = """function requireDb(env) {\n"""
+              helper = """const TRANSIENT_GEMINI_HOLD_CODES = new Set([\n  'GEMINI_REQUEST_FAILED',\n  'GEMINI_TIMEOUT',\n  'GEMINI_RATE_LIMITED',\n  'GEMINI_UNAVAILABLE',\n  'GEMINI_API_FAILED',\n  'GEMINI_EMPTY_RESPONSE'\n]);\nconst REVIEW_CONTINUE_CODE = 'CRITIC_REVIEW_CONTINUE';\nconst EXISTING_REWRITE_MODE = 'full_article_same_post_id';\n\nfunction transientGeminiHold(row) {\n  const hold = String(row?.hold_reason || '').trim().toUpperCase();\n  const error = String(row?.last_error_code || '').trim().toUpperCase();\n  return TRANSIENT_GEMINI_HOLD_CODES.has(hold) || TRANSIENT_GEMINI_HOLD_CODES.has(error);\n}\n\nfunction safeRepairContinuationResult(value, blogId, bloggerPostId) {\n  try {\n    const result = JSON.parse(String(value || ''));\n    return Boolean(\n      result?.article\n      && result?.rewriteMode === EXISTING_REWRITE_MODE\n      && String(result?.identity?.blogId || '') === String(blogId || '')\n      && String(result?.identity?.bloggerPostId || '') === String(bloggerPostId || '')\n    );\n  } catch {\n    return false;\n  }\n}\n\n"""
+              if marker not in s: raise SystemExit('repair hold helper insertion point missing')
+              s = s.replace(marker, helper + marker, 1)
+
+          where_old = """          OR UPPER(COALESCE(j.last_error_code, '')) LIKE '%DUPLICATE_TOPIC_PUBLICATION_BLOCKED%'\n        )\n"""
+          where_new = """          OR UPPER(COALESCE(j.last_error_code, '')) LIKE '%DUPLICATE_TOPIC_PUBLICATION_BLOCKED%'\n          OR UPPER(COALESCE(j.hold_reason, '')) IN ('GEMINI_REQUEST_FAILED', 'GEMINI_TIMEOUT', 'GEMINI_RATE_LIMITED', 'GEMINI_UNAVAILABLE', 'GEMINI_API_FAILED', 'GEMINI_EMPTY_RESPONSE')\n          OR UPPER(COALESCE(j.last_error_code, '')) IN ('GEMINI_REQUEST_FAILED', 'GEMINI_TIMEOUT', 'GEMINI_RATE_LIMITED', 'GEMINI_UNAVAILABLE', 'GEMINI_API_FAILED', 'GEMINI_EMPTY_RESPONSE')\n        )\n"""
+          if where_new not in s:
+              if where_old not in s: raise SystemExit('repair hold WHERE point missing')
+              s = s.replace(where_old, where_new, 1)
+
+          old_block = """    const ready = safeReadyRepairResult(row.result_json, row.blog_id, row.blogger_post_id);\n    statements.push(ready\n      ? db.prepare(\n        `UPDATE jobs\n            SET status = 'ready', error = NULL, retry_count = 0, recovery_state = 'none',\n                next_retry_at = NULL, hold_reason = NULL, last_error_code = NULL,\n                last_failure_at = NULL, updated_at = datetime('now')\n          WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`\n      ).bind(jobId)\n      : db.prepare(\n        `UPDATE jobs\n            SET status = 'failed', error = 'REPAIR_SAFE_RETRY_RELEASED', recovery_state = 'retry_wait',\n                next_retry_at = ?, hold_reason = NULL, last_error_code = 'REPAIR_SAFE_RETRY_RELEASED',\n                last_failure_at = ?, updated_at = datetime('now')\n          WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`\n      ).bind(new Date().toISOString(), new Date().toISOString(), jobId));\n"""
+          new_block = """    const ready = safeReadyRepairResult(row.result_json, row.blog_id, row.blogger_post_id);\n    const continueReview = transientGeminiHold(row)\n      && safeRepairContinuationResult(row.result_json, row.blog_id, row.blogger_post_id);\n    const now = new Date().toISOString();\n    statements.push(ready\n      ? db.prepare(\n        `UPDATE jobs\n            SET status = 'ready', error = NULL, retry_count = 0, recovery_state = 'none',\n                next_retry_at = NULL, hold_reason = NULL, last_error_code = NULL,\n                last_failure_at = NULL, updated_at = datetime('now')\n          WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`\n      ).bind(jobId)\n      : continueReview\n        ? db.prepare(\n          `UPDATE jobs\n              SET status = 'failed', error = 'REPAIR_TRANSIENT_AI_RETRY_RELEASED', recovery_state = 'retry_wait',\n                  next_retry_at = ?, hold_reason = NULL, last_error_code = ?,\n                  last_failure_at = ?, updated_at = datetime('now')\n            WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`\n        ).bind(now, REVIEW_CONTINUE_CODE, now, jobId)\n        : db.prepare(\n          `UPDATE jobs\n              SET status = 'failed', error = 'REPAIR_SAFE_RETRY_RELEASED', recovery_state = 'retry_wait',\n                  next_retry_at = ?, hold_reason = NULL, last_error_code = 'REPAIR_SAFE_RETRY_RELEASED',\n                  last_failure_at = ?, updated_at = datetime('now')\n            WHERE id = ? AND mode = 'repair_existing' AND recovery_state = 'held'`\n        ).bind(now, now, jobId));\n"""
+          if new_block not in s:
+              if old_block not in s: raise SystemExit('repair hold release block missing')
+              s = s.replace(old_block, new_block, 1)
+
+          old_item = """    items.push({ jobId, action: ready ? 'released_ready' : 'released_retry', bloggerPostId: String(row.blogger_post_id) });\n"""
+          new_item = """    items.push({\n      jobId,\n      action: ready ? 'released_ready' : 'released_retry',\n      resumeStage: continueReview ? 'critic_review' : (ready ? 'ready' : 'writing'),\n      bloggerPostId: String(row.blogger_post_id)\n    });\n"""
+          if new_item not in s:
+              if old_item not in s: raise SystemExit('repair hold item point missing')
+              s = s.replace(old_item, new_item, 1)
+          p.write_text(s)
+          PY
+
+          cat > tests/gemini-transient-recovery.test.mjs <<'TEST'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import { classifyFailureCode, decideJobRecovery } from '../worker/lib/job-recovery.js';
+
+          const repairRecoverySource = fs.readFileSync(new URL('../worker/lib/repair-hold-recovery.js', import.meta.url), 'utf8');
+
+          test('Gemini transport and capacity failures retry automatically', () => {
+            for (const code of [
+              'GEMINI_REQUEST_FAILED',
+              'GEMINI_TIMEOUT',
+              'GEMINI_RATE_LIMITED',
+              'GEMINI_UNAVAILABLE',
+              'GEMINI_API_FAILED',
+              'GEMINI_EMPTY_RESPONSE'
+            ]) {
+              assert.equal(classifyFailureCode(code).classification, 'transient', code);
+              const decision = decideJobRecovery({ error: code, retryCount: 0, now: '2026-09-19T00:00:00.000Z' });
+              assert.equal(decision.recoveryState, 'retry_wait', code);
+              assert.equal(decision.delayMinutes, 1, code);
+            }
+          });
+
+          test('Gemini permanent request, auth, and safety failures remain held', () => {
+            for (const code of ['GEMINI_REQUEST_REJECTED', 'GEMINI_AUTH_FAILED', 'GEMINI_BLOCKED']) {
+              assert.equal(classifyFailureCode(code).classification, 'held', code);
+              assert.equal(decideJobRecovery({ error: code, retryCount: 0 }).recoveryState, 'held', code);
+            }
+          });
+
+          test('held existing repairs can reuse a safe full-rewrite candidate at Critic after transient Gemini failure', () => {
+            assert.match(repairRecoverySource, /TRANSIENT_GEMINI_HOLD_CODES/);
+            assert.match(repairRecoverySource, /safeRepairContinuationResult/);
+            assert.match(repairRecoverySource, /full_article_same_post_id/);
+            assert.match(repairRecoverySource, /CRITIC_REVIEW_CONTINUE/);
+            assert.match(repairRecoverySource, /REPAIR_TRANSIENT_AI_RETRY_RELEASED/);
+            assert.match(repairRecoverySource, /safeRepairPublication\(row\)/);
+          });
+          TEST
+
+          git diff --check
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Verify source
+        run: npm run verify
+      - name: Verify API Hub
+        working-directory: api-hub-v2
+        run: npm test
+
+      - name: Commit verified recovery fix
+        shell: bash
+        run: |
+          git config user.name 'smileseon-automation'
+          git config user.email 'actions@users.noreply.github.com'
+          git add worker/lib/job-recovery.js worker/lib/repair-hold-recovery.js tests/gemini-transient-recovery.test.mjs
+          if ! git diff --cached --quiet; then
+            git commit -m 'Recover transient Gemini repair failures automatically'
+            git push origin HEAD:claude/github-connection-check-umb3pv
+          fi
+          echo "VERIFIED_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Validate deployment credentials
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+
+      - name: Resolve production D1
+        shell: bash
+        run: |
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID"
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render production Wrangler config
+        run: node scripts/render-wrangler.mjs
+
+      - name: Validate production gates
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const text=fs.readFileSync('wrangler.jsonc','utf8');
+          for (const needle of [
+            '"SYSTEM_PAUSED": "false"',
+            '"BLOGGER_WRITES_ENABLED": "true"',
+            '"AUTO_PUBLISH_EXECUTION_ENABLED": "true"',
+            '"DAILY_WORK_EXECUTION_ENABLED": "true"',
+            '"JOB_RECOVERY_EXECUTION_ENABLED": "true"',
+            '"main": "worker/mcp-entry.js"'
+          ]) if (!text.includes(needle)) throw new Error(`PRODUCTION_GATE_INVALID:${needle}`);
+          NODE
+
+      - name: Deploy Worker while preserving secrets
+        run: |
+          node scripts/ensure-image-schema.mjs
+          npx --yes wrangler@latest deploy --config wrangler.jsonc
+
+      - name: Production health read-back
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base='https://content-orchestrator.smileseon.workers.dev';
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          for(let i=0;i<20;i++){
+            const r=await fetch(`${base}/health?geminiRecovery=${Date.now()}_${i}`,{cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(r.ok && j.bloggerWritesEnabled===true && j.phase2Automation?.autoPublishExecutionEnabled===true){
+              console.log('PRODUCTION_HEALTH_OK'); process.exit(0);
+            }
+            await sleep(1000);
+          }
+          throw new Error('PRODUCTION_HEALTH_FAILED');
+          NODE
+
+      - name: Safely release current Job 179 Gemini hold
+        shell: bash
+        run: |
+          cat > /tmp/release179.sql <<'SQL'
+          UPDATE jobs
+             SET status = 'failed',
+                 error = 'REPAIR_TRANSIENT_AI_RETRY_RELEASED',
+                 recovery_state = 'retry_wait',
+                 next_retry_at = datetime('now'),
+                 hold_reason = NULL,
+                 last_error_code = CASE
+                   WHEN json_valid(result_json)
+                    AND json_extract(result_json, '$.rewriteMode') = 'full_article_same_post_id'
+                    AND CAST(json_extract(result_json, '$.identity.blogId') AS TEXT) = CAST(blog_id AS TEXT)
+                    AND CAST(json_extract(result_json, '$.identity.bloggerPostId') AS TEXT) = CAST(blogger_post_id AS TEXT)
+                   THEN 'CRITIC_REVIEW_CONTINUE'
+                   ELSE 'GEMINI_REQUEST_FAILED'
+                 END,
+                 last_failure_at = datetime('now'),
+                 updated_at = datetime('now')
+           WHERE id = 179
+             AND mode = 'repair_existing'
+             AND status = 'failed'
+             AND recovery_state = 'held'
+             AND UPPER(COALESCE(last_error_code, hold_reason, '')) IN (
+               'GEMINI_REQUEST_FAILED','GEMINI_TIMEOUT','GEMINI_RATE_LIMITED','GEMINI_UNAVAILABLE','GEMINI_API_FAILED','GEMINI_EMPTY_RESPONSE'
+             )
+             AND blogger_post_id IS NOT NULL
+             AND blogger_post_id <> ''
+             AND NOT EXISTS (
+               SELECT 1 FROM job_publications p
+                WHERE p.job_id = jobs.id
+                  AND (
+                    p.status IN ('claimed','verification_pending','updated','published')
+                    OR UPPER(COALESCE(p.error,'')) LIKE '%BLOGGER_WRITE_OUTCOME_UNKNOWN%'
+                    OR UPPER(COALESCE(p.error,'')) LIKE '%STALE_PUBLICATION_CLAIM%'
+                  )
+             );
+          SQL
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --file /tmp/release179.sql --yes >/tmp/release179.out
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --command "SELECT id,status,recovery_state,last_error_code,next_retry_at,hold_reason FROM jobs WHERE id=179" --json | tee /tmp/job179.json
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const raw=JSON.parse(fs.readFileSync('/tmp/job179.json','utf8'));
+          const row=(raw?.[0]?.results||raw?.[0]?.result||raw?.results||[])[0] || null;
+          if(!row) throw new Error('JOB179_NOT_FOUND');
+          console.log('JOB179_AFTER_RELEASE', JSON.stringify(row));
+          if(row.recovery_state==='held') throw new Error('JOB179_STILL_HELD_AFTER_SAFE_RELEASE');
+          NODE
+
+      - name: Observe Job 179 automatic recovery
+        shell: bash
+        run: |
+          for i in $(seq 1 12); do
+            npx --yes wrangler@latest d1 execute content-orchestrator --remote --config wrangler.jsonc --command "SELECT id,status,recovery_state,last_error_code,next_retry_at,hold_reason,updated_at FROM jobs WHERE id=179" --json > /tmp/job179-poll.json
+            node - <<'NODE'
+          const fs=require('node:fs');
+          const raw=JSON.parse(fs.readFileSync('/tmp/job179-poll.json','utf8'));
+          const row=(raw?.[0]?.results||raw?.[0]?.result||raw?.results||[])[0] || null;
+          console.log('JOB179_OBSERVED', JSON.stringify(row));
+          NODE
+            STATUS=$(node - <<'NODE'
+          const fs=require('node:fs'); const raw=JSON.parse(fs.readFileSync('/tmp/job179-poll.json','utf8')); const row=(raw?.[0]?.results||raw?.[0]?.result||raw?.results||[])[0]||{}; process.stdout.write(String(row.status||''));
+          NODE
+          )
+            RECOVERY=$(node - <<'NODE'
+          const fs=require('node:fs'); const raw=JSON.parse(fs.readFileSync('/tmp/job179-poll.json','utf8')); const row=(raw?.[0]?.results||raw?.[0]?.result||raw?.results||[])[0]||{}; process.stdout.write(String(row.recovery_state||''));
+          NODE
+          )
+            if [ "$STATUS" != "failed" ] || [ "$RECOVERY" = "none" ]; then
+              echo "JOB179_AUTOMATIC_RECOVERY_STARTED status=$STATUS recovery=$RECOVERY"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo 'JOB179 remains retry_wait after observation window; fix is deployed and it is no longer blocked.'
