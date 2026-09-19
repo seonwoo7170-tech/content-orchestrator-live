@@ -1,0 +1,146 @@
+name: apply-image-parallelism
+
+on:
+  push:
+    branches:
+      - 'claude/github-connection-check-umb3pv'
+    paths:
+      - '.github/apply-image-parallelism-trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: content-orchestrator-production
+  cancel-in-progress: false
+
+jobs:
+  patch-verify-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'claude/github-connection-check-umb3pv'
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Patch serial image lane to three-wide per article
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = 'worker/mcp-entry.js';
+          let source = fs.readFileSync(path, 'utf8');
+          const maxItemsLine = "  const maxItems = positiveBounded(env?.SERIAL_IMAGE_CHAIN_MAX_ITEMS, 8, 1, 8);";
+          const parallelLine = "  const parallelMax = positiveBounded(env?.SERIAL_IMAGE_PARALLEL_MAX, 3, 1, 3);";
+          if (!source.includes(parallelLine)) {
+            if (!source.includes(maxItemsLine)) throw new Error('IMAGE_PARALLEL_PATCH_ANCHOR_MISSING');
+            source = source.replace(maxItemsLine, `${maxItemsLine}\n${parallelLine}`);
+          }
+          const oldDispatch = 'runScheduledImageCompletion(env, { maxJobs: maxItems, maxImages: 1, staleMinutes: 0, executionContext: ctx })';
+          const newDispatch = 'runScheduledImageCompletion(env, { maxJobs: maxItems, maxImages: parallelMax, staleMinutes: 0, executionContext: ctx })';
+          if (!source.includes(newDispatch)) {
+            if (!source.includes(oldDispatch)) throw new Error('IMAGE_PARALLEL_DISPATCH_ANCHOR_MISSING');
+            source = source.replace(oldDispatch, newDispatch);
+          }
+          fs.writeFileSync(path, source);
+
+          const test = `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n\ntest('serial image lane keeps one global lock but allows three images within one article', () => {\n  const scheduler = fs.readFileSync(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');\n  const executor = fs.readFileSync(new URL('../worker/lib/image-executor-resilient.js', import.meta.url), 'utf8');\n  assert.match(scheduler, /SERIAL_IMAGE_PARALLEL_MAX, 3, 1, 3/);\n  assert.match(scheduler, /acquireRuntimeLock\\(env, IMAGE_LANE_LOCK_KEY/);\n  assert.match(scheduler, /maxJobs: maxItems, maxImages: parallelMax/);\n  assert.doesNotMatch(scheduler, /maxJobs: maxItems, maxImages: 1/);\n  assert.match(executor, /Promise\\.all\\(images\\.map/);\n  assert.match(executor, /return Math\\.min\\(3, number\\)/);\n});\n`;
+          fs.writeFileSync('tests/serial-image-parallelism.test.mjs', test);
+          NODE
+
+      - name: Install root dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify root source
+        run: npm run verify
+
+      - name: Install API Hub dependencies
+        run: npm --prefix api-hub-v2 install --no-audit --no-fund
+
+      - name: Verify API Hub
+        run: npm --prefix api-hub-v2 test
+
+      - name: Commit verified source change
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add worker/mcp-entry.js tests/serial-image-parallelism.test.mjs
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+          else
+            git commit -m 'Allow three KIE images per article in serial image lane'
+            git push origin HEAD:'claude/github-connection-check-umb3pv'
+          fi
+
+      - name: Validate Cloudflare credentials
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+
+      - name: Resolve production D1
+        shell: bash
+        run: |
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Could not resolve production D1 database'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render production Wrangler config
+        run: node scripts/render-wrangler.mjs
+
+      - name: Validate production safety gates
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const text=fs.readFileSync('wrangler.jsonc','utf8');
+          for (const needle of [
+            '"SYSTEM_PAUSED": "false"',
+            '"main": "worker/mcp-entry.js"',
+            '"BLOGGER_WRITES_ENABLED": "true"',
+            '"AUTO_PUBLISH_EXECUTION_ENABLED": "true"',
+            '"DAILY_WORK_EXECUTION_ENABLED": "true"',
+            '"JOB_RECOVERY_EXECUTION_ENABLED": "true"',
+            '"KIE_IMAGE_CALLBACK_ENABLED": "false"',
+            '"KIE_IMAGE_FALLBACK_ENABLED": "false"',
+            '"SERIAL_IMAGE_POLL_INTERVAL_MS": "3000"',
+            '"crons": ["*/3 * * * *", "*/5 * * * *"]'
+          ]) if (!text.includes(needle)) throw new Error(`PRODUCTION_GATE_INVALID:${needle}`);
+          NODE
+
+      - name: Deploy production Worker while preserving secrets
+        run: |
+          node scripts/ensure-image-schema.mjs
+          npx --yes wrangler@latest deploy --config wrangler.jsonc
+
+      - name: Production health read-back
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base='https://content-orchestrator.smileseon.workers.dev';
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          for(let i=1;i<=20;i++){
+            const response=await fetch(`${base}/health?imageParallel=${Date.now()}_${i}`,{cache:'no-store'});
+            const health=await response.json().catch(()=>({}));
+            const ok=response.ok
+              && health.systemPaused!==true
+              && health.bloggerWritesEnabled===true
+              && health.phase2Automation?.autoPublishExecutionEnabled===true;
+            if(ok){
+              console.log(`PRODUCTION_PUBLIC_HEALTH_OK systemPaused=${health.systemPaused} bloggerWrites=${health.bloggerWritesEnabled} autoPublish=${health.phase2Automation?.autoPublishExecutionEnabled}`);
+              process.exit(0);
+            }
+            await sleep(1000);
+          }
+          throw new Error('PRODUCTION_PUBLIC_HEALTH_READBACK_FAILED');
+          NODE
