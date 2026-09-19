@@ -268,6 +268,43 @@ test('forced KIE mode converts main water shutoff into a concise editorial scene
   assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
 });
 
+// KIE is the only provider left in the scheduled pipeline (see scheduledProviderModeForImage
+// in the worker), so every blog's images pass through prepareKiePrompt, not just the
+// home-repair blog the shower/water-valve/AI-assistant branches above were written for. A
+// topic that doesn't match any of those must keep its own subject and neutral surroundings,
+// not get forced into a residential repair scene it has nothing to do with -- that mismatch
+// is exactly what made the Gemini QA gate reject so many non-home blogs' images as a
+// semantic mismatch.
+test('forced KIE mode never forces an unrelated topic into a residential repair scene', async () => {
+  const calls = [];
+  const prompt = 'Photorealistic real-world photograph focused on choosing an ai subscription plan for freelancers. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'thumbnail', prompt, providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
+  const body = JSON.parse(create.init.body);
+  assert.match(body.input.prompt, /focused on choosing an ai subscription plan for freelancers/);
+  assert.doesNotMatch(body.input.prompt, /residential|household repair or maintenance/i);
+  assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
+});
+
+test('forced KIE mode falls back to a neutral generic subject only when the concept could not be extracted at all', async () => {
+  const calls = [];
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'body', prompt: 'no extractable subject marker here', providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
+  const body = JSON.parse(create.init.body);
+  assert.match(body.input.prompt, /focused on a practical everyday subject/);
+  assert.doesNotMatch(body.input.prompt, /residential|household repair or maintenance/i);
+});
+
 for (const sample of [
   { http: 401, code: 401, expected: 'KIE_AUTH_FAILED', status: 401 },
   { http: 402, code: 402, expected: 'KIE_INSUFFICIENT_CREDITS', status: 402 },

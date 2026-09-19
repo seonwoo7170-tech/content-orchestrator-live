@@ -65,7 +65,16 @@ function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   if (/\bwater shutoff\b|\bshutoff valve\b|\bmain water valve\b/i.test(raw)) return `A realistic editorial photograph of a residential main water shutoff valve connected to exposed household plumbing in a clean utility area. Slightly angled view with a clear focal subject. ${composition} ${tail}`;
   if (/\bai assistants?\b|\bartificial intelligence\b[^.]*\b(?:home|household|maintenance)\b|\bai\b[^.]*\b(?:home|household|maintenance)\b/i.test(raw)) return `A realistic editorial photograph of a homeowner inspecting a household fixture with simple hand tools in a clean residential setting. Natural candid pose with one clear focal subject. ${composition} ${tail}`;
   const focused = raw.match(/focused on\s+([^.]+)/i)?.[1]?.replace(/\b(?:devices?|screens?|displays?|monitors?|interfaces?|gauges?|meters?)\b/gi, '').replace(/control panels?/gi, '').replace(/\s+/g, ' ').trim();
-  const subject = focused || 'a practical household repair or maintenance scene'; return `A realistic editorial photograph focused on ${subject}. One clear focal subject in a clean residential setting. ${composition} ${tail}`;
+  // Everything above is genuinely home-repair-specific (shower/water-valve/AI-home-assistant
+  // topics), which only ever match a blog actually writing about those things -- harmless
+  // for any other blog's content. This fallback is not scoped that way: it used to force
+  // *every* other topic into "a practical household repair or maintenance scene ... in a
+  // clean residential setting" regardless of subject, which is the KIE-only pipeline's only
+  // provider now (see scheduledProviderModeForImage in the worker). A non-home blog's KIE
+  // images were being asked to depict an unrelated scene in a residential setting, which the
+  // Gemini QA gate then rejected as a semantic mismatch far more often than it should have.
+  const subject = focused || 'a practical everyday subject';
+  return `A realistic editorial photograph focused on ${subject}. One clear focal subject in natural everyday surroundings. ${composition} ${tail}`;
 }
 function normalizeSteps(value) { if (value === undefined || value === null || value === '') return undefined; const steps = Number(value); if (!Number.isInteger(steps) || steps < 1 || steps > 8) throw Object.assign(new Error('IMAGE_STEPS_INVALID'), { status: 400 }); return steps; }
 function normalizeSeed(value) { if (value === undefined || value === null || value === '') return undefined; const seed = Number(value); if (!Number.isInteger(seed) || seed < 0 || seed > 2147483647) throw Object.assign(new Error('IMAGE_SEED_INVALID'), { status: 400 }); return seed; }
