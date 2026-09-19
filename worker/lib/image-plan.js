@@ -141,7 +141,7 @@ function topicDominance(concept) {
 }
 
 function thumbnailScene(concept) {
-  return `Photorealistic real-world photograph focused on ${concept}. ${topicDominance(concept)} Depict tangible objects, tools, materials, fixtures, devices, and surroundings appropriate to the exact topic. One clear focal subject, natural lighting, realistic materials, uncluttered composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present. Wide landscape framing with comfortable open space around the focal subject.`;
+  return `Photorealistic real-world photograph focused on ${concept}. ${topicDominance(concept)} Depict tangible objects, tools, materials, fixtures, devices, and surroundings appropriate to the exact topic. One clear focal subject, natural lighting, realistic materials, uncluttered composition. Wide landscape framing with comfortable open space around the focal subject.`;
 }
 
 const BODY_SCENE_PURPOSES = [
@@ -155,7 +155,7 @@ const BODY_SCENE_PURPOSES = [
 
 function bodyScene(sectionConcept, sectionDetail, topicConcept, index) {
   const detailClause = sectionDetail ? ` This section explains: ${sectionDetail}.` : '';
-  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}.${detailClause} ${topicDominance(topicConcept)} Show a concrete action, condition, material, fixture, tool interaction, or before-work detail that directly explains this section. ${BODY_SCENE_PURPOSES[index % BODY_SCENE_PURPOSES.length]} Keep the scene specific to the section subject; choose only physically relevant props. Natural lighting, realistic materials, useful close-to-medium distance, one clear focal subject, clean composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present.`;
+  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}.${detailClause} ${topicDominance(topicConcept)} Show a concrete action, condition, material, fixture, tool interaction, or before-work detail that directly explains this section. ${BODY_SCENE_PURPOSES[index % BODY_SCENE_PURPOSES.length]} Keep the scene specific to the section subject; choose only physically relevant props. Natural lighting, realistic materials, useful close-to-medium distance, one clear focal subject, clean composition.`;
 }
 
 export function buildImagePlan(article, options = {}) {

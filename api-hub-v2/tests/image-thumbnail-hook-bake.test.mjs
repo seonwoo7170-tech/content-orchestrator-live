@@ -58,7 +58,6 @@ test('a thumbnail with hookText and gpt4o-image bakes the hook into the prompt a
   const createCall = calls.find((call) => call.url.endsWith('/api/v1/gpt4o-image/generate'));
   const body = JSON.parse(createCall.init.body);
   assert.match(body.prompt, /Try This First/);
-  assert.doesNotMatch(body.prompt, /No logos, branding, or watermark/i);
 
   const result = await generateImage(gptEnv, { role: 'thumbnail', prompt: 'A clean kitchen scene', providerMode: 'kie', taskId: submitted.taskId, hookText: 'Try This First' }, undefined, fetchImpl);
   assert.equal(result.hookBaked, true);
@@ -86,7 +85,7 @@ test('a thumbnail without hookText uses the standard "no visible text" prompt an
 
   const createCall = calls.find((call) => call.url.endsWith('/api/v1/gpt4o-image/generate'));
   const body = JSON.parse(createCall.init.body);
-  assert.match(body.prompt, /No logos, branding, or watermark/i);
+  assert.doesNotMatch(body.prompt, /Render the exact headline text/i);
 
   const result = await generateImage(gptEnv, { role: 'thumbnail', prompt: 'A clean kitchen scene', providerMode: 'kie', taskId: submitted.taskId }, undefined, fetchImpl);
   assert.equal(result.hookBaked, undefined);
@@ -106,7 +105,6 @@ test('hookText is ignored for a z-image (non-gpt4o) thumbnail, since z-image can
 
   const createCall = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(createCall.init.body);
-  assert.match(body.input.prompt, /No logos, branding, or watermark/i);
   assert.doesNotMatch(body.input.prompt, /Try This First/);
   assert.equal(result.model, 'z-image');
   assert.equal(result.hookBaked, undefined);
@@ -130,7 +128,7 @@ test('a Korean hookText is never sent down the gpt4o text-render path, even when
 
   const createCall = calls.find((call) => call.url.endsWith('/api/v1/gpt4o-image/generate'));
   const body = JSON.parse(createCall.init.body);
-  assert.match(body.prompt, /No logos, branding, or watermark/i);
+  assert.doesNotMatch(body.prompt, /Render the exact headline text/i);
   assert.doesNotMatch(body.prompt, /이것부터 확인/);
 
   const result = await generateImage(gptEnv, { role: 'thumbnail', prompt: 'A clean kitchen scene', providerMode: 'kie', taskId: submitted.taskId, hookText: '이것부터 확인' }, undefined, fetchImpl);

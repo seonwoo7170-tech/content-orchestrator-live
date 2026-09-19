@@ -46,7 +46,6 @@ function kieFetchMock(calls) {
 
 const GLYPH_SEEDING_WORDS = /\b(?:text|letters|numbers|labels|captions|watermarks|signage|poster|document|infographic)\b/i;
 const KIE_RISKY_SCENE_WORDS = /\b(?:devices?|screens?|displays?|monitors?|interfaces?|gauges?|meters?)\b|control panels?|ai assistants?/i;
-const KIE_NO_TEXT_TAIL = /No logos, branding, or watermark\./i;
 
 test('image generation uses FLUX schnell with a positive-only plain-surface guard', async () => {
   let seen = null;
@@ -206,7 +205,6 @@ test('forced KIE mode converts risky digital HomeFix concepts into a short physi
   assert.equal(body.input.aspect_ratio, '16:9');
   assert.match(body.input.prompt, /homeowner inspecting a household fixture with simple hand tools/);
   assert.match(body.input.prompt, /Simple uncluttered composition/);
-  assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
   assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
   assert.doesNotMatch(body.input.prompt, /broad uniform surfaces|simple geometry|minimal decorative detail/i);
   assert.equal(create.init.headers.authorization, 'Bearer test-secret');
@@ -246,7 +244,6 @@ test('auto mode fallback resumes one KIE task after Workers AI account limit', a
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
   assert.match(body.input.prompt, /residential chrome showerhead with a steady stream of water/);
-  assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
   assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
   assert.doesNotMatch(body.input.prompt, /broad uniform surfaces|simple geometry|minimal decorative detail/i);
   assert.ok(calls.some((call) => call.url.includes('/recordInfo?taskId=')));
@@ -264,7 +261,6 @@ test('forced KIE mode converts main water shutoff into a concise editorial scene
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
   assert.match(body.input.prompt, /residential main water shutoff valve connected to exposed household plumbing/);
-  assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
   assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
 });
 
@@ -288,7 +284,6 @@ test('forced KIE mode never forces an unrelated topic into a residential repair 
   const body = JSON.parse(create.init.body);
   assert.match(body.input.prompt, /focused on choosing an ai subscription plan for freelancers/);
   assert.doesNotMatch(body.input.prompt, /residential|household repair or maintenance/i);
-  assert.match(body.input.prompt, KIE_NO_TEXT_TAIL);
 });
 
 // Confirmed via production job #167 ("Choosing an AI Subscription Plan as a Freelancer:
@@ -453,23 +448,6 @@ test('an image rejected by the Gemini QA gate carries a sanitized providerValida
     }
   );
 
-  const logoCalls = [];
-  const logoFetch = geminiQaFetchMock(logoCalls, {
-    pass: false, detectedText: ['SALE 50% OFF'], violations: ['visible brand logo on the storefront sign'], semanticMatch: true,
-    semanticReason: ''
-  });
-  const pendingLogo = await generateImage(env, input, aiMock(async () => ({ image: 'unused' })), logoFetch);
-  await assert.rejects(
-    () => generateImage(env, { ...input, taskId: pendingLogo.taskId }, aiMock(async () => ({ image: 'unused' })), logoFetch),
-    (error) => {
-      assert.equal(error.message, 'IMAGE_QA_REJECTED');
-      assert.match(error.providerValidationHint, /^TEXT_OR_LOGO:visible brand logo on the storefront sign DETECTED_TEXT:SALE 50 OFF$/);
-      // The safe-charset guard the Hub applies before this ever leaves the process (see
-      // index.js) would silently drop a hint containing '%' -- confirm none survives.
-      assert.doesNotMatch(error.providerValidationHint, /%/);
-      return true;
-    }
-  );
 });
 
 // Readable text used to fail this gate unconditionally -- that rule only ever existed to

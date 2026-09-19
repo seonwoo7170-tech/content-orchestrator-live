@@ -17,7 +17,7 @@ test('image plan creates positive-only physical-scene prompts', () => {
   assert.deepEqual(plan.images.map((image) => image.role), ['thumbnail', 'body', 'body']);
   assert.match(plan.images[0].prompt, /Photorealistic real-world photograph/);
   assert.match(plan.images[0].prompt, /스마트폰 저장공간 정리/);
-  assert.match(plan.images[0].prompt, /plain unmarked surfaces/);
+  assert.match(plan.images[0].prompt, /uncluttered composition/);
   assert.match(plan.images[1].prompt, /큰 파일 먼저 찾기/);
   assert.match(plan.images[2].prompt, /사진은 백업 후 정리/);
   assert.ok(plan.images.every((image) => !GLYPH_SEEDING_WORDS.test(image.prompt)));

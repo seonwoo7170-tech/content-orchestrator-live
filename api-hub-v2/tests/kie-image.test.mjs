@@ -166,20 +166,19 @@ test('monitor flicker prompt preserves the article-specific subject and adds log
   const source = 'A realistic editorial photograph focused on 모니터 깜빡임 핵심 답 및 진단 순서.';
   const prompt = safePromptForKie(source);
   assert.match(prompt, /모니터 깜빡임 핵심 답 및 진단 순서/);
-  assert.match(prompt, /No visible logos or watermarks/i);
+  assert.match(prompt, /Preserve the exact subject/i);
 });
 
 test('monitor cable prompt preserves semantics and adds physical connection safety', () => {
   const source = 'A realistic editorial photograph focused on 단계 케이블 및 물리적 연결 상태 확인 within the broader context of 모니터 화면 깜빡임 현상.';
   const prompt = safePromptForKie(source);
   assert.match(prompt, /단계 케이블 및 물리적 연결 상태 확인/);
-  assert.match(prompt, /No visible logos or watermarks/i);
+  assert.match(prompt, /Preserve the exact subject/i);
 });
 
 test('unrelated KIE prompt keeps its semantic subject while receiving common safety constraints', () => {
   const source = 'A realistic editorial photograph of a shower fixture.';
   const prompt = safePromptForKie(source);
   assert.match(prompt, /A realistic editorial photograph of a shower fixture\./);
-  assert.match(prompt, /No visible logos or watermarks/i);
-  assert.match(prompt, /unbranded/i);
+  assert.match(prompt, /Preserve the exact subject/i);
 });
