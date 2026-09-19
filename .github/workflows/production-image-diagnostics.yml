@@ -82,6 +82,20 @@ jobs:
           console.log('READY_IMAGE_JOBS',JSON.stringify(rows));
           NODE
 
+      - name: Run the repair-publish tick and report why ready repair jobs are/aren't scheduled
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          const r=await fetch(base+'/api/operations/repair-publish-tick',{method:'POST',headers,body:'{}',cache:'no-store'});
+          const j=await r.json().catch(()=>({}));
+          console.log('REPAIR_PUBLISH_TICK',JSON.stringify(j));
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
+# probe: repair-existing-auto-publish-stuck-investigation-2026-09-19
