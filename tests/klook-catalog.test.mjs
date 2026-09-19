@@ -6,11 +6,13 @@ import {
   extractKlookActivityId,
   findKlookProductsForAttraction,
   importKlookProducts,
+  inferKlookCityFromText,
   klookCityCoverage,
   klookDestinationLink,
   koreanCityNameFor,
   normalizeKlookProductRow,
-  parseKlookProductCsv
+  parseKlookProductCsv,
+  smileatlasBlogId
 } from '../worker/lib/klook-catalog.js';
 
 const SAMPLE_CSV = `Country Name,City Name,Product Name (Activity name or Hotel name),Product Image,Currency,Sell Price,Commission Rate,Instant Confirmation tag,Affiliate Link
@@ -180,4 +182,31 @@ test('this safety-net link is available for a city (Andong) that has no imported
   const products = await findKlookProductsForAttraction(env, { cityNameEn: 'Andong' });
   assert.deepEqual(products, []);
   assert.equal(klookDestinationLink(env, 'Andong'), 'https://www.klook.com/en-US/destination/c8898/?aid=135747');
+});
+
+test('inferKlookCityFromText finds a known city name in ordinary article text, case-insensitively', () => {
+  assert.equal(inferKlookCityFromText('Best neighborhoods to stay in Seoul for first-time visitors'), 'seoul');
+  assert.equal(inferKlookCityFromText('A weekend guide to BUSAN beaches'), 'busan');
+  assert.equal(inferKlookCityFromText('Everything to know before visiting Jeju Island'), 'jeju');
+});
+
+test('inferKlookCityFromText returns null when no known city is named at all', () => {
+  assert.equal(inferKlookCityFromText('Key factors to consider when choosing an AI subscription plan'), null);
+  assert.equal(inferKlookCityFromText(''), null);
+  assert.equal(inferKlookCityFromText(undefined), null);
+});
+
+test('inferKlookCityFromText does not match a city name as a substring of an unrelated word', () => {
+  // "Seoulmate" should never resolve to Seoul; the match must be a whole word.
+  assert.equal(inferKlookCityFromText('Seoulmate: a productivity app review'), null);
+});
+
+test('inferKlookCityFromText prefers whichever known city is named first when an article mentions more than one', () => {
+  assert.equal(inferKlookCityFromText('A day trip from Seoul to Incheon and back'), 'seoul');
+  assert.equal(inferKlookCityFromText('Busan to Gyeongju: a two-city itinerary'), 'busan');
+});
+
+test('smileatlasBlogId defaults to the known smileatlas blog id and can be overridden via env', () => {
+  assert.equal(smileatlasBlogId({}), '4712699686222371580');
+  assert.equal(smileatlasBlogId({ SMILEATLAS_BLOG_ID: '999' }), '999');
 });

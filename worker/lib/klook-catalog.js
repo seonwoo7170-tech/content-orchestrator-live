@@ -149,6 +149,35 @@ export function koreanCityNameFor(cityNameEn) {
   return EN_TO_KR_CITY[normalizedCityKey(cityNameEn)] || null;
 }
 
+// A smileatlas article without a tourApiContentId (a general topic like "Best neighborhoods
+// to stay in Seoul") still usually names a real Korean city right in its own title/topic --
+// this is a plain keyword scan against the same city list findKlookProductsForAttraction
+// already knows, not a translation call, so it stays instant and offline. The earliest
+// city name to appear wins on the assumption an article leads with its actual subject
+// before any incidental later mention of another city (e.g. a day-trip aside).
+export function inferKlookCityFromText(text) {
+  const normalized = String(text || '').toLowerCase();
+  let best = null;
+  let bestIndex = Infinity;
+  for (const cityNameEn of Object.keys(EN_TO_KR_CITY)) {
+    const match = new RegExp(`\\b${cityNameEn}\\b`, 'i').exec(normalized);
+    if (match && match.index < bestIndex) {
+      bestIndex = match.index;
+      best = cityNameEn;
+    }
+  }
+  return best;
+}
+
+// See DEFAULT_KLOOK_AFFILIATE_ID below for why a stable, non-sensitive id is a source
+// constant here rather than another wrangler var slot; env.SMILEATLAS_BLOG_ID still
+// overrides it if the blog is ever recreated under a different id.
+const DEFAULT_SMILEATLAS_BLOG_ID = '4712699686222371580';
+
+export function smileatlasBlogId(env) {
+  return String(env?.SMILEATLAS_BLOG_ID || DEFAULT_SMILEATLAS_BLOG_ID).trim();
+}
+
 // Klook's affiliate dashboard ("기타 툴" → city page link list) publishes a stable table of
 // destination-page ids per city. Unlike the product catalog (which needs a fresh manual CSV
 // export per city to have anything to recommend), these ids are a fixed, official mapping:

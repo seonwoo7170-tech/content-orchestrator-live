@@ -4,6 +4,7 @@ import { buildSupplementalImagePlan, validateImagePolicy } from './image-policy.
 import { generatePlannedImages } from './image-executor-resilient.js';
 import { listJobImages, markImageAttached, persistImagePlan } from './image-store.js';
 import { fillBodyImagesFromRealPhotos } from './real-photo-images.js';
+import { findKlookProductsForAttraction, inferKlookCityFromText, smileatlasBlogId } from './klook-catalog.js';
 import { persistJobResult } from './job-store.js';
 
 function requireDb(env) {
@@ -193,6 +194,17 @@ function candidateBlogs(candidates = []) {
   return ids.map((blogId) => ({ blogId, name: `Blog ${blogId}` }));
 }
 
+async function resolveRealPhotoUrls(env, candidate, result) {
+  if (Array.isArray(result.attractionImages) && result.attractionImages.length) return result.attractionImages;
+  if (String(candidate.mode || '') !== 'new_article') return [];
+  if (String(candidate.blog_id || '').trim() !== smileatlasBlogId(env)) return [];
+
+  const cityNameEn = inferKlookCityFromText(`${result.article?.topic || ''} ${result.article?.title || ''}`);
+  if (!cityNameEn) return [];
+  const products = await findKlookProductsForAttraction(env, { cityNameEn, limit: 6 }).catch(() => []);
+  return products.map((product) => product.productImage).filter(Boolean);
+}
+
 function imagePipelineMeta(candidate, plan, images, verification, extra = {}) {
   const providers = [...new Set((images || []).map((image) => String(image.provider || '').trim()).filter(Boolean))];
   return {
@@ -246,15 +258,18 @@ export async function completeReadyJobImages(env, candidate, effective, options 
   await persistImagePlan(env, jobId, plan.images);
   // A TourAPI-grounded new_article job (smileatlas) carries the attraction's own real
   // photos on its result (see writer()'s attractionImages passthrough in ai-routes.js,
-  // threaded through readyResult() in pipeline.js). Fill as many 'planned' body slots
-  // from those as are available before this tick ever asks KIE to generate a stand-in
-  // scene -- a slot a real photo couldn't fill (download failure, or fewer photos than
-  // slots) is simply left 'planned' for the KIE path below, same as if no real photo
-  // had ever been offered for it.
-  if (Array.isArray(result.attractionImages) && result.attractionImages.length) {
+  // threaded through readyResult() in pipeline.js). A smileatlas job with no such
+  // grounding (a plain topic like "Best neighborhoods to stay in Seoul") falls back to
+  // the Klook product catalog for the same city instead, when one is imported for it.
+  // Fill as many 'planned' body slots from whichever source applies before this tick
+  // ever asks KIE to generate a stand-in scene -- a slot a real photo couldn't fill
+  // (download failure, fewer photos than slots, or no source available at all) is
+  // simply left 'planned' for the KIE path below, same as if none had been offered.
+  const realPhotoUrls = await resolveRealPhotoUrls(env, candidate, result);
+  if (realPhotoUrls.length) {
     const plannedImages = await listJobImages(env, jobId);
     try {
-      await fillBodyImagesFromRealPhotos(env, jobId, plannedImages, result.attractionImages, {
+      await fillBodyImagesFromRealPhotos(env, jobId, plannedImages, realPhotoUrls, {
         fetchImpl: options.fetchImpl
       });
     } catch (error) {
