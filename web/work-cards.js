@@ -197,6 +197,38 @@ async function retryJob(jobId, button) {
   }
 }
 
+function retryImagesFailureMessage(error) {
+  const code = String(error?.message || '').toUpperCase();
+  if (code.includes('JOB_IMAGES_REQUIRE_READY')) {
+    return '작성이 아직 완료되지 않아 이미지를 재시도할 수 없습니다.';
+  }
+  return `이미지 재시도를 실행하지 못했습니다: ${error.message}`;
+}
+
+async function retryJobImages(jobId, button) {
+  if (!isAdminConnected()) return notify('관리 연결 후 다시 시도할 수 있습니다.', 'danger');
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = '재시도 중';
+  try {
+    const outcome = await adminApi(`/api/jobs/${jobId}/images/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ retryFailed: true })
+    });
+    const failed = Number(outcome?.failed || 0);
+    notify(
+      failed > 0 ? `이미지 ${failed}건이 이번에도 실패했습니다. 상세 로그를 확인해 주세요.` : '이미지 재시도를 실행했습니다.',
+      failed > 0 ? 'danger' : 'normal'
+    );
+    window.dispatchEvent(new CustomEvent('orchestrator:jobs-changed', { detail: { jobId } }));
+  } catch (error) {
+    notify(retryImagesFailureMessage(error), 'danger');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 async function showReadableDetail(jobId, button) {
   const card = jobList?.querySelector(`[data-job="${jobId}"]`);
   const target = card?.querySelector(`[data-details-for="${jobId}"]`);
@@ -394,6 +426,16 @@ function enhanceCard(card) {
     actions.appendChild(retry);
   }
 
+  if (statusText === '이미지 확인 필요' && !actions.querySelector('[data-action="retry-images"]')) {
+    const retryImages = document.createElement('button');
+    retryImages.type = 'button';
+    retryImages.className = 'button small card-action danger-action';
+    retryImages.dataset.action = 'retry-images';
+    retryImages.dataset.jobId = String(jobId);
+    retryImages.textContent = '이미지 재시도';
+    actions.appendChild(retryImages);
+  }
+
   if (['완료', '발행 완료', '리페어 완료', '승인/발행 준비', '발행 준비', '발행 준비 완료', '예약발행 대기', '발행 확인 중', '업데이트 확인 중', '업데이트 예약', '확인 필요'].includes(statusText) && !actions.querySelector('[data-action="preview-readable"]')) {
     const preview = document.createElement('button');
     preview.type = 'button';
@@ -447,7 +489,7 @@ jobList?.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-action]');
   if (!button) return;
   const action = button.dataset.action;
-  if (!['detail', 'retry-readable', 'preview-readable'].includes(action)) return;
+  if (!['detail', 'retry-readable', 'preview-readable', 'retry-images'].includes(action)) return;
   event.preventDefault();
   event.stopPropagation();
   event.stopImmediatePropagation();
@@ -456,6 +498,7 @@ jobList?.addEventListener('click', async (event) => {
   if (action === 'detail') return showReadableDetail(jobId, button);
   if (action === 'retry-readable') return retryJob(jobId, button);
   if (action === 'preview-readable') return previewJob(jobId, button);
+  if (action === 'retry-images') return retryJobImages(jobId, button);
 }, true);
 
 window.addEventListener('orchestrator:jobs-changed', () => void refreshPublicationStates());
