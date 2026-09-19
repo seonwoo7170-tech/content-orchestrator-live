@@ -54,6 +54,22 @@ export function extractKlookActivityId(affiliateLink) {
   }
 }
 
+// Klook's own CSV export is not consistent about administrative suffixes for the same
+// place -- one export calls Jeju "제주도", another "제주"; Gyeongju shows up as both "경주"
+// and "경주시". EN_TO_KR_CITY's short forms would silently fail to match whichever variant
+// a given export happened to use, so both the imported row and the lookup key are reduced
+// to the same bare place name before ever being compared (see findKlookProductsForAttraction
+// and klookCityCoverage).
+const KOREAN_ADMIN_SUFFIXES = ['특별자치시', '특별자치도', '광역시', '특별시', '도', '시'];
+
+export function normalizeKoreanCityName(name) {
+  const value = String(name || '').trim();
+  for (const suffix of KOREAN_ADMIN_SUFFIXES) {
+    if (value.length > suffix.length && value.endsWith(suffix)) return value.slice(0, -suffix.length);
+  }
+  return value;
+}
+
 export function normalizeKlookProductRow(row = {}) {
   const activityId = extractKlookActivityId(row['Affiliate Link']);
   const productName = String(row['Product Name (Activity name or Hotel name)'] || '').trim();
@@ -62,10 +78,11 @@ export function normalizeKlookProductRow(row = {}) {
 
   const sellPrice = Number(row['Sell Price']);
   const commissionRate = Number(row['Commission Rate']);
+  const rawCityName = String(row['City Name'] || '').trim();
   return {
     activityId,
     countryName: String(row['Country Name'] || '').trim() || null,
-    cityName: String(row['City Name'] || '').trim() || null,
+    cityName: rawCityName ? normalizeKoreanCityName(rawCityName) : null,
     productName,
     productImage: String(row['Product Image'] || '').trim() || null,
     currency: String(row['Currency'] || '').trim() || null,
@@ -225,7 +242,7 @@ const KOREA_COUNTRY_NAME = '대한민국';
 
 export async function findKlookProductsForAttraction(env, { cityNameEn, limit = 3 } = {}) {
   const db = requireDb(env);
-  const cityNameKo = koreanCityNameFor(cityNameEn);
+  const cityNameKo = normalizeKoreanCityName(koreanCityNameFor(cityNameEn));
   if (!cityNameKo) return [];
 
   const safeLimit = Math.max(1, Math.min(10, Number(limit) || 3));
@@ -270,7 +287,7 @@ export async function klookCityCoverage(env) {
     .map(([cityNameEn, cityNameKo]) => ({
       cityNameEn,
       cityNameKo,
-      productCount: counts.get(cityNameKo) || 0
+      productCount: counts.get(normalizeKoreanCityName(cityNameKo)) || 0
     }))
     .sort((a, b) => a.productCount - b.productCount || a.cityNameEn.localeCompare(b.cityNameEn));
 }

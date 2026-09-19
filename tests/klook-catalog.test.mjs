@@ -11,6 +11,7 @@ import {
   klookDestinationLink,
   koreanCityNameFor,
   normalizeKlookProductRow,
+  normalizeKoreanCityName,
   parseKlookProductCsv,
   smileatlasBlogId
 } from '../worker/lib/klook-catalog.js';
@@ -209,4 +210,43 @@ test('inferKlookCityFromText prefers whichever known city is named first when an
 test('smileatlasBlogId defaults to the known smileatlas blog id and can be overridden via env', () => {
   assert.equal(smileatlasBlogId({}), '4712699686222371580');
   assert.equal(smileatlasBlogId({ SMILEATLAS_BLOG_ID: '999' }), '999');
+});
+
+test('normalizeKoreanCityName strips administrative suffixes so different Klook exports of the same place agree', () => {
+  assert.equal(normalizeKoreanCityName('제주도'), '제주');
+  assert.equal(normalizeKoreanCityName('제주'), '제주');
+  assert.equal(normalizeKoreanCityName('경주시'), '경주');
+  assert.equal(normalizeKoreanCityName('서귀포시'), '서귀포');
+  assert.equal(normalizeKoreanCityName('강원도'), '강원');
+  assert.equal(normalizeKoreanCityName('강원'), '강원');
+  assert.equal(normalizeKoreanCityName('제주특별자치도'), '제주');
+  assert.equal(normalizeKoreanCityName('서울'), '서울');
+});
+
+test('normalizeKoreanCityName never strips a whole one- or two-character place name down to nothing', () => {
+  // "도" alone is degenerate input, but must never return an empty string that a broad
+  // WHERE city_name = '' could accidentally match against.
+  assert.equal(normalizeKoreanCityName('도'), '도');
+  assert.equal(normalizeKoreanCityName('시'), '시');
+});
+
+test('a Klook export that spells the same place with a different administrative suffix than EN_TO_KR_CITY still matches on import and lookup', async (t) => {
+  const { env } = fixture(t);
+  const csv = `Country Name,City Name,Product Name (Activity name or Hotel name),Product Image,Currency,Sell Price,Commission Rate,Instant Confirmation tag,Affiliate Link
+대한민국,제주도,제주 성산일출봉 입장권,https://res.klook.com/image/upload/activities/jeju.jpg,USD,9.99,0.050,즉시 확정,https://affiliate.klook.com/redirect?aid=135747&_currency=USD&k_site=https%3A%2F%2Fwww.klook.com%2Fko%2Factivity%2F55555-jeju-sunrise-peak
+대한민국,강원,남이섬 입장권 및 왕복 셔틀버스,https://res.klook.com/image/upload/activities/nami.jpg,USD,14.99,0.050,즉시 확정,https://affiliate.klook.com/redirect?aid=135747&_currency=USD&k_site=https%3A%2F%2Fwww.klook.com%2Fko%2Factivity%2F66666-nami-island
+`;
+  await importKlookProducts(env, csv);
+
+  const jeju = await findKlookProductsForAttraction(env, { cityNameEn: 'jeju' });
+  assert.equal(jeju.length, 1);
+  assert.equal(jeju[0].productImage, 'https://res.klook.com/image/upload/activities/jeju.jpg');
+
+  const gangwon = await findKlookProductsForAttraction(env, { cityNameEn: 'gangwondo' });
+  assert.equal(gangwon.length, 1);
+  assert.equal(gangwon[0].productImage, 'https://res.klook.com/image/upload/activities/nami.jpg');
+
+  const coverage = await klookCityCoverage(env);
+  assert.equal(coverage.find((row) => row.cityNameEn === 'jeju').productCount, 1);
+  assert.equal(coverage.find((row) => row.cityNameEn === 'gangwondo').productCount, 1);
 });
