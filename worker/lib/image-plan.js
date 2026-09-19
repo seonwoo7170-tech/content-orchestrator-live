@@ -137,7 +137,13 @@ export function buildThumbnailHook(article) {
 }
 
 function topicDominance(concept) {
-  return `The physical subject represented by ${concept} must be clearly visible and remain the dominant visual focus. Use task-focused documentary framing. When a person is useful, show hands or forearms actively performing the relevant task while the physical subject remains dominant, rather than a posed portrait.`;
+  // Used to add "When a person is useful, show hands or forearms actively performing the
+  // relevant task" -- that line was in every single image prompt (thumbnail + all body
+  // images), so the model treated "a person's hands doing something" as the safe default
+  // framing for nearly any real-world scene, producing hands in far more images than the
+  // topic actually called for. Documentary-style, subject-first framing without nudging
+  // toward a person still keeps it from looking like a posed stock portrait.
+  return `The physical subject represented by ${concept} must be clearly visible and remain the dominant visual focus. Use documentary-style framing centered on the physical subject itself, not a posed portrait.`;
 }
 
 function thumbnailScene(concept) {

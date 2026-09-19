@@ -148,6 +148,17 @@ test('stored images attach thumbnail first and distribute body images through ar
   assert.match(article.html, /loading="lazy"/);
 });
 
+test('image prompts no longer nudge every scene toward showing a person\'s hands', () => {
+  // topicDominance() used to say "When a person is useful, show hands or forearms
+  // actively performing the relevant task" on every single image (thumbnail + all body
+  // images), which made the model default to hands-doing-something as the safe framing
+  // for nearly any real-world scene regardless of whether the topic called for it.
+  const plan = buildImagePlan(ARTICLE, { bodyCount: 2 });
+  assert.ok(plan.images.every((image) => !/hands? or forearms/i.test(image.prompt)));
+  assert.ok(plan.images.every((image) => !/when a person is useful/i.test(image.prompt)));
+  assert.match(plan.images[0].prompt, /not a posed portrait/i);
+});
+
 test('attachment is idempotent for already embedded image ids', () => {
   const rows = [
     { id: 1, role: 'thumbnail', position: 0, status: 'stored', public_url: 'https://example.com/media/jobs/1/thumbnail-0.jpg', alt_text: '대표 이미지' }
