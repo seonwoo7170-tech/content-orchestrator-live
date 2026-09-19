@@ -1,3 +1,4 @@
+import './today-completions.js';
 import {
   adminApi,
   adminSessionReady,
