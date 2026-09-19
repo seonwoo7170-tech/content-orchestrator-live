@@ -81,6 +81,49 @@ test('English image alt text stays English', () => {
   assert.doesNotMatch(plan.images.map((image) => image.altText).join(' '), /대표|관련|설명/);
 });
 
+// Confirmed via production job #161: a Korean particle glued directly onto a number
+// ("2026년") still satisfies \b\d+\b's word boundary, so the digit-stripping meant for
+// English listicle titles ("5 Ways to...") silently dropped the year and fed the image
+// model a broken "년 파워서플라이..." topic with no numeric context at all.
+test('a number followed directly by a Korean particle is not stripped from the topic', () => {
+  const plan = buildImagePlan({
+    title: '2026년 파워서플라이 권장 용량 계산 방법과 고장 증상 자가진단 가이드',
+    topic: '2026년 파워서플라이 권장 용량 계산 방법과 고장 증상 자가진단 가이드',
+    language: 'ko',
+    html: '<p>intro</p>'
+  }, { bodyCount: 0 });
+  assert.match(plan.images[0].prompt, /2026년 파워서플라이/);
+});
+
+// A section's <h2> alone can be too short/terse to ground an image accurately (confirmed
+// on job #161's "ATX 규격과 12V 2X6 커넥터의 이해" heading, which alone gave the image model
+// nothing concrete and it hallucinated an unrelated scene). The body paragraph that
+// actually explains the section should be pulled into the prompt too.
+test('body image prompts include the explaining paragraph, not just the bare heading', () => {
+  const plan = buildImagePlan({
+    title: 'ATX 파워서플라이 커넥터 가이드',
+    topic: 'ATX 파워서플라이 커넥터 가이드',
+    language: 'ko',
+    html: '<h2>ATX 규격과 12V 2X6 커넥터의 이해</h2><p>ATX3.0 규격부터 도입된 12V-2x6 커넥터는 최대 600W까지 전력을 공급할 수 있습니다. 핀이 휘지 않도록 주의해야 합니다.</p>'
+  }, { bodyCount: 1 });
+  assert.match(plan.images[1].prompt, /This section explains:/);
+  // A decimal-style token ("ATX3.0", "12V-2x6") must not be mistaken for a sentence
+  // boundary and truncate the detail after just "atx3".
+  assert.match(plan.images[1].prompt, /ATX3\.0 규격부터 도입된 12V-2x6 커넥터는 최대 600W까지 전력을 공급할 수 있습니다/);
+  assert.doesNotMatch(plan.images[1].prompt, /explains: ATX3\.\s/);
+  assert.doesNotMatch(plan.images[1].prompt, /\.\.\s/);
+});
+
+test('a section with no following paragraph text falls back gracefully with no dangling detail clause', () => {
+  const plan = buildImagePlan({
+    title: 'Quick fixture check',
+    topic: 'quick fixture check',
+    language: 'en',
+    html: '<h2>Inspect the fixture</h2>'
+  }, { bodyCount: 1 });
+  assert.doesNotMatch(plan.images[1].prompt, /This section explains:\s*\./);
+});
+
 test('image plan allows up to six body images and rejects beyond that', () => {
   assert.doesNotThrow(() => buildImagePlan(ARTICLE, { bodyCount: 4 }));
   assert.doesNotThrow(() => buildImagePlan(ARTICLE, { bodyCount: 6 }));

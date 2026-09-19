@@ -20,7 +20,12 @@ function visualConcept(value) {
   return clampText(value, 100)
     .toLowerCase()
     .replace(/["“”'‘’`]/g, '')
-    .replace(/\b\d+\b/g, ' ')
+    // \b\d+\b is meant to drop English listicle numbers ("5 Ways to..."), but \b only
+    // treats [A-Za-z0-9_] as word characters -- a Korean particle glued directly onto a
+    // number ("2026년") still counts as a boundary, so the whole number was silently
+    // dropped and left a broken "년 파워서플라이..." topic feeding the image prompt
+    // (confirmed on job #161). Skip the strip when a Hangul character follows immediately.
+    .replace(/\b\d+\b(?![가-힣ᄀ-ᇿ㄰-㆏])/g, ' ')
     .replace(/\bhow\s+to\b/gi, ' ')
     .replace(/\b(ways?|tips?|steps?|things?)\s+to\s+(check|know|consider|try|do)\b/gi, ' ')
     .replace(/\b(find|test|check|inspect|verify|prepare|prioritize|stop|fix|troubleshoot|understand|use|using)\b/gi, ' ')
@@ -37,15 +42,37 @@ function visualConcept(value) {
     .trim();
 }
 
-function extractH2s(html) {
-  const headings = [];
+// Unlike visualConcept() (built for terse titles cluttered with listicle filler), a body
+// paragraph is already a natural sentence -- stripping words like "before"/"after" would
+// delete everything after them, and the check/inspect/verify filter would mangle ordinary
+// grammar. Only clean it enough to be safe to embed in the prompt (no stray quotes).
+function sceneDetail(value) {
+  return clampText(value, 160).replace(/["“”'‘’`]/g, '').replace(/[.!?。！？]+$/, '').trim();
+}
+
+// A section's <h2> alone is often too short/terse to ground an image accurately (e.g.
+// "ATX 규격과 12V 2X6 커넥터의 이해" gave the image model almost nothing to work with and it
+// hallucinated an unrelated scene). Pairing the heading with the first sentence of the
+// paragraph that actually explains it gives the model real content to anchor on, not just
+// a label. Only the heading is still used standalone as a display fallback (alt text, etc).
+function extractSections(html) {
+  const raw = String(html || '');
   const re = /<h2\b[^>]*>([\s\S]*?)<\/h2>/gi;
-  let match;
-  while ((match = re.exec(String(html || ''))) !== null) {
-    const heading = clampText(match[1], 120);
-    if (heading) headings.push(heading);
+  const matches = [...raw.matchAll(re)];
+  const sections = [];
+  for (let index = 0; index < matches.length; index += 1) {
+    const heading = clampText(matches[index][1], 120);
+    if (!heading) continue;
+    const start = matches[index].index + matches[index][0].length;
+    const end = index + 1 < matches.length ? matches[index + 1].index : raw.length;
+    // A period is only a sentence end when it isn't immediately followed by a digit --
+    // otherwise a decimal-style token like "ATX3.0" or "12V-2x6" truncates the detail
+    // after just "atx3" instead of the actual explanatory sentence.
+    const sectionText = clampText(raw.slice(start, end), 400);
+    const firstSentence = sectionText.match(/^.*?[.!?。！？](?!\d)/)?.[0] || sectionText;
+    sections.push({ heading, detail: sceneDetail(firstSentence) });
   }
-  return headings;
+  return sections;
 }
 
 function abstractVisualHeading(value) {
@@ -126,15 +153,16 @@ const BODY_SCENE_PURPOSES = [
   'Show the finished arrangement with emphasis on the useful physical result.'
 ];
 
-function bodyScene(sectionConcept, topicConcept, index) {
-  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}. ${topicDominance(topicConcept)} Show a concrete action, condition, material, fixture, tool interaction, or before-work detail that directly explains this section. ${BODY_SCENE_PURPOSES[index % BODY_SCENE_PURPOSES.length]} Keep the scene specific to the section subject; choose only physically relevant props. Natural lighting, realistic materials, useful close-to-medium distance, one clear focal subject, clean composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present.`;
+function bodyScene(sectionConcept, sectionDetail, topicConcept, index) {
+  const detailClause = sectionDetail ? ` This section explains: ${sectionDetail}.` : '';
+  return `Photorealistic real-world photograph focused on ${sectionConcept} within the broader context of ${topicConcept}.${detailClause} ${topicDominance(topicConcept)} Show a concrete action, condition, material, fixture, tool interaction, or before-work detail that directly explains this section. ${BODY_SCENE_PURPOSES[index % BODY_SCENE_PURPOSES.length]} Keep the scene specific to the section subject; choose only physically relevant props. Natural lighting, realistic materials, useful close-to-medium distance, one clear focal subject, clean composition, plain unmarked surfaces, unbranded objects, and blank featureless screens and control panels when present.`;
 }
 
 export function buildImagePlan(article, options = {}) {
   const { title, topic } = articleIdentity(article);
   const bodyCount = normalizeBodyCount(options.bodyCount);
-  const headings = extractH2s(article.html);
-  const visualHeadings = headings.filter((heading) => !abstractVisualHeading(heading));
+  const sections = extractSections(article.html);
+  const visualSections = sections.filter((entry) => !abstractVisualHeading(entry.heading));
   const topicConcept = visualConcept(topic) || visualConcept(title) || 'a practical everyday subject';
   const images = [
     {
@@ -147,15 +175,15 @@ export function buildImagePlan(article, options = {}) {
   ];
 
   for (let index = 0; index < bodyCount; index += 1) {
-    const section = (visualHeadings.length ? visualHeadings[index % visualHeadings.length] : null)
-      || (headings.length ? headings[index % headings.length] : null)
-      || topic;
-    const sectionConcept = visualConcept(section) || topicConcept;
+    const section = (visualSections.length ? visualSections[index % visualSections.length] : null)
+      || (sections.length ? sections[index % sections.length] : null)
+      || { heading: topic, detail: '' };
+    const sectionConcept = visualConcept(section.heading) || topicConcept;
     images.push({
       role: 'body',
       position: index + 1,
-      prompt: bodyScene(sectionConcept, topicConcept, index),
-      altText: imageAltText(article, section, 'body'),
+      prompt: bodyScene(sectionConcept, section.detail, topicConcept, index),
+      altText: imageAltText(article, section.heading, 'body'),
       hookText: null
     });
   }
