@@ -122,6 +122,43 @@ jobs:
           }
           NODE
 
+      - name: Measure real per-image and per-job wall-clock timing from event timestamps (set TIMING_JOB_IDS below)
+        shell: bash
+        env:
+          TIMING_JOB_IDS: '185,166,161'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          const jobIds=String(process.env.TIMING_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean);
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          for(const jobId of jobIds){
+            let after=0; const all=[];
+            for(let page=0; page<20; page+=1){
+              const r=await fetch(`${base}/api/jobs/${jobId}/events?after=${after}&limit=100`,{headers,cache:'no-store'});
+              const j=await r.json().catch(()=>({}));
+              if(!r.ok) { console.log('TIMING_EVENTS_READ_FAILED',jobId,r.status); break; }
+              const events=Array.isArray(j.events)?j.events:[];
+              all.push(...events);
+              if(events.length===0) break;
+              after=j.lastEventId;
+            }
+            const first=all[0];
+            const last=all[all.length-1];
+            const spanMs=(first&&last)?(new Date(last.created_at).getTime()-new Date(first.created_at).getTime()):null;
+            const imageLines=all.filter((e)=>/이미지|IMAGE_|QA_REJECTED|attached|생성|재시도/i.test(e.message||''));
+            console.log('JOB_TIMING',jobId,JSON.stringify({
+              totalEvents:all.length,
+              firstEventAt:first?first.created_at:null,
+              lastEventAt:last?last.created_at:null,
+              spanMs,
+              spanMinutes:spanMs!=null?Math.round(spanMs/60000*10)/10:null,
+              sampleImageEvents:imageLines.slice(0,60).map((e)=>({t:e.created_at,m:e.message}))
+            }));
+          }
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
