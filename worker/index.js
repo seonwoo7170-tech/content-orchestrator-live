@@ -28,7 +28,7 @@ import { generatePlannedImages } from './lib/image-executor-resilient.js';
 import { listJobImages, markImageAttached, persistImagePlan } from './lib/image-store.js';
 import { applyRealPhotoFallback } from './lib/real-photo-images.js';
 import { diagnoseCloudflareViaHub } from './lib/provider-diagnostics.js';
-import { getStoredJob, listStoredJobs, persistJobResult, persistJobTransition } from './lib/job-store.js';
+import { getStoredJob, listArchivedJobs, listStoredJobs, persistJobResult, persistJobTransition } from './lib/job-store.js';
 import { processStoredJob } from './lib/stored-job-executor.js';
 
 function json(data, status = 200, extraHeaders = {}) {
@@ -341,10 +341,16 @@ export default {
 
       if (request.method === 'GET' && url.pathname === '/api/jobs') {
         if (!await requireAdmin(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
-        const jobs = await listStoredJobs(env, {
-          limit: url.searchParams.get('limit'),
-          status: url.searchParams.get('status')
-        });
+        const archived = String(url.searchParams.get('archived') || '').trim().toLowerCase() === 'true';
+        const jobs = archived
+          ? await listArchivedJobs(env, {
+              limit: url.searchParams.get('limit'),
+              status: url.searchParams.get('status')
+            })
+          : await listStoredJobs(env, {
+              limit: url.searchParams.get('limit'),
+              status: url.searchParams.get('status')
+            });
         return json({ jobs, count: jobs.length });
       }
 

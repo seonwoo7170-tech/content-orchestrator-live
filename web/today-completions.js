@@ -180,7 +180,7 @@ export async function loadTodayCompletions() {
   host.innerHTML = '<p class="today-completion-empty">오늘 완료 작업을 불러오는 중입니다.</p>';
   try {
     const [jobsData, blogsData] = await Promise.all([
-      adminApi('/api/jobs?status=completed&limit=100'),
+      adminApi('/api/jobs?status=completed&archived=true&limit=100'),
       adminApi('/api/blogs').catch(() => ({ blogs: [] }))
     ]);
     const today = kstDateKey();

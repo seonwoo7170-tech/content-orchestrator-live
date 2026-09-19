@@ -101,6 +101,27 @@ export function humanReadableJobError(code) {
   return '작업 중 문제가 발생했습니다. 자동 복구를 시도하며, 계속 실패하면 결과에서 상세 내용을 확인해 주세요.';
 }
 
+// persistJobTransition sets archived_at in the same UPDATE that sets status='completed'
+// (see below), so a completed job never has archived_at IS NULL -- listStoredJobs's
+// "status = ? AND archived_at IS NULL" filter can structurally never return a completed
+// job. History is deliberately preserved, not deleted (work-queue-archive.test.mjs), but
+// nothing ever queried it: the "오늘 완료" UI panel asked listStoredJobs for
+// status=completed and always got back zero rows, regardless of how much actually
+// published. This is the read path for that preserved history.
+export async function listArchivedJobs(env, options = {}) {
+  const db = requireDb(env);
+  const limit = normalizeJobListLimit(options.limit);
+  const status = String(options.status || '').trim();
+  const columns = `id, mode, blog_id, blogger_post_id, target_url, topic, status,
+    CASE WHEN result_json IS NULL THEN 0 ELSE 1 END AS has_result,
+    created_at, updated_at, archived_at`;
+  const statement = status
+    ? db.prepare(`SELECT ${columns} FROM jobs WHERE status = ? AND archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT ?`).bind(status, limit)
+    : db.prepare(`SELECT ${columns} FROM jobs WHERE archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT ?`).bind(limit);
+  const rows = await statement.all();
+  return rows.results || [];
+}
+
 export async function listStoredJobs(env, options = {}) {
   const db = requireDb(env);
   const limit = normalizeJobListLimit(options.limit);
