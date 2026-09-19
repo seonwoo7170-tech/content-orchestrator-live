@@ -1,1 +1,2 @@
 deploy with-migrations claim-race recovery job-143 2026-09-11-v2
+deploy raise KIE_IMAGE_GENERATION_RETRY_MAX 3->5 2026-09-19
