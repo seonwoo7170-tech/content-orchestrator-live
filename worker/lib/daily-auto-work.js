@@ -4,7 +4,7 @@ import { listDailySlots } from './daily-plan-store.js';
 import { getStoredJob, persistJobResult, persistJobTransition } from './job-store.js';
 import { processStoredJob } from './stored-job-executor.js';
 import { attachStoredImages, buildImagePlan, normalizeBodyCount } from './image-plan.js';
-import { generatePlannedImages } from './image-executor.js';
+import { generatePlannedImages } from './image-executor-resilient.js';
 import { listJobImages, markImageAttached, persistImagePlan } from './image-store.js';
 import {
   listStrategyAvoidTopics,

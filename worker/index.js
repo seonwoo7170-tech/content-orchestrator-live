@@ -24,7 +24,7 @@ import {
   requireAdmin
 } from './lib/admin-auth.js';
 import { attachStoredImages, buildImagePlan } from './lib/image-plan.js';
-import { generatePlannedImages } from './lib/image-executor.js';
+import { generatePlannedImages } from './lib/image-executor-resilient.js';
 import { listJobImages, markImageAttached, persistImagePlan } from './lib/image-store.js';
 import { diagnoseCloudflareViaHub } from './lib/provider-diagnostics.js';
 import { getStoredJob, listStoredJobs, persistJobResult, persistJobTransition } from './lib/job-store.js';
