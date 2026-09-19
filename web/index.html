@@ -96,7 +96,10 @@
         <section class="panel">
           <div class="panel-head queue-head">
             <div><p class="section-kicker">QUEUE</p><h2>작업 큐</h2></div>
-            <button id="diagnose-ai" class="button ghost" type="button">AI 연결 확인</button>
+            <div class="actions">
+              <button id="retry-all-images" class="button ghost" type="button">전체 이미지 재시도</button>
+              <button id="diagnose-ai" class="button ghost" type="button">AI 연결 확인</button>
+            </div>
           </div>
           <div id="queue-summary" class="queue-summary"></div>
           <div id="job-list" class="job-list" aria-live="polite"><p class="muted">관리 연결 후 작업 큐를 불러옵니다.</p></div>

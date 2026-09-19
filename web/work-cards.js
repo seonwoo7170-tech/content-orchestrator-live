@@ -243,6 +243,66 @@ async function retryJobImages(jobId, button) {
   }
 }
 
+// Runs the same reset-then-generate sequence as a single job's "이미지 재시도" button, but
+// across every ready job that currently has at least one 'failed' image -- so a KIE-budget
+// backlog spanning many jobs doesn't need to be cleared one click at a time. Each job is
+// still handled with its own reset-failed + generate call pair (never a raw budget/DB write),
+// and a job with no failed images is skipped entirely so nothing already 'attached' or
+// in-flight is touched.
+async function retryAllFailedImages(button) {
+  if (!isAdminConnected()) return notify('관리 연결 후 다시 시도할 수 있습니다.', 'danger');
+  if (!window.confirm('실패한 이미지가 있는 모든 작업의 재시도 예산을 초기화하고 다시 생성을 시도합니다. 계속할까요?')) return;
+  button.disabled = true;
+  const original = button.textContent;
+  try {
+    const { jobs } = await adminApi('/api/jobs?status=ready&limit=100');
+    const candidates = jobs || [];
+    let attempted = 0;
+    let succeeded = 0;
+    let stillFailed = 0;
+    let errored = 0;
+    for (let i = 0; i < candidates.length; i += 1) {
+      const job = candidates[i];
+      button.textContent = `재시도 중 (${i + 1}/${candidates.length})`;
+      try {
+        const { images } = await adminApi(`/api/jobs/${job.id}/images`);
+        const failedImageIds = (images || [])
+          .filter((image) => image?.status === 'failed')
+          .map((image) => image.id);
+        if (failedImageIds.length === 0) continue;
+        attempted += 1;
+        await adminApi('/api/operations/images/reset-failed', {
+          method: 'POST',
+          body: JSON.stringify({ imageIds: failedImageIds })
+        });
+        const outcome = await adminApi(`/api/jobs/${job.id}/images/generate`, {
+          method: 'POST',
+          body: JSON.stringify({ retryFailed: true })
+        });
+        if (Number(outcome?.failed || 0) > 0) stillFailed += 1; else succeeded += 1;
+      } catch {
+        errored += 1;
+      }
+    }
+    notify(
+      attempted === 0
+        ? '재시도할 실패 이미지가 있는 작업이 없습니다.'
+        : `${attempted}개 작업 재시도 완료 (성공 ${succeeded} · 재실패 ${stillFailed} · 오류 ${errored}).`,
+      stillFailed + errored > 0 ? 'danger' : 'normal'
+    );
+    window.dispatchEvent(new CustomEvent('orchestrator:jobs-changed', {}));
+  } catch (error) {
+    notify(`전체 이미지 재시도를 실행하지 못했습니다: ${error.message}`, 'danger');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+document.querySelector('#retry-all-images')?.addEventListener('click', (event) => {
+  retryAllFailedImages(event.currentTarget);
+});
+
 async function showReadableDetail(jobId, button) {
   const card = jobList?.querySelector(`[data-job="${jobId}"]`);
   const target = card?.querySelector(`[data-details-for="${jobId}"]`);

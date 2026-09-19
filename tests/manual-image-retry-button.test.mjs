@@ -67,3 +67,27 @@ test('the click handler routes retry-images to retryJobImages', () => {
   assert.match(workCards, /\['detail', 'retry-readable', 'preview-readable', 'retry-images'\]/);
   assert.match(workCards, /if \(action === 'retry-images'\) return retryJobImages\(jobId, button\)/);
 });
+
+// A KIE-budget backlog can span dozens of ready jobs at once (see the production diagnostics
+// that found 66 failed images across 42 jobs after retry budgets ran out with nothing
+// auto-retrying) -- clicking "이미지 재시도" per job one at a time doesn't scale, so a queue-level
+// bulk button reuses the exact same reset-then-generate sequence per job instead of a new,
+// unproven bulk code path.
+test('the queue has a bulk "전체 이미지 재시도" button wired to a confirm-gated retryAllFailedImages', () => {
+  const start = workCards.indexOf('async function retryAllFailedImages');
+  const end = workCards.indexOf('async function showReadableDetail');
+  assert.ok(start >= 0 && end > start);
+  const source = workCards.slice(start, end);
+  assert.match(source, /window\.confirm\(/);
+  assert.match(source, /adminApi\('\/api\/jobs\?status=ready&limit=100'\)/);
+  assert.match(source, /adminApi\(`\/api\/jobs\/\$\{job\.id\}\/images`\)/);
+  assert.match(source, /status === 'failed'/);
+  assert.match(source, /if \(failedImageIds\.length === 0\) continue/);
+  assert.match(source, /adminApi\('\/api\/operations\/images\/reset-failed', \{/);
+  assert.match(source, /adminApi\(`\/api\/jobs\/\$\{job\.id\}\/images\/generate`, \{/);
+  assert.match(source, /retryFailed: true/);
+  const resetIndex = source.indexOf('reset-failed');
+  const generateIndex = source.indexOf('/images/generate');
+  assert.ok(resetIndex >= 0 && generateIndex > resetIndex, 'reset-failed must run before the generate call');
+  assert.match(workCards, /document\.querySelector\('#retry-all-images'\)\?\.addEventListener\('click'/);
+});
