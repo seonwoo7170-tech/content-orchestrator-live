@@ -159,6 +159,50 @@ jobs:
           }
           NODE
 
+      - name: Check why "today done" stays at zero -- compare completed-job status vs ready-job disappearance
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${String(j.error||'unknown').slice(0,150)}`);
+            return j;
+          }
+          function kstDateKey(value){
+            const raw=String(value||'').trim(); if(!raw) return '';
+            const normalized=/(?:Z|[+-]\d\d:\d\d)$/i.test(raw)?raw:`${raw.replace(' ','T')}Z`;
+            const date=new Date(normalized); if(Number.isNaN(date.getTime())) return '';
+            return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
+          }
+          const nowKst=kstDateKey(new Date().toISOString());
+          const completedResponse=await get('/api/jobs?status=completed&limit=100');
+          const completedJobs=Array.isArray(completedResponse.jobs)?completedResponse.jobs:[];
+          const completedToday=completedJobs.filter((j)=>kstDateKey(j.updated_at||j.created_at)===nowKst);
+          console.log('COMPLETED_JOBS_TOTAL_AND_TODAY',JSON.stringify({
+            nowKst, totalCompletedReturned:completedJobs.length,
+            completedTodayCount:completedToday.length,
+            mostRecentCompletedUpdatedAt:completedJobs.slice(0,5).map((j)=>({id:j.id,updated_at:j.updated_at,mode:j.mode}))
+          }));
+          // Cross-check: pull every non-ready status bucket and count jobs updated today, so we
+          // can see where jobs that recently left "ready" actually landed.
+          const statusesToScan=['completed','needs_review','failed','publishing_new','updating_existing','writing','critic_review','repairing','final_critic','queued'];
+          const buckets={};
+          for(const status of statusesToScan){
+            try{
+              const resp=await get(`/api/jobs?status=${encodeURIComponent(status)}&limit=100`);
+              const jobs=Array.isArray(resp.jobs)?resp.jobs:[];
+              const todayJobs=jobs.filter((j)=>kstDateKey(j.updated_at||j.created_at)===nowKst);
+              buckets[status]={total:jobs.length,updatedToday:todayJobs.length,sample:todayJobs.slice(0,3).map((j)=>({id:j.id,updated_at:j.updated_at}))};
+            }catch(error){ buckets[status]={error:String(error.message||error)}; }
+          }
+          console.log('JOB_STATUS_BUCKETS_TODAY',JSON.stringify(buckets));
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
