@@ -340,6 +340,10 @@ export async function runNewArticlePipeline(env, request, fetchImpl = fetch, hoo
       fetchImpl
     );
     const writtenArticle = stripWriterOwnedImages(validateArticle(writer.article ?? writer));
+    // A TourAPI-grounded writer call carries the attraction's own real photos; keep the
+    // most recent candidate's set so the image stage can use them instead of generating
+    // stand-in scenes (see prepareNewArticleImages in daily-auto-work.js).
+    const attractionImages = Array.isArray(writer.attractionImages) ? writer.attractionImages : null;
 
     const evaluation = await qualityLoop(env, writtenArticle, fetchImpl, hooks, {
       initialCriticStage: candidateAttempt === 1 ? 'initial' : 'regenerated_initial',
@@ -363,7 +367,8 @@ export async function runNewArticlePipeline(env, request, fetchImpl = fetch, hoo
         candidateAttempt,
         candidateRegenerated: candidateAttempt > 1,
         candidateHistory,
-        seoBrief
+        seoBrief,
+        ...(attractionImages ? { attractionImages } : {})
       });
     }
   }

@@ -18,13 +18,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function requireBucket(env, bucketOverride) {
+export function requireBucket(env, bucketOverride) {
   const bucket = bucketOverride || env?.IMAGE_BUCKET;
   if (!bucket || typeof bucket.put !== 'function') throw new Error('IMAGE_BUCKET_NOT_BOUND');
   return bucket;
 }
 
-function publicBaseUrl(env) {
+export function publicBaseUrl(env) {
   const value = String(env?.IMAGE_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
   if (!/^https:\/\//i.test(value)) throw new Error('IMAGE_PUBLIC_BASE_URL_REQUIRED');
   return value;
@@ -41,7 +41,7 @@ function decodeBase64(value) {
   }
 }
 
-function sourceImageMimeType(value) {
+export function sourceImageMimeType(value) {
   const mimeType = String(value || 'image/jpeg').split(';')[0].trim().toLowerCase();
   if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) throw new Error('IMAGE_MIME_TYPE_UNSUPPORTED');
   return mimeType;
@@ -272,7 +272,7 @@ function requestedImageIdSet(options = {}) {
   return ids.size > 0 ? ids : null;
 }
 
-async function storeImageBytes(env, bucket, baseUrl, jobId, image, bytes, mimeType, generated, metadata = {}) {
+export async function storeImageBytes(env, bucket, baseUrl, jobId, image, bytes, mimeType, generated, metadata = {}) {
   const key = imageStorageKey(jobId, image, mimeType);
   await bucket.put(key, bytes, {
     httpMetadata: { contentType: mimeType },
@@ -289,7 +289,7 @@ async function storeImageBytes(env, bucket, baseUrl, jobId, image, bytes, mimeTy
     }
   });
   const url = `${baseUrl}/media/${key}`;
-  await markImageStored(env, image.id, { storageKey: key, publicUrl: url, mimeType });
+  await markImageStored(env, image.id, { storageKey: key, publicUrl: url, mimeType, provider: generated?.provider });
   return { key, url };
 }
 

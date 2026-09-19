@@ -78,6 +78,39 @@ test('new article pipeline stops after initial PASS and does not redundantly re-
   assert.equal(calls[1].body.stage, 'initial');
 });
 
+test('new article pipeline carries the writer\'s attractionImages into the READY result for the image stage to use', async () => {
+  const calls = [];
+  const responses = [
+    { article: article(), attractionImages: ['https://tour.example/a.jpg', 'https://tour.example/b.jpg'] },
+    { status: 'PASS', score: 97, issues: [] }
+  ];
+
+  const result = await runNewArticlePipeline(
+    env,
+    { blogId: 'smileatlas', tourApiContentId: '126508', language: 'en' },
+    makeFetch(responses, calls)
+  );
+
+  assert.equal(result.status, 'READY');
+  assert.deepEqual(result.attractionImages, ['https://tour.example/a.jpg', 'https://tour.example/b.jpg']);
+});
+
+test('new article pipeline never invents an attractionImages field when the writer did not report one', async () => {
+  const calls = [];
+  const responses = [
+    { article: article() },
+    { status: 'PASS', score: 97, issues: [] }
+  ];
+
+  const result = await runNewArticlePipeline(
+    env,
+    { blogId: '11', topic: 'test topic', language: 'en' },
+    makeFetch(responses, calls)
+  );
+
+  assert.equal('attractionImages' in result, false);
+});
+
 test('new article pipeline runs targeted Repair and re-checks Critic after FAIL', async () => {
   const calls = [];
   const original = article('<p>Dense original.</p>');

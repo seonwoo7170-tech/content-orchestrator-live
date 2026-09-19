@@ -183,11 +183,13 @@ export async function markImageStored(env, imageId, meta) {
   const db = requireDb(env);
   const id = normalizeId(imageId, 'IMAGE_ID_INVALID');
   const mimeType = String(meta.mimeType || '').trim();
+  const provider = String(meta.provider || '').trim();
   const result = await db.prepare(
     `UPDATE job_images
      SET status = 'stored', storage_key = ?, public_url = ?, mime_type = CASE WHEN ? <> '' THEN ? ELSE mime_type END,
+         provider = CASE WHEN ? <> '' THEN ? ELSE provider END,
          error = NULL, updated_at = datetime('now') WHERE id = ?`
-  ).bind(String(meta.storageKey || ''), String(meta.publicUrl || ''), mimeType, mimeType, id).run();
+  ).bind(String(meta.storageKey || ''), String(meta.publicUrl || ''), mimeType, mimeType, provider, provider, id).run();
   if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_STATE_WRITE_FAILED');
   await appendImageEvent(env, id, { eventType: 'image_stored', level: 'success', message: `이미지 #${id} R2 저장 완료` });
 }
