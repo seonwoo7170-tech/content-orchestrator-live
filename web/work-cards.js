@@ -305,6 +305,30 @@ async function previewJob(jobId, button) {
   }
 }
 
+function syncRetryImagesButton(card, label) {
+  const actions = card?.querySelector('.job-actions');
+  if (!actions) return;
+  const jobId = Number(card.dataset.job);
+  const existing = actions.querySelector('[data-action="retry-images"]');
+  if (label !== '이미지 확인 필요' || !Number.isInteger(jobId)) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  const retryImages = document.createElement('button');
+  retryImages.type = 'button';
+  retryImages.className = 'button small card-action danger-action';
+  retryImages.dataset.action = 'retry-images';
+  retryImages.dataset.jobId = String(jobId);
+  retryImages.textContent = '이미지 재시도';
+  actions.appendChild(retryImages);
+}
+
+// "이미지 확인 필요" is a derived sub-status of status='ready' (see publicationAwareStatus),
+// only known once the async publication-aware refresh resolves -- never at the raw,
+// synchronous server-rendered label (app.js's statusLabel('ready') = '승인/발행 준비').
+// enhanceCard() runs once per card, before that refresh ever completes, so the button
+// must be (re)synced here, every time this label is actually assigned to the pill.
 function applyCardStatus(card, label, tone = 'active') {
   if (!card) return;
   const pill = card.querySelector('.status-pill');
@@ -317,6 +341,7 @@ function applyCardStatus(card, label, tone = 'active') {
   card.classList.toggle('job-complete', ['완료', '발행 완료', '리페어 완료'].includes(label));
   card.classList.toggle('job-ready', ['작성 완료 · 이미지 대기', '이미지 처리 중', '발행 준비 완료', '예약발행 대기', '발행 확인 중', '업데이트 확인 중'].includes(label));
   card.classList.toggle('job-scheduled-update', label === '업데이트 예약');
+  syncRetryImagesButton(card, label);
 }
 
 function applyPublicationStatus(card) {
@@ -424,16 +449,6 @@ function enhanceCard(card) {
     retry.dataset.jobId = String(jobId);
     retry.textContent = statusText === '실패' ? '다시 시도' : '재작성';
     actions.appendChild(retry);
-  }
-
-  if (statusText === '이미지 확인 필요' && !actions.querySelector('[data-action="retry-images"]')) {
-    const retryImages = document.createElement('button');
-    retryImages.type = 'button';
-    retryImages.className = 'button small card-action danger-action';
-    retryImages.dataset.action = 'retry-images';
-    retryImages.dataset.jobId = String(jobId);
-    retryImages.textContent = '이미지 재시도';
-    actions.appendChild(retryImages);
   }
 
   if (['완료', '발행 완료', '리페어 완료', '승인/발행 준비', '발행 준비', '발행 준비 완료', '예약발행 대기', '발행 확인 중', '업데이트 확인 중', '업데이트 예약', '확인 필요'].includes(statusText) && !actions.querySelector('[data-action="preview-readable"]')) {
