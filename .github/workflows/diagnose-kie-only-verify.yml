@@ -1,0 +1,54 @@
+name: diagnose-kie-only-verify
+
+on:
+  push:
+    branches:
+      - 'claude/github-connection-check-umb3pv'
+    paths:
+      - '.github/workflows/diagnose-kie-only-verify.yml'
+      - '.github/diagnose-kie-only-verify-trigger'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'claude/github-connection-check-umb3pv'
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Reuse KIE-only patch without committing or deploying
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '
+            /node - <<'"'"'NODE'"'"'/ {capture=1; next}
+            capture && /^          NODE$/ {exit}
+            capture {sub(/^          /, ""); print}
+          ' .github/workflows/lock-images-kie-only.yml > /tmp/kie-only-patch.cjs
+          test -s /tmp/kie-only-patch.cjs
+          node /tmp/kie-only-patch.cjs
+
+      - name: Install root dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run root verify and print concise failure diagnostics
+        shell: bash
+        run: |
+          set +e
+          npm run verify > /tmp/verify.log 2>&1
+          rc=$?
+          echo "VERIFY_EXIT_CODE=$rc"
+          echo '--- FAILURE MARKERS ---'
+          grep -nEi '(^|[^a-z])(fail|failed|failure|AssertionError|ERR_ASSERTION|not ok|expected|actual|error:)' /tmp/verify.log | tail -n 160 || true
+          echo '--- VERIFY TAIL ---'
+          tail -n 180 /tmp/verify.log || true
+          exit "$rc"
