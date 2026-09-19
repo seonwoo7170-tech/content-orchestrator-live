@@ -53,6 +53,19 @@ jobs:
           }
           fs.writeFileSync(path, source);
 
+          const integrationPath = 'tests/image-repair-ui-integration.test.mjs';
+          let integration = fs.readFileSync(integrationPath, 'utf8');
+          integration = integration.replace(
+            "test('3-minute watchdog runs leased AI and Puter-first image lanes without fixed serial pacing', async () => {",
+            "test('3-minute watchdog runs leased AI and KIE image lanes with bounded per-article parallelism', async () => {"
+          );
+          integration = integration.replace(
+            "  assert.match(entry, /maxImages:\\s*1/);",
+            "  assert.match(entry, /SERIAL_IMAGE_PARALLEL_MAX,\\s*3,\\s*1,\\s*3/);\n  assert.match(entry, /maxImages:\\s*parallelMax/);\n  assert.doesNotMatch(entry, /maxImages:\\s*1/);"
+          );
+          if (!integration.includes('/maxImages:\\s*parallelMax/')) throw new Error('IMAGE_PARALLEL_TEST_PATCH_FAILED');
+          fs.writeFileSync(integrationPath, integration);
+
           const test = `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n\ntest('serial image lane keeps one global lock but allows three images within one article', () => {\n  const scheduler = fs.readFileSync(new URL('../worker/mcp-entry.js', import.meta.url), 'utf8');\n  const executor = fs.readFileSync(new URL('../worker/lib/image-executor-resilient.js', import.meta.url), 'utf8');\n  assert.match(scheduler, /SERIAL_IMAGE_PARALLEL_MAX, 3, 1, 3/);\n  assert.match(scheduler, /acquireRuntimeLock\\(env, IMAGE_LANE_LOCK_KEY/);\n  assert.match(scheduler, /maxJobs: maxItems, maxImages: parallelMax/);\n  assert.doesNotMatch(scheduler, /maxJobs: maxItems, maxImages: 1/);\n  assert.match(executor, /Promise\\.all\\(images\\.map/);\n  assert.match(executor, /return Math\\.min\\(3, number\\)/);\n});\n`;
           fs.writeFileSync('tests/serial-image-parallelism.test.mjs', test);
           NODE
@@ -74,7 +87,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add worker/mcp-entry.js tests/serial-image-parallelism.test.mjs
+          git add worker/mcp-entry.js tests/image-repair-ui-integration.test.mjs tests/serial-image-parallelism.test.mjs
           if git diff --cached --quiet; then
             echo 'No source changes to commit'
           else
