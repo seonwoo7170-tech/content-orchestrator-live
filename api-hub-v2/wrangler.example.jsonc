@@ -29,7 +29,7 @@
     "GEMINI_CRITIC_MODEL": "gemini-3.5-flash-lite",
     "GEMINI_REPAIR_MODEL": "gemini-3.5-flash-lite",
     "GEMINI_IMAGE_QA_MODEL": "gemini-3.1-flash-lite",
-    "IMAGE_QA_REQUIRED": "true",
+    "IMAGE_QA_REQUIRED": "false",
     "IMAGE_QA_MAX_ATTEMPTS": "3",
     "IMAGE_MODEL": "@cf/black-forest-labs/flux-1-schnell",
     "MODELSCOPE_IMAGE_MODEL": "Tongyi-MAI/Z-Image-Turbo",
