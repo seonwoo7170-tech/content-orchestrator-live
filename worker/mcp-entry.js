@@ -369,6 +369,7 @@ async function runLockedSerialAiWatchdog(env, ctx, eventNow) {
 
 async function runSerialImageWatchdog(env, ctx) {
   const maxItems = positiveBounded(env?.SERIAL_IMAGE_CHAIN_MAX_ITEMS, 8, 1, 8);
+  const parallelMax = positiveBounded(env?.SERIAL_IMAGE_PARALLEL_MAX, 3, 1, 3);
   const leaseTtlSeconds = positiveBounded(env?.SERIAL_IMAGE_LEASE_TTL_SECONDS, 210, 60, 900);
   const startedAt = Date.now();
   const steps = [];
@@ -382,7 +383,7 @@ async function runSerialImageWatchdog(env, ctx) {
       let imageWork = emptyImageWork();
       let imageError = null;
       try {
-        imageWork = await runScheduledImageCompletion(env, { maxJobs: maxItems, maxImages: 1, staleMinutes: 0, executionContext: ctx });
+        imageWork = await runScheduledImageCompletion(env, { maxJobs: maxItems, maxImages: parallelMax, staleMinutes: 0, executionContext: ctx });
       } catch (error) {
         imageError = safeScheduledError(error);
         imageWork = emptyImageWork(imageError);
