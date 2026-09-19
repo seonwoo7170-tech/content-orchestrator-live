@@ -1,0 +1,258 @@
+name: lock-images-kie-only
+
+on:
+  push:
+    branches:
+      - 'claude/github-connection-check-umb3pv'
+    paths:
+      - '.github/lock-images-kie-only-trigger'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: content-orchestrator-production
+  cancel-in-progress: false
+
+jobs:
+  patch-verify-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GOOGLE_OAUTH_SETUP_ENABLED: 'false'
+      GOOGLE_OAUTH_SCOPE_UPGRADE_ENABLED: 'false'
+      BLOGGER_WRITES_ENABLED: 'true'
+      BLOGGER_WRITE_MODE: managed_allowlist
+      BLOGGER_WRITE_ALLOWED_BLOG_IDS: 2028653002689012296,3842750331568707733,5540565797560833468,7741529904469657049,6470344354760178454,359287489505251041,286230575079975521
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'claude/github-connection-check-umb3pv'
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Patch production image routing to KIE only
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const fail = (code) => { throw new Error(code); };
+          const replaceOnce = (source, find, replacement, code) => {
+            if (!source.includes(find)) fail(code);
+            return source.replace(find, replacement);
+          };
+          const replaceRegex = (source, pattern, replacement, code) => {
+            if (!pattern.test(source)) fail(code);
+            pattern.lastIndex = 0;
+            return source.replace(pattern, replacement);
+          };
+
+          // 1) Production config: replace the obsolete ModelScope switch with an explicit
+          // KIE-only mode without increasing the Worker text-variable count.
+          {
+            const path = 'wrangler.example.jsonc';
+            let s = fs.readFileSync(path, 'utf8');
+            if (!s.includes('"IMAGE_PROVIDER_MODE": "kie"')) {
+              s = replaceOnce(s, '"MODELSCOPE_IMAGE_ENABLED": "true"', '"IMAGE_PROVIDER_MODE": "kie"', 'ROOT_KIE_MODE_ANCHOR_MISSING');
+            }
+            fs.writeFileSync(path, s);
+          }
+
+          // 2) Base executor: stale auto/cloudflare/puter/modelscope config values are
+          // accepted for compatibility but always normalize to KIE in production code.
+          {
+            const path = 'worker/lib/image-executor.js';
+            let s = fs.readFileSync(path, 'utf8');
+            s = replaceRegex(s,
+              /export function imageProviderMode\(env = \{\}\) \{[\s\S]*?\n\}\n\nexport function imageProviderSequence\(providerMode = 'auto'\) \{[\s\S]*?\n\}/,
+              `export function imageProviderMode(env = {}) {\n  const explicit = String(env?.IMAGE_PROVIDER_MODE || '').trim().toLowerCase();\n  if (explicit && !IMAGE_PROVIDER_MODES.has(explicit)) throw new Error('IMAGE_PROVIDER_MODE_INVALID');\n  return 'kie';\n}\n\nexport function imageProviderSequence(providerMode = 'kie') {\n  const mode = String(providerMode || 'kie').trim().toLowerCase();\n  if (!IMAGE_PROVIDER_MODES.has(mode)) throw new Error('IMAGE_PROVIDER_MODE_INVALID');\n  return ['kie'];\n}`,
+              'BASE_PROVIDER_MODE_BLOCK_MISSING');
+            s = s.replace(/\n  const existingProvider = String\(image\?\.provider \|\| ''\)\.trim\(\)\.toLowerCase\(\);\n  const existingTaskId = String\(image\?\.provider_task_id \|\| ''\)\.trim\(\);\n  if \(providerMode === 'auto' && existingTaskId\) \{[\s\S]*?\n  \}\n  const pacingMs = imageStagePacingMs\(env\);/, '\n  const pacingMs = imageStagePacingMs(env);');
+            fs.writeFileSync(path, s);
+          }
+
+          // 3) Durable store helper: unresolved legacy-provider rows are converted to a
+          // fresh KIE slot. Already generated/stored/attached images are never touched.
+          {
+            const path = 'worker/lib/image-store.js';
+            let s = fs.readFileSync(path, 'utf8');
+            if (!s.includes('export async function resetLegacyImageProviderForKie')) {
+              const anchor = 'export async function resetFailedImageForRetry(env, imageId) {';
+              const helper = `export async function resetLegacyImageProviderForKie(env, imageId) {\n  const db = requireDb(env);\n  const id = normalizeId(imageId, 'IMAGE_ID_INVALID');\n  const result = await db.prepare(\n    \`UPDATE job_images\n        SET status = 'planned', provider = 'kie-ai', model = NULL, provider_task_id = NULL, provider_status = NULL,\n            provider_attempt_count = 0, hook_baked = 0, provider_error_code = NULL, provider_error_message = NULL,\n            error = NULL, provider_checked_at = NULL, updated_at = datetime('now')\n      WHERE id = ?\n        AND status IN ('planned', 'failed')\n        AND LOWER(COALESCE(provider, '')) NOT IN ('', 'kie', 'kie-ai')\`\n  ).bind(id).run();\n  if (Number(result?.meta?.changes ?? 0) !== 1) throw new Error('IMAGE_LEGACY_PROVIDER_NOT_RESETTABLE');\n  await appendImageEvent(env, id, {\n    eventType: 'image_provider_migration', level: 'info',\n    message: \`이미지 #\${id} 레거시 공급자 중단 · KIE 전용 슬롯으로 전환\`,\n    meta: { provider: 'kie-ai', policy: 'kie-only' }\n  });\n  return { id, provider: 'kie-ai', reset: true };\n}\n\n`;
+              if (!s.includes(anchor)) fail('LEGACY_RESET_INSERT_ANCHOR_MISSING');
+              s = s.replace(anchor, helper + anchor);
+            }
+            fs.writeFileSync(path, s);
+          }
+
+          // 4) Resilient executor: all unresolved work routes to KIE. Non-KIE durable
+          // tasks are abandoned safely before KIE starts, while paid KIE checkpoints and
+          // ambiguous paid submissions keep their existing credit-safety guards.
+          {
+            const path = 'worker/lib/image-executor-resilient.js';
+            let s = fs.readFileSync(path, 'utf8');
+            s = replaceOnce(
+              s,
+              "import { listJobImages, markImageFailed, markImageProviderRetry } from './image-store.js';",
+              "import { listJobImages, markImageFailed, markImageProviderRetry, resetLegacyImageProviderForKie } from './image-store.js';",
+              'RESILIENT_IMPORT_ANCHOR_MISSING'
+            );
+            s = replaceRegex(s,
+              /function asyncAttemptCeiling\(env = \{\}\) \{[\s\S]*?\n\}/,
+              `function asyncAttemptCeiling(env = {}) {\n  return kieGenerationRetryMax(env);\n}`,
+              'KIE_RETRY_CEILING_BLOCK_MISSING');
+            s = replaceRegex(s,
+              /export function scheduledProviderModeForImage\(image = \{\}, env = \{\}\) \{[\s\S]*?\n\}\n\nfunction isFatalKieError/,
+              `export function scheduledProviderModeForImage(image = {}, env = {}) {\n  if (isSuccessfulPaidImageCheckpoint(image)) return 'paid-success-checkpoint';\n  if (isAmbiguousKieSubmission(image)) return 'kie-ambiguous-blocked';\n  return 'kie';\n}\n\nfunction isFatalKieError`,
+              'SCHEDULED_PROVIDER_BLOCK_MISSING');
+            s = replaceOnce(
+              s,
+              `async function runOneImage(env, jobId, image, options = {}) {\n  const providerMode = scheduledProviderModeForImage(image, env);`,
+              `async function runOneImage(env, jobId, image, options = {}) {\n  const legacyProvider = normalizedProvider(image);\n  if (legacyProvider && !['kie', 'kie-ai'].includes(legacyProvider)) {\n    await resetLegacyImageProviderForKie(env, image.id);\n    image = await refreshedImage(env, jobId, image.id) || image;\n  }\n  const providerMode = scheduledProviderModeForImage(image, env);`,
+              'RUN_ONE_IMAGE_ANCHOR_MISSING');
+            s = s.replace(/\n  \/\/ These three only ever fire for a legacy Puter\/ModelScope\/Cloudflare task[\s\S]*?\n  if \(providerMode === 'kie' && firstOutcome\?\.status === 'pending' && staleKieBeforePoll\) \{/, `\n  if (providerMode === 'kie' && firstOutcome?.status === 'pending' && staleKieBeforePoll) {`);
+            s = s.replace(/\/\*\*[\s\S]*?Scheduled publishing policy:[\s\S]*?\*\//, `/**\n * Production image policy:\n * - KIE is the only image provider for new, retry, recovery, and legacy-unresolved work;\n * - legacy non-KIE tasks are reset to a fresh KIE slot before provider execution;\n * - successful KIE checkpoints are never regenerated;\n * - ambiguous KIE submissions remain blocked to prevent duplicate paid charges;\n * - up to three images for the same post may run concurrently;\n * - local fallback is disabled by the production caller.\n */`);
+            fs.writeFileSync(path, s);
+          }
+
+          // 5) Future normal main-Worker deploys must enforce the same KIE-only gate.
+          {
+            const path = '.github/workflows/deploy-cloudflare.yml';
+            let s = fs.readFileSync(path, 'utf8');
+            if (s.includes('\"MODELSCOPE_IMAGE_ENABLED\": \"true\"')) {
+              s = s.replace('\"MODELSCOPE_IMAGE_ENABLED\": \"true\"', '\"IMAGE_PROVIDER_MODE\": \"kie\"');
+            }
+            fs.writeFileSync(path, s);
+          }
+
+          // 6) Root regression tests updated to make KIE-only routing a permanent invariant.
+          fs.writeFileSync('tests/image-provider-mode.test.mjs', `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { imageProviderMode, imageProviderSequence, imageStagePacingMs } from '../worker/lib/image-executor.js';\nimport { modelScopeAlreadyAttempted, orderedCandidates, scheduledProviderModeForImage } from '../worker/lib/image-executor-resilient.js';\n\ntest('every recognized image provider mode normalizes to KIE', () => {\n  for (const mode of ['', 'auto', 'puter', 'cloudflare', 'modelscope', 'kie']) {\n    const env = mode ? { IMAGE_PROVIDER_MODE: mode } : {};\n    assert.equal(imageProviderMode(env), 'kie');\n  }\n  assert.throws(() => imageProviderMode({ IMAGE_PROVIDER_MODE: 'unknown' }), /IMAGE_PROVIDER_MODE_INVALID/);\n});\n\ntest('every recognized provider sequence is KIE only', () => {\n  for (const mode of ['auto', 'puter', 'cloudflare', 'modelscope', 'kie']) {\n    assert.deepEqual(imageProviderSequence(mode), ['kie']);\n  }\n});\n\ntest('scheduled routing sends fresh and legacy unresolved tasks to KIE only', () => {\n  const env = { IMAGE_PROVIDER_MODE: 'cloudflare', MODELSCOPE_IMAGE_ENABLED: 'true' };\n  assert.equal(scheduledProviderModeForImage({ provider_attempt_count: 0 }, env), 'kie');\n  assert.equal(scheduledProviderModeForImage({ provider: 'puter', provider_task_id: 'old-puter', provider_status: 'waiting' }, env), 'kie');\n  assert.equal(scheduledProviderModeForImage({ provider: 'modelscope', provider_task_id: 'old-ms', provider_status: 'generating' }, env), 'kie');\n  assert.equal(scheduledProviderModeForImage({ provider: 'cloudflare', provider_status: 'retrying' }, env), 'kie');\n  assert.equal(scheduledProviderModeForImage({ provider: 'kie-ai', provider_task_id: 'paid-kie', provider_status: 'generating' }, env), 'kie');\n});\n\ntest('paid KIE safety checkpoints keep their special no-duplicate states', () => {\n  assert.equal(scheduledProviderModeForImage({ provider: 'kie-ai', status: 'stored', provider_status: 'success' }, {}), 'paid-success-checkpoint');\n  assert.equal(scheduledProviderModeForImage({ provider: 'kie-ai', provider_task_id: null, provider_attempt_count: 1, provider_error_code: 'API_HUB_TIMEOUT' }, {}), 'kie-ambiguous-blocked');\n  assert.equal(modelScopeAlreadyAttempted({ provider: 'modelscope', provider_attempt_count: 4 }), true);\n});\n\ntest('scheduled retries rotate to the oldest waiting image instead of starving later positions', () => {\n  const rows = [\n    { id: 6076, status: 'planned', provider_attempt_count: 5, provider_checked_at: '2026-09-10 16:57:53' },\n    { id: 6077, status: 'planned', provider_attempt_count: 1, provider_checked_at: '2026-09-10 15:58:54' }\n  ];\n  assert.deepEqual(orderedCandidates(rows).map((row) => row.id), [6077, 6076]);\n});\n\ntest('image pacing remains bounded when configured', () => {\n  assert.equal(imageStagePacingMs({}), 0);\n  assert.equal(imageStagePacingMs({ IMAGE_STAGE_PACING_MS: '4000' }), 4000);\n  assert.equal(imageStagePacingMs({ IMAGE_STAGE_PACING_MS: '1000' }), 3000);\n  assert.equal(imageStagePacingMs({ IMAGE_STAGE_PACING_MS: '9000' }), 5000);\n});\n`);
+
+          {
+            const path = 'tests/image-production-config.test.mjs';
+            let s = fs.readFileSync(path, 'utf8');
+            s = s.replace("assert.equal(config.vars.IMAGE_PROVIDER_MODE, undefined);", "assert.equal(config.vars.IMAGE_PROVIDER_MODE, 'kie');");
+            s = s.replace("assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, 'true');", "assert.equal(config.vars.MODELSCOPE_IMAGE_ENABLED, undefined);");
+            s = s.replace(/  \/\/ Every fresh image goes straight to KIE now;[\s\S]*?  assert\.match\(resilientImageExecutor, \/isSuccessfulPaidImageCheckpoint\/\);/, `  // New, retry, recovery, and unresolved legacy image work are KIE-only.\n  assert.match(resilientImageExecutor, /resetLegacyImageProviderForKie/);\n  assert.doesNotMatch(resilientImageExecutor, /return provider === 'modelscope'/);\n  assert.doesNotMatch(resilientImageExecutor, /return 'cloudflare';/);\n  assert.match(resilientImageExecutor, /isSuccessfulPaidImageCheckpoint/);`);
+            fs.writeFileSync(path, s);
+          }
+
+          fs.writeFileSync('tests/kie-only-image-routing.test.mjs', `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { DatabaseSync } from 'node:sqlite';\nimport { readFileSync } from 'node:fs';\nimport { resetLegacyImageProviderForKie } from '../worker/lib/image-store.js';\n\nfunction fixture(t) {\n  const db = new DatabaseSync(':memory:');\n  t.after(() => db.close());\n  db.exec('CREATE TABLE jobs (id INTEGER PRIMARY KEY); INSERT INTO jobs VALUES (1);');\n  for (const file of ['0004_phase2_images.sql','0026_kie_async_image_tasks.sql','0027_kie_image_attempt_count.sql','0028_puter_image_attempted.sql','0033_thumbnail_hook_baked.sql']) db.exec(readFileSync(new URL(\`../worker/migrations/\${file}\`, import.meta.url), 'utf8'));\n  db.exec("ALTER TABLE job_images ADD COLUMN hook_text TEXT; INSERT INTO job_images (job_id, role, position, status, prompt, alt_text, provider, provider_task_id, provider_status, provider_attempt_count) VALUES (1, 'body', 1, 'planned', 'repair scene', 'repair', 'modelscope', 'legacy-task', 'generating', 4);");\n  const env={ORCHESTRATOR_DB:{prepare(sql){return{bind(...args){const st=db.prepare(sql);return{async all(){return{results:st.all(...args)}},async run(){return{meta:{changes:Number(st.run(...args).changes)}}}}}}}}};\n  return { env, db, row:()=>db.prepare('SELECT * FROM job_images').get() };\n}\n\ntest('unresolved legacy provider task is reset into a fresh KIE slot', async (t) => {\n  const {env,row}=fixture(t);\n  const result=await resetLegacyImageProviderForKie(env,row().id);\n  assert.equal(result.provider,'kie-ai');\n  const r=row();\n  assert.equal(r.status,'planned');\n  assert.equal(r.provider,'kie-ai');\n  assert.equal(r.provider_task_id,null);\n  assert.equal(r.provider_attempt_count,0);\n  assert.equal(r.provider_error_code,null);\n});\n\ntest('completed legacy image is preserved and cannot be reset by KIE-only migration', async (t) => {\n  const {env,db,row}=fixture(t);\n  db.exec("UPDATE job_images SET status='stored', public_url='https://example.test/a.png'");\n  await assert.rejects(() => resetLegacyImageProviderForKie(env,row().id), /IMAGE_LEGACY_PROVIDER_NOT_RESETTABLE/);\n  assert.equal(row().status,'stored');\n  assert.equal(row().public_url,'https://example.test/a.png');\n});\n`);
+
+          // 7) API Hub production HTTP image route is hard-locked to KIE regardless of
+          // caller payload; health now reports the same production policy.
+          {
+            const path = 'api-hub-v2/src/index.js';
+            let s = fs.readFileSync(path, 'utf8');
+            s = replaceRegex(s,
+              /const imageProviderOrder = \[[\s\S]*?\];/,
+              `const imageProviderOrder = kieConfigured ? ['kie-ai'] : [];`,
+              'API_HUB_PROVIDER_ORDER_BLOCK_MISSING');
+            s = s.replace('imageConfigured: Boolean(env.AI) || kieConfigured || modelScopeIsConfigured,', 'imageConfigured: kieConfigured,');
+            s = s.replace("imageModel: env.IMAGE_MODEL || '@cf/black-forest-labs/flux-1-schnell',", "imageModel: env.KIE_IMAGE_MODEL || 'z-image',");
+            const oldRoute = "if (url.pathname === '/api/hub/image/generate') return json(await generateImage(env, await readJson(request)));";
+            const newRoute = "if (url.pathname === '/api/hub/image/generate') { const input = await readJson(request); return json(await generateImage(env, { ...input, providerMode: 'kie' })); }";
+            if (!s.includes(newRoute)) s = replaceOnce(s, oldRoute, newRoute, 'API_HUB_IMAGE_ROUTE_ANCHOR_MISSING');
+            fs.writeFileSync(path, s);
+          }
+
+          fs.writeFileSync('api-hub-v2/tests/image-http-kie-only.test.mjs', `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n\ntest('production HTTP image route overrides every caller provider mode with KIE', () => {\n  const source=fs.readFileSync(new URL('../src/index.js', import.meta.url),'utf8');\n  assert.match(source, /\/api\/hub\/image\/generate[\\s\\S]*providerMode: 'kie'/);\n  assert.match(source, /const imageProviderOrder = kieConfigured \? \['kie-ai'\] : \[\]/);\n  assert.match(source, /imageConfigured: kieConfigured/);\n  assert.match(source, /imageModel: env\\.KIE_IMAGE_MODEL \|\| 'z-image'/);\n});\n`);
+          NODE
+
+      - name: Static KIE-only guards
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs=require('node:fs');
+          const config=JSON.parse(fs.readFileSync('wrangler.example.jsonc','utf8'));
+          if(config.vars.IMAGE_PROVIDER_MODE!=='kie') throw new Error('ROOT_IMAGE_PROVIDER_MODE_NOT_KIE');
+          if(config.vars.MODELSCOPE_IMAGE_ENABLED!==undefined) throw new Error('MODELSCOPE_RUNTIME_SWITCH_STILL_PRESENT');
+          const base=fs.readFileSync('worker/lib/image-executor.js','utf8');
+          if(!/return \['kie'\];/.test(base)) throw new Error('BASE_PROVIDER_SEQUENCE_NOT_KIE_ONLY');
+          const resilient=fs.readFileSync('worker/lib/image-executor-resilient.js','utf8');
+          if(!resilient.includes('resetLegacyImageProviderForKie')) throw new Error('LEGACY_PROVIDER_MIGRATION_MISSING');
+          const hub=fs.readFileSync('api-hub-v2/src/index.js','utf8');
+          if(!hub.includes("{ ...input, providerMode: 'kie' }")) throw new Error('API_HUB_HTTP_KIE_OVERRIDE_MISSING');
+          NODE
+
+      - name: Install root dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify root source
+        run: npm run verify
+
+      - name: Install API Hub dependencies
+        run: npm --prefix api-hub-v2 install --no-audit --no-fund
+
+      - name: Verify API Hub
+        run: npm --prefix api-hub-v2 test
+
+      - name: Commit verified KIE-only source
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add wrangler.example.jsonc worker/lib/image-executor.js worker/lib/image-executor-resilient.js worker/lib/image-store.js .github/workflows/deploy-cloudflare.yml tests/image-provider-mode.test.mjs tests/image-production-config.test.mjs tests/kie-only-image-routing.test.mjs api-hub-v2/src/index.js api-hub-v2/tests/image-http-kie-only.test.mjs
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+          else
+            git commit -m 'Lock production image generation to KIE only'
+            git push origin HEAD:'claude/github-connection-check-umb3pv'
+          fi
+
+      - name: Validate Cloudflare credentials
+        shell: bash
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+
+      - name: Resolve production D1
+        shell: bash
+        run: |
+          DB_ID="$(npx --yes wrangler@latest d1 list --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const db=rows.find(x=>x.name==='content-orchestrator');if(db?.uuid)process.stdout.write(db.uuid);});")"
+          test -n "$DB_ID" || { echo 'Could not resolve production D1 database'; exit 1; }
+          echo "D1_DATABASE_ID=$DB_ID" >> "$GITHUB_ENV"
+
+      - name: Render and deploy main Worker
+        shell: bash
+        run: |
+          node scripts/render-wrangler.mjs
+          grep -q '"IMAGE_PROVIDER_MODE": "kie"' wrangler.jsonc
+          node scripts/ensure-image-schema.mjs
+          npx --yes wrangler@latest deploy --config wrangler.jsonc
+
+      - name: Main Worker health read-back
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base='https://content-orchestrator.smileseon.workers.dev'; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          for(let i=1;i<=20;i++){ const r=await fetch(`${base}/health?kieOnly=${Date.now()}_${i}`,{cache:'no-store'}); const h=await r.json().catch(()=>({})); if(r.ok&&h.systemPaused!==true&&h.bloggerWritesEnabled===true){console.log('MAIN_WORKER_HEALTH_OK');process.exit(0)} await sleep(1000); }
+          throw new Error('MAIN_WORKER_HEALTH_FAILED');
+          NODE
+
+      - name: Validate API Hub critical runtime secrets
+        shell: bash
+        run: |
+          SECRET_JSON="$(npx --yes wrangler@latest secret list --name api-hub-v2 --format json)"
+          printf '%s' "$SECRET_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const rows=JSON.parse(s);const names=new Set(rows.map(x=>x.name));for(const n of ['ORCHESTRATOR_API_KEY','GEMINI_API_KEY','KIE_API_KEY','TAVILY_API_KEY'])if(!names.has(n))throw new Error('MISSING_RUNTIME_SECRET:'+n);console.log('API_HUB_SECRETS_OK');});"
+
+      - name: Render and deploy API Hub
+        shell: bash
+        run: |
+          node api-hub-v2/scripts/render-wrangler.mjs
+          npx --yes wrangler@latest deploy --config api-hub-v2/wrangler.jsonc
+
+      - name: API Hub KIE-only health read-back
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base='https://api-hub-v2.smileseon.workers.dev'; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          for(let i=1;i<=20;i++){ const r=await fetch(`${base}/health?kieOnly=${Date.now()}_${i}`,{cache:'no-store'}); const h=await r.json().catch(()=>({})); const ok=r.ok&&h.kieImageConfigured===true&&h.imageConfigured===true&&h.imageProvider==='kie-ai'&&JSON.stringify(h.imageProviderOrder)===JSON.stringify(['kie-ai']); if(ok){console.log(`API_HUB_KIE_ONLY_OK provider=${h.imageProvider} order=${h.imageProviderOrder.join(',')}`);process.exit(0)} await sleep(1000); }
+          throw new Error('API_HUB_KIE_ONLY_HEALTH_FAILED');
+          NODE
