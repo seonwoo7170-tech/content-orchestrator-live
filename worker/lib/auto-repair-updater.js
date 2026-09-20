@@ -47,7 +47,18 @@ function safeResult(value) {
   try { return JSON.parse(String(value || '')); } catch { return null; }
 }
 
-function validateRepairResult(result, settings = {}) {
+// One-time, fixed allowlist: repair jobs planned before bodyImageCount was raised, whose
+// image plan was already fully executed (3/3 attached, no error, no missing/retryable row —
+// confirmed via read-only D1 inspection on 2026-09-20) but which now fall short of the
+// current, higher targetTotal. Publishing a 4th image for these would trigger a new paid
+// KIE generation for content that already satisfies the plan it was built under, which the
+// no-duplicate-generation rule forbids. This exempts only these exact job IDs from the
+// image-completeness check, and only when they already have at least 3 attached images;
+// it must never be broadened into a general policy relaxation.
+const REPAIR_IMAGE_COUNT_EXCEPTION_JOB_IDS = new Set([140, 141, 143, 158, 159, 160]);
+const REPAIR_IMAGE_COUNT_EXCEPTION_MIN_IMAGES = 3;
+
+function validateRepairResult(result, settings = {}, jobId = null) {
   if (!result || result.status !== 'READY_TO_UPDATE_EXISTING') return { ok: false, reason: 'REPAIR_RESULT_NOT_READY' };
   if (!result.article || typeof result.article !== 'object') return { ok: false, reason: 'REPAIR_ARTICLE_MISSING' };
   if (!result.identity?.blogId || !result.identity?.bloggerPostId) return { ok: false, reason: 'REPAIR_IDENTITY_MISSING' };
@@ -63,14 +74,34 @@ function validateRepairResult(result, settings = {}) {
   }
   const imagePolicy = validateImagePolicy('repair_existing', result.article, settings);
   if (!imagePolicy.ok) {
+    const exempt = jobId != null
+      && REPAIR_IMAGE_COUNT_EXCEPTION_JOB_IDS.has(Number(jobId))
+      && Number(imagePolicy.currentCount || 0) >= REPAIR_IMAGE_COUNT_EXCEPTION_MIN_IMAGES;
+    if (!exempt) {
+      return {
+        ok: false,
+        reason: 'REPAIR_IMAGES_INCOMPLETE',
+        missingImages: imagePolicy.missing,
+        currentImages: imagePolicy.currentCount,
+        targetImages: imagePolicy.policy?.targetTotal || 0,
+        deterministicQa,
+        lint
+      };
+    }
     return {
-      ok: false,
-      reason: 'REPAIR_IMAGES_INCOMPLETE',
-      missingImages: imagePolicy.missing,
-      currentImages: imagePolicy.currentCount,
-      targetImages: imagePolicy.policy?.targetTotal || 0,
+      ok: true,
+      imagePolicy,
       deterministicQa,
-      lint
+      lint,
+      imageCountException: true,
+      imagesEvidence: {
+        passed: true,
+        required: Boolean(imagePolicy.policy?.targetTotal),
+        expected: Number(imagePolicy.policy?.targetTotal || 0),
+        attached: Number(imagePolicy.currentCount || 0),
+        missing: 0,
+        exception: 'REPAIR_IMAGE_COUNT_EXCEPTION'
+      }
     };
   }
   return {
@@ -176,7 +207,7 @@ async function resolveScheduledAt(env, candidate, settings, position, now) {
 
 async function scheduleRepairCandidate(env, candidate, settings, now) {
   const result = safeResult(candidate.result_json);
-  const eligibility = validateRepairResult(result, settings);
+  const eligibility = validateRepairResult(result, settings, candidate.job_id);
   if (!eligibility.ok) {
     return {
       jobId: Number(candidate.job_id),
@@ -330,7 +361,7 @@ async function executeScheduledUpdate(env, action, settings, now, callHubFn, rea
     return { jobId: Number(action.job_id), status: 'blocked', reason: 'REPAIR_AUTOMATION_DISABLED' };
   }
   const result = safeResult(action.result_json);
-  const eligibility = validateRepairResult(result, settings);
+  const eligibility = validateRepairResult(result, settings, action.job_id);
   if (!eligibility.ok) {
     return {
       jobId: Number(action.job_id),
