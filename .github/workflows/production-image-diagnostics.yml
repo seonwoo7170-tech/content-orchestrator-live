@@ -624,6 +624,24 @@ jobs:
           console.log('REPAIR_PUBLISH_TICK_AFTER_RAISE',JSON.stringify(repairBody));
           NODE
 
+      - name: Inspect the actual image rows for the 6 REPAIR_IMAGES_INCOMPLETE jobs before touching anything (read-only)
+        shell: bash
+        env:
+          IMAGE_CHECK_JOB_IDS: '141,140,143,160,159,158'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          const jobIds=String(process.env.IMAGE_CHECK_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean);
+          for(const jobId of jobIds){
+            const r=await fetch(`${base}/api/jobs/${jobId}/images`,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            console.log('JOB_IMAGES',jobId,JSON.stringify((j.images||[]).map((i)=>({id:i.id,role:i.role,position:i.position,status:i.status,provider:i.provider,model:i.model,error:i.error,providerAttemptCount:i.provider_attempt_count}))));
+          }
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
