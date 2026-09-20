@@ -6,3 +6,4 @@ deploy work queue blog-name badge 2026-09-20
 deploy fix Smile Atlas blog id typo (18->19 digits) for TourAPI/Klook real-photo fallback 2026-09-20
 deploy safe publish-retry for API_HUB_403 held jobs (preserve READY result + images) 2026-09-20
 deploy auto-ground daily topics in real TourAPI attractions for connected blogs 2026-09-20
+deploy new_article image-count exception + visible publish-block reasons 2026-09-20
