@@ -30,6 +30,20 @@ function hasContinuationResult(row) {
   return Boolean(result?.article && typeof result.article === 'object');
 }
 
+// A job can fail with API_HUB_403 (BLOGGER_WRITE_TARGET_NOT_ALLOWED) purely because its blog
+// was missing from BLOGGER_WRITE_ALLOWED_BLOG_IDS at the time -- a config problem, not a
+// content problem. Its writer/critic/image work already finished (result.status === 'READY'),
+// so wiping result_json and deleting job_images the way a normal manual retry does would throw
+// away completed article text and force brand-new paid KIE image generations for content that
+// was never actually the problem (confirmed on Smile Atlas jobs 195/190/185/168, 2026-09-20:
+// all 4 already had every image attached with no error). Once the allowlist is fixed, resetting
+// the job straight back to 'ready' lets the normal auto-publish cron just retry the write.
+function hasPublishReadyResult(row) {
+  if (String(row?.last_error_code || row?.error || '').toUpperCase() !== 'API_HUB_403') return false;
+  const result = parseResult(row?.result_json);
+  return Boolean(result?.article && typeof result.article === 'object' && result?.status === 'READY');
+}
+
 function executionInitialStatus(row) {
   if (String(row?.last_error_code || '').toUpperCase() !== 'CRITIC_REVIEW_CONTINUE') return 'writing';
   const result = parseResult(row?.result_json);
@@ -260,6 +274,8 @@ export async function resetStoredJobForManualRetry(env, id) {
   }
 
   const preserveContinuation = hasContinuationResult(row);
+  const preservePublishReady = !preserveContinuation && hasPublishReadyResult(row);
+  const preserveImages = preserveContinuation || preservePublishReady;
   const statements = [];
   if (publication?.status === 'failed') {
     statements.push(db.prepare(
@@ -267,13 +283,14 @@ export async function resetStoredJobForManualRetry(env, id) {
        WHERE job_id = ? AND status = 'failed' AND blogger_post_id IS NULL`
     ).bind(jobId));
   }
-  if (!preserveContinuation) {
+  if (!preserveImages) {
     statements.push(db.prepare('DELETE FROM job_images WHERE job_id = ?').bind(jobId));
   }
 
   const jobStatementIndex = statements.length;
-  statements.push(preserveContinuation
-    ? db.prepare(
+  let jobUpdateStatement;
+  if (preserveContinuation) {
+    jobUpdateStatement = db.prepare(
       `UPDATE jobs
        SET status = 'queued',
            error = NULL,
@@ -285,8 +302,23 @@ export async function resetStoredJobForManualRetry(env, id) {
            last_failure_at = NULL,
            updated_at = datetime('now')
        WHERE id = ? AND archived_at IS NULL AND status IN ('failed', 'needs_review')`
-    ).bind(jobId)
-    : db.prepare(
+    ).bind(jobId);
+  } else if (preservePublishReady) {
+    jobUpdateStatement = db.prepare(
+      `UPDATE jobs
+       SET status = 'ready',
+           error = NULL,
+           retry_count = 0,
+           recovery_state = 'none',
+           next_retry_at = NULL,
+           hold_reason = NULL,
+           last_error_code = NULL,
+           last_failure_at = NULL,
+           updated_at = datetime('now')
+       WHERE id = ? AND archived_at IS NULL AND status IN ('failed', 'needs_review')`
+    ).bind(jobId);
+  } else {
+    jobUpdateStatement = db.prepare(
       `UPDATE jobs
        SET status = 'queued',
            result_json = NULL,
@@ -299,7 +331,9 @@ export async function resetStoredJobForManualRetry(env, id) {
            last_failure_at = NULL,
            updated_at = datetime('now')
        WHERE id = ? AND archived_at IS NULL AND status IN ('failed', 'needs_review')`
-    ).bind(jobId));
+    ).bind(jobId);
+  }
+  statements.push(jobUpdateStatement);
 
   statements.push(db.prepare(
     `UPDATE daily_plan_slots
@@ -321,10 +355,11 @@ export async function resetStoredJobForManualRetry(env, id) {
   return {
     ok: true,
     jobId,
-    status: 'queued',
+    status: preservePublishReady ? 'ready' : 'queued',
     continuation: preserveContinuation,
-    preserveResult: preserveContinuation,
-    preserveImages: preserveContinuation
+    publishReady: preservePublishReady,
+    preserveResult: preserveImages,
+    preserveImages
   };
 }
 

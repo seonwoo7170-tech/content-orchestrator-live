@@ -41,9 +41,10 @@ test('ordinary retry clears stale artifacts but preserves duplicate-publication 
 test('Critic review continuation retry preserves the repaired result and images', () => {
   assert.match(jobStore, /hasContinuationResult/);
   assert.match(jobStore, /last_error_code = 'CRITIC_REVIEW_CONTINUE'/);
-  assert.match(jobStore, /preserveResult: preserveContinuation/);
-  assert.match(jobStore, /preserveImages: preserveContinuation/);
-  assert.match(jobStore, /if \(!preserveContinuation\)/);
+  assert.match(jobStore, /const preserveImages = preserveContinuation \|\| preservePublishReady;/);
+  assert.match(jobStore, /preserveResult: preserveImages,/);
+  assert.match(jobStore, /preserveImages$/m);
+  assert.match(jobStore, /if \(!preserveImages\)/);
   assert.match(phase6, /reset\.preserveImages/);
   assert.match(phase6, /clearedImages: reset\.preserveImages \? 0 : images\.length/);
 });
