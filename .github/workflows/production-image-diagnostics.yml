@@ -545,6 +545,22 @@ jobs:
           }
           NODE
 
+      - name: Check whether auto-publish execution and daily work execution are actually enabled
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const r=await fetch(`${base}/health?flags=${Date.now()}`,{cache:'no-store'});
+          const h=await r.json().catch(()=>({}));
+          console.log('EXECUTION_FLAGS',JSON.stringify({
+            ok:h.ok,
+            autoPublishExecutionEnabled:h.phase2Automation?.autoPublishExecutionEnabled,
+            dailyWorkExecutionEnabled:h.phase2Automation?.dailyWorkExecutionEnabled,
+            bloggerWritesEnabled:h.bloggerWritesEnabled,
+            settingsStore:h.phase2Automation?.settingsStore
+          }));
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
