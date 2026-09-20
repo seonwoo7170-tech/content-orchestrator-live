@@ -825,6 +825,26 @@ jobs:
           }
           NODE
 
+      - name: Fresh check -- have the 4 retried Smile Atlas jobs published yet via the auto-publish cron? (read-only)
+        shell: bash
+        env:
+          SMILE_ATLAS_HELD_JOB_IDS: '195,190,185,168'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          for(const jobId of String(process.env.SMILE_ATLAS_HELD_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            const job=j.job||{};
+            console.log('SMILE_ATLAS_FRESH_STATUS',jobId,JSON.stringify({
+              status:job.status,updated_at:job.updated_at,blogger_post_id:job.blogger_post_id||null,error:job.error||null
+            }));
+          }
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
