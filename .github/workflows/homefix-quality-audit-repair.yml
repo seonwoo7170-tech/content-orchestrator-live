@@ -1,6 +1,13 @@
 name: HomeFix Quality Audit Repair
 
 on:
+  workflow_dispatch:
+    inputs:
+      max_repairs:
+        description: 'Max posts to auto-repair via live Blogger writes (0 = audit-only, no writes at all)'
+        required: false
+        type: string
+        default: '0'
   push:
     paths:
       - '.github/homefix-quality-audit-repair-trigger'
@@ -32,7 +39,7 @@ jobs:
       ORCHESTRATOR_BASE_URL: https://content-orchestrator.smileseon.workers.dev
       EXPECTED_BLOG_NAME: Smile HomeFix
       EXPECTED_BLOG_HOST: www.smileinfo.net
-      MAX_REPAIRS: '2'
+      MAX_REPAIRS: ${{ github.event.inputs.max_repairs || '2' }}
 
     steps:
       - uses: actions/checkout@v4
