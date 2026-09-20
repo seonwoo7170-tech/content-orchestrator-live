@@ -98,7 +98,7 @@ test('a job with no attractionImages behaves exactly as before (KIE handles ever
   assert.equal(rows.length, 0);
 });
 
-const SMILEATLAS_BLOG_ID = '471269968622371580';
+const SMILEATLAS_BLOG_ID = '4712699686222371580';
 
 test('a smileatlas job with no tourApiContentId falls back to Klook city photos when the article names a known city', async (t) => {
   const { env, db } = fixture(t);

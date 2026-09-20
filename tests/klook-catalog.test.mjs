@@ -208,7 +208,7 @@ test('inferKlookCityFromText prefers whichever known city is named first when an
 });
 
 test('smileatlasBlogId defaults to the known smileatlas blog id and can be overridden via env', () => {
-  assert.equal(smileatlasBlogId({}), '471269968622371580');
+  assert.equal(smileatlasBlogId({}), '4712699686222371580');
   assert.equal(smileatlasBlogId({ SMILEATLAS_BLOG_ID: '999' }), '999');
 });
 
