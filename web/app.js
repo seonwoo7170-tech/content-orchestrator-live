@@ -31,6 +31,15 @@ const homeReady = document.querySelector('#home-ready');
 const homeBlogs = document.querySelector('#home-blogs');
 const VIEW_STORAGE = 'content-orchestrator-last-view';
 
+let blogNameById = new Map();
+let lastRenderedJobs = [];
+
+function blogLabelFor(blogId) {
+  const id = String(blogId || '');
+  if (!id) return '-';
+  return blogNameById.get(id) || `Blog ${id}`;
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -164,6 +173,7 @@ function renderQueueSummary(jobs) {
 }
 
 function renderJobs(jobs) {
+  lastRenderedJobs = jobs;
   renderQueueSummary(jobs);
   if (!jobList) return;
   if (!jobs.length) {
@@ -189,8 +199,8 @@ function renderJobs(jobs) {
           <span class="status-pill ${statusTone(job.status)}">${escapeHtml(statusLabel(job.status))}</span>
         </div>
         <h3>${escapeHtml(subject)}</h3>
+        <div class="job-blog-line">${escapeHtml(blogLabelFor(job.blog_id))}</div>
         <div class="job-meta">
-          <span>Blog ${escapeHtml(job.blog_id || '-')}</span>
           ${job.blogger_post_id ? `<span>Post ${escapeHtml(job.blogger_post_id)}</span>` : ''}
           <span>${escapeHtml(formatTime(job.updated_at || job.created_at))}</span>
         </div>
@@ -369,6 +379,9 @@ window.addEventListener('orchestrator:admin-session', async () => {
 window.addEventListener('orchestrator:jobs-changed', loadJobs);
 window.addEventListener('orchestrator:blogs-loaded', (event) => {
   if (homeBlogs) homeBlogs.textContent = String(event.detail?.count ?? '-');
+  const blogs = Array.isArray(event.detail?.blogs) ? event.detail.blogs : [];
+  blogNameById = new Map(blogs.map((blog) => [String(blog.blogId), blog.name || `Blog ${blog.blogId}`]));
+  if (lastRenderedJobs.length) renderJobs(lastRenderedJobs);
 });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
