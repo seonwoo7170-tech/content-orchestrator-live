@@ -823,6 +823,49 @@ jobs:
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
             "SELECT job_id, blog_id, status, blogger_post_id, url, error, updated_at FROM job_publications WHERE job_id IN (195,190,185,168) ORDER BY job_id;"
 
+      - name: Diagnose exactly why the 8 stuck new_article jobs never publish (read-only)
+        shell: bash
+        env:
+          STUCK_NEW_ARTICLE_JOB_IDS: '137,139,149,151,153,154,156,157'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${JSON.stringify(j)}`);
+            return j;
+          }
+          // Mirrors validatePublicationResult()/imageEvidence() in worker/lib/auto-publisher.js so
+          // the real blocking reason is visible instead of being discarded with the tick's outcome.
+          const settings=await get('/api/automation/settings');
+          const expected=1+Number(settings.global?.bodyImageCount||0);
+          console.log('EXPECTED_IMAGE_COUNT',JSON.stringify({bodyImageCount:settings.global?.bodyImageCount,expected}));
+          for(const jobId of String(process.env.STUCK_NEW_ARTICLE_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const [detail,imageResp]=await Promise.all([get(`/api/jobs/${jobId}`), get(`/api/jobs/${jobId}/images`)]);
+            const job=detail.job||{};
+            let result=null; try{result=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            const images=imageResp.images||[];
+            const attached=images.filter((i)=>String(i.status)==='attached');
+            const critic=result?.finalCritic||null;
+            console.log('STUCK_JOB_DIAGNOSIS',jobId,JSON.stringify({
+              blog:job.blog_id,
+              resultStatus:result?.status||null,
+              criticStatus:critic?.status||null,
+              criticScore:critic?.score??null,
+              criticIssues:Array.isArray(critic?.issues)?critic.issues.length:null,
+              imageTotal:images.length,
+              imageAttached:attached.length,
+              thumbnailAttached:attached.some((i)=>i.role==='thumbnail'),
+              imagesPass:attached.some((i)=>i.role==='thumbnail')&&attached.length>=expected,
+              imageStatuses:images.map((i)=>`${i.role}:${i.status}`)
+            }));
+          }
+          NODE
+
       - name: Read-only snapshot of the whole active queue and today's progress
         shell: bash
         run: |
