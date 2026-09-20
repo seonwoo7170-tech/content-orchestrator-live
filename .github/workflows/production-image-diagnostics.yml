@@ -293,18 +293,31 @@ jobs:
             const faqBlocks=[...html.matchAll(/<p[^>]*>\s*Q\.?\s*([\s\S]*?)<\/p>\s*<p[^>]*>\s*A\.?\s*([\s\S]*?)<\/p>/gi)].map((m)=>stripHtml(m[2]).slice(0,120));
             audits.push({
               id:job.id, mode:job.mode, title:String(article.title||'').slice(0,80),
+              bloggerPostId:job.blogger_post_id||null, targetUrl:job.target_url||null,
               wordCount, h2Count, imageCount, faqAnswerSample:faqBlocks.slice(0,2),
               archived_at:job.archived_at
             });
           }
           const thin=audits.filter((a)=>!a.error && a.wordCount<800);
           const noImages=audits.filter((a)=>!a.error && a.imageCount===0);
+          // Group by bloggerPostId to tell "this post was created then later repaired
+          // (one live URL, two job rows -- normal)" apart from "two DIFFERENT live URLs
+          // that ended up with near-identical titles (a real duplicate-content problem)".
+          const byPost={};
+          for(const a of audits){ if(a.error) continue; const key=a.bloggerPostId||`no-post-id:${a.id}`; (byPost[key]=byPost[key]||[]).push({id:a.id,mode:a.mode,title:a.title,wordCount:a.wordCount}); }
+          const postsWithMultipleJobs=Object.entries(byPost).filter(([,rows])=>rows.length>1).map(([postId,rows])=>({bloggerPostId:postId,jobs:rows}));
+          const titleCounts={};
+          for(const a of audits){ if(a.error) continue; titleCounts[a.title]=(titleCounts[a.title]||0)+1; }
+          const duplicateTitles=Object.entries(titleCounts).filter(([,n])=>n>1).map(([title,n])=>({title,count:n}));
           console.log('CONTENT_AUDIT_SUMMARY',JSON.stringify({
             audited:audits.length,
+            distinctBloggerPostIds:Object.keys(byPost).length,
             avgWordCount:Math.round(audits.filter((a)=>!a.error).reduce((s,a)=>s+a.wordCount,0)/Math.max(1,audits.filter((a)=>!a.error).length)),
             thinCount:thin.length,
             noImagesCount:noImages.length,
-            thinSample:thin.slice(0,10).map((a)=>({id:a.id,title:a.title,wordCount:a.wordCount,imageCount:a.imageCount}))
+            thinSample:thin.slice(0,10).map((a)=>({id:a.id,title:a.title,wordCount:a.wordCount,imageCount:a.imageCount})),
+            postsWithMultipleJobs,
+            duplicateTitles
           }));
           console.log('CONTENT_AUDIT_FULL',JSON.stringify(audits));
           NODE
