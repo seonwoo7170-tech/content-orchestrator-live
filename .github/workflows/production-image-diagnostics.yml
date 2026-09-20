@@ -911,4 +911,4 @@ jobs:
           test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
-            "SELECT job_id || ' | ' || status || ' | post=' || COALESCE(blogger_post_id, '-') || ' | at=' || COALESCE(scheduled_time, '-') || ' | err=' || COALESCE(error, '-') AS publish_row FROM job_publications WHERE job_id IN (137,139,149,151,153,154,156,157) ORDER BY job_id;"
+            "SELECT job_id || ' | plan=' || plan_date || ' | ' || status || ' | post=' || COALESCE(blogger_post_id, '-') || ' | at=' || COALESCE(scheduled_time, '-') || ' | n=' || attempts || ' | err=' || COALESCE(error, '-') AS publish_row FROM job_publications WHERE job_id IN (137,139,149,151,153,154,156,157) ORDER BY job_id;"
