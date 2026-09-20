@@ -113,3 +113,54 @@ test('critic uses Workers AI directly when free-ai is not configured, still skip
   assert.equal(result.fallbackUsed, false);
   assert.equal(geminiCalled, false);
 });
+
+// Jobs 165 and 172 died on 2026-09-20 with CRITIC_SCHEMA_INVALID / CRITIC_ISSUE_SCHEMA_INVALID
+// while gpt-oss-120b sat idle: the contract check ran after the provider chain had closed, so
+// the single most common 7B failure -- valid JSON in the wrong shape -- was the one case the
+// fallback could not rescue. Every contract error must now reach Cloudflare.
+test('critic falls back to Workers AI when free-ai returns valid JSON in the wrong shape', async () => {
+  const malformed = [
+    { payload: { verdict: 'ok', score: 100 }, primaryError: 'CRITIC_SCHEMA_INVALID' },
+    { payload: { status: 'PASS', score: 'excellent', issues: [] }, primaryError: 'CRITIC_SCORE_INVALID' },
+    {
+      payload: { status: 'FAIL', score: 70, issues: [{ code: 'VAGUE', severity: 'LOW', location: '', reason: 'r', repairInstruction: 'i' }] },
+      primaryError: 'CRITIC_ISSUE_SCHEMA_INVALID'
+    },
+    { payload: { status: 'FAIL', score: 70, issues: [] }, primaryError: 'CRITIC_FAIL_WITHOUT_ISSUES' }
+  ];
+
+  for (const { payload, primaryError } of malformed) {
+    let workersCalled = false;
+    const binding = {
+      async run() {
+        workersCalled = true;
+        return { response: JSON.stringify({ status: 'PASS', score: 100, issues: [] }) };
+      }
+    };
+    const result = await critic(FREE_AI_ENV, { article: ARTICLE }, binding, freeAiFetch(payload));
+    assert.equal(workersCalled, true, `${primaryError} should have reached Workers AI`);
+    assert.equal(result.provider, 'cloudflare-workers-ai');
+    assert.equal(result.fallbackUsed, true);
+    assert.equal(result.primaryError, primaryError);
+    assert.equal(result.status, 'PASS');
+  }
+});
+
+// A score below the publication threshold is a real verdict about the article, not a
+// malformed answer. Retrying it on a second model would just be shopping for a more
+// lenient judge, so it must still fail the job outright.
+test('a below-threshold PASS score is a verdict, not a contract error, and never falls back', async () => {
+  await assert.rejects(
+    () => critic(FREE_AI_ENV, { article: ARTICLE }, noWorkersAi(), freeAiFetch({ status: 'PASS', score: 94, issues: [] })),
+    /CRITIC_PASS_SCORE_BELOW_THRESHOLD/
+  );
+});
+
+// There is no third provider: once Cloudflare has answered, its answer is the answer.
+test('a contract error from the Workers AI fallback still fails the request', async () => {
+  const binding = { async run() { return { response: JSON.stringify({ verdict: 'fine' }) }; } };
+  await assert.rejects(
+    () => critic(FREE_AI_ENV, { article: ARTICLE }, binding, freeAiFetch({ verdict: 'fine' })),
+    /CRITIC_SCHEMA_INVALID/
+  );
+});

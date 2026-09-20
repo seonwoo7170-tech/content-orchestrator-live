@@ -135,6 +135,23 @@ function normalizeCriticResult(parsed) {
   return { ...parsed, score, status: 'PASS', issues };
 }
 
+// Malformed-output errors, in the sense of "this provider did not honour the critic
+// contract". A different model can legitimately be asked the same question, so these are
+// the free-ai -> Cloudflare fallback triggers. CRITIC_PASS_SCORE_BELOW_THRESHOLD is
+// deliberately absent: that is a real verdict about the article, and retrying it on a
+// second model would just be shopping for a more lenient judge.
+const CRITIC_CONTRACT_ERRORS = new Set([
+  'AI_PROVIDER_JSON_INVALID',
+  'CRITIC_SCHEMA_INVALID',
+  'CRITIC_SCORE_INVALID',
+  'CRITIC_ISSUE_SCHEMA_INVALID',
+  'CRITIC_FAIL_WITHOUT_ISSUES'
+]);
+
+function isCriticContractError(error) {
+  return CRITIC_CONTRACT_ERRORS.has(String(error?.message || ''));
+}
+
 function providerMetadata(result) {
   return {
     model: result.model,
@@ -276,6 +293,7 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
   // gpt-oss-120b (writer/repair) and Gemini, falling back to Cloudflare only if free-ai
   // itself is unavailable or returns unparseable output. Gemini stays fully excluded.
   let result;
+  let parsed;
   if (freeAiFallbackEnabled(env) && freeAiConfigured(env)) {
     try {
       const raw = await runFreeAi(env, {
@@ -284,19 +302,26 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
         maxTokens: OUTPUT_TOKEN_BUDGET.critic,
         responseFormat: { type: 'json_object' }
       }, fetchImpl);
-      parseJsonText(raw.response);
+      // Validate the full contract here, not just parseability: a 7B primary very often
+      // returns syntactically valid JSON in the wrong shape, and until 2026-09-20 that case
+      // was the one failure the Cloudflare fallback could not rescue, because normalization
+      // ran after this block had already committed to free-ai's answer. Jobs 165 and 172 both
+      // died that way (CRITIC_SCHEMA_INVALID / CRITIC_ISSUE_SCHEMA_INVALID) with 120b idle.
+      parsed = normalizeCriticResult(parseJsonText(raw.response));
       result = { ...raw, provider: 'free-ai', fallbackUsed: false, primaryError: null };
     } catch (error) {
-      if (!shouldFallbackFromFreeAi(error) && error?.message !== 'AI_PROVIDER_JSON_INVALID') throw error;
+      if (!shouldFallbackFromFreeAi(error) && !isCriticContractError(error)) throw error;
       const raw = await runWorkersAi(env, { model: cloudflareModel, messages, maxTokens: OUTPUT_TOKEN_BUDGET.critic }, aiBinding);
+      // No third provider: a contract error from Cloudflare still throws, exactly as before.
+      parsed = normalizeCriticResult(parseJsonText(raw.response));
       result = { ...raw, provider: 'cloudflare-workers-ai', fallbackUsed: true, primaryError: String(error.message) };
     }
   } else {
     const raw = await runWorkersAi(env, { model: cloudflareModel, messages, maxTokens: OUTPUT_TOKEN_BUDGET.critic }, aiBinding);
     result = { ...raw, provider: 'cloudflare-workers-ai', fallbackUsed: false, primaryError: null };
+    parsed = normalizeCriticResult(parseJsonText(result.response));
   }
 
-  const parsed = normalizeCriticResult(parseJsonText(result.response));
   return {
     ...parsed,
     ...providerMetadata(result),
