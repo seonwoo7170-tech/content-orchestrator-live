@@ -721,14 +721,17 @@ jobs:
           }
           NODE
 
-      - name: Read-only D1 check of job_publications final status for the 6 exception jobs
+      # /api/jobs/:id carries no publications array, so the job-detail step above cannot answer
+      # this -- its empty "publications" field is an artifact of the API shape, not evidence.
+      # job_publications in D1 is the only place a real blogger_post_id can be read.
+      - name: Read-only D1 check of job_publications for the 8 publish-gate jobs
         shell: bash
         run: |
           set -euo pipefail
           test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
-            "SELECT job_id, blog_id, status, attempts, scheduled_time, error, updated_at FROM job_publications WHERE job_id IN (140,141,143,158,159,160) ORDER BY job_id;"
+            "SELECT job_id, blog_id, status, blogger_post_id, url, attempts, scheduled_time, error, updated_at FROM job_publications WHERE job_id IN (137,139,149,151,153,154,156,157) ORDER BY job_id;"
 
       - name: Investigate why Smile Atlas jobs are stuck and why image fetch fails (read-only)
         shell: bash
