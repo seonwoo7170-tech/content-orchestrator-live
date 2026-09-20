@@ -4,6 +4,7 @@ import { lintNaturalWriting } from './natural-writing-linter.js';
 import { dateInTimeZone } from './daily-plan.js';
 import { deterministicPublishJitter, readAutomationSettings, scheduledMinuteForPublish } from './automation-settings.js';
 import { persistJobResult, persistJobTransition } from './job-store.js';
+import { appendJobEvent } from './job-events.js';
 import { applyInternalLinksToArticle } from './internal-link-injector.js';
 import { findNewArticleTopicConflict } from './topic-dedupe.js';
 import { runDeterministicQualityGate, deterministicQaAllowsPublish } from './deterministic-quality-gate.js';
@@ -83,7 +84,57 @@ function imageEvidence(settings, images = []) {
   };
 }
 
-export function validatePublicationResult(result, settings, images = []) {
+// One-time, fixed allowlist: new_article jobs whose image plan was fully executed under an
+// earlier, lower bodyImageCount and which now fall short of imageEvidence()'s raised
+// expectation of 1 + bodyImageCount. Confirmed on 2026-09-20 that all eight are
+// result.status READY, finalCritic PASS at score 100 with zero issues, and hold exactly 3
+// attached images (thumbnail + 2 body) with no failed or missing row -- nothing is wrong with
+// them except that the policy moved after they were built. Generating a 4th image would be a
+// new paid KIE call for an article that already satisfies the plan it was written under, which
+// the no-duplicate-generation rule forbids. This mirrors REPAIR_IMAGE_COUNT_EXCEPTION_JOB_IDS
+// in auto-repair-updater.js for the repair path. It exempts only these exact ids, only while
+// they still hold their thumbnail plus at least three attached images, and must never be
+// widened into a general relaxation of the image requirement.
+const PUBLISH_IMAGE_COUNT_EXCEPTION_JOB_IDS = new Set([137, 139, 149, 151, 153, 154, 156, 157]);
+const PUBLISH_IMAGE_COUNT_EXCEPTION_MIN_IMAGES = 3;
+
+// runDueAutoPublications collects a per-candidate outcome and returns it, but nothing persists
+// it: a job blocked by validatePublicationResult stays 'ready' with error and hold_reason both
+// NULL, so it is indistinguishable from a job that is simply waiting its turn. That is how
+// jobs #137-#157 sat blocked for nine days on an image-count policy change with nothing on
+// screen to show it (confirmed 2026-09-20). Record the reason as a job event rather than a
+// status change: this block is routinely transient (a freshly-ready job whose images are still
+// generating fails it for a few minutes), so moving the job out of 'ready' would derail
+// articles that were about to publish normally. Deduped on (job, reason) so a block that
+// persists for days logs once instead of once per five-minute tick, and never allowed to throw
+// -- logging must not be able to stop a publish.
+async function recordPublishBlock(env, jobId, reason) {
+  const message = `발행 보류 · ${reason}`;
+  try {
+    const existing = await requireDb(env).prepare(
+      `SELECT 1 FROM job_events
+       WHERE job_id = ? AND event_type = 'publish_blocked' AND message = ?
+       LIMIT 1`
+    ).bind(Number(jobId), message).first();
+    if (existing) return false;
+  } catch {
+    // A missing job_events table (or any read failure) must not suppress the attempt below;
+    // appendJobEvent already no-ops safely when the table does not exist.
+  }
+  try {
+    return await appendJobEvent(env, jobId, {
+      eventType: 'publish_blocked',
+      stage: 'ready',
+      level: 'warn',
+      message,
+      meta: { reason }
+    });
+  } catch {
+    return false;
+  }
+}
+
+export function validatePublicationResult(result, settings, images = [], jobId = null) {
   if (!result || result.status !== 'READY') return { ok: false, reason: 'JOB_RESULT_NOT_READY' };
   if (!result.article || typeof result.article !== 'object') return { ok: false, reason: 'ARTICLE_MISSING' };
   const critic = result.finalCritic;
@@ -102,7 +153,19 @@ export function validatePublicationResult(result, settings, images = []) {
     return { ok: false, reason: 'THUMBNAIL_NOT_ATTACHED', deterministicQa, lint, imagesEvidence };
   }
   if (settings?.imagesEnabled && !imagesEvidence.passed) {
-    return { ok: false, reason: 'IMAGES_NOT_ATTACHED', deterministicQa, lint, imagesEvidence };
+    const exempt = jobId !== null
+      && PUBLISH_IMAGE_COUNT_EXCEPTION_JOB_IDS.has(Number(jobId))
+      && Number(imagesEvidence.attached || 0) >= PUBLISH_IMAGE_COUNT_EXCEPTION_MIN_IMAGES;
+    if (!exempt) {
+      return { ok: false, reason: 'IMAGES_NOT_ATTACHED', deterministicQa, lint, imagesEvidence };
+    }
+    return {
+      ok: true,
+      lint,
+      deterministicQa,
+      imageCountException: true,
+      imagesEvidence: { ...imagesEvidence, passed: true, exception: 'PUBLISH_IMAGE_COUNT_EXCEPTION' }
+    };
   }
   return { ok: true, lint, deterministicQa, imagesEvidence };
 }
@@ -353,12 +416,15 @@ export async function runDueAutoPublications(env, blogs, options = {}) {
     try {
       result = await prepareInternalLinks(env, candidate, result, fetchImpl);
     } catch (error) {
-      outcomes.push({ jobId: Number(candidate.job_id), planDate: String(candidate.plan_date), status: 'blocked', reason: String(error?.message || 'INTERNAL_LINK_PREPARE_FAILED') });
+      const reason = String(error?.message || 'INTERNAL_LINK_PREPARE_FAILED');
+      await recordPublishBlock(env, candidate.job_id, reason);
+      outcomes.push({ jobId: Number(candidate.job_id), planDate: String(candidate.plan_date), status: 'blocked', reason });
       continue;
     }
     const images = settings.imagesEnabled ? await listImages(env, candidate.job_id) : [];
-    const eligibility = validatePublicationResult(result, settings, images);
+    const eligibility = validatePublicationResult(result, settings, images, candidate.job_id);
     if (!eligibility.ok) {
+      await recordPublishBlock(env, candidate.job_id, eligibility.reason);
       outcomes.push({ jobId: Number(candidate.job_id), planDate: String(candidate.plan_date), status: 'blocked', reason: eligibility.reason });
       continue;
     }

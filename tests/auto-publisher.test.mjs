@@ -65,6 +65,55 @@ test('image checks are skipped only when blog image automation is disabled', () 
   assert.equal(validatePublicationResult(cleanResult, { ...settings, imagesEnabled: false }, []).ok, true);
 });
 
+test('the image-count exception frees only the allowlisted jobs that still hold their images', () => {
+  // settings.bodyImageCount is 2 in this file, so expected = 3; two attached images is one short.
+  const short = [
+    { role: 'thumbnail', status: 'attached' },
+    { role: 'body', status: 'attached' }
+  ];
+  // Not on the allowlist -> still blocked, whatever the job id.
+  assert.equal(validatePublicationResult(cleanResult, settings, short, 999).reason, 'IMAGES_NOT_ATTACHED');
+  assert.equal(validatePublicationResult(cleanResult, settings, short).reason, 'IMAGES_NOT_ATTACHED');
+  // On the allowlist but only two attached images -> below the 3-image floor, still blocked.
+  assert.equal(validatePublicationResult(cleanResult, settings, short, 137).reason, 'IMAGES_NOT_ATTACHED');
+
+  // On the allowlist with its thumbnail plus three attached images -> exempt.
+  const intact = [
+    { role: 'thumbnail', status: 'attached' },
+    { role: 'body', status: 'attached' },
+    { role: 'body', status: 'attached' }
+  ];
+  const raised = { ...settings, bodyImageCount: 3 };
+  assert.equal(validatePublicationResult(cleanResult, raised, intact).reason, 'IMAGES_NOT_ATTACHED');
+  const exempt = validatePublicationResult(cleanResult, raised, intact, 137);
+  assert.equal(exempt.ok, true);
+  assert.equal(exempt.imageCountException, true);
+  assert.equal(exempt.imagesEvidence.exception, 'PUBLISH_IMAGE_COUNT_EXCEPTION');
+
+  // A missing thumbnail is never exempt, even for an allowlisted job.
+  assert.equal(validatePublicationResult(cleanResult, raised, intact.slice(1), 137).reason, 'THUMBNAIL_NOT_ATTACHED');
+});
+
+test('every stuck job id from the 2026-09-20 backlog is on the allowlist', async () => {
+  const source = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
+  assert.match(source, /PUBLISH_IMAGE_COUNT_EXCEPTION_JOB_IDS\s*=\s*new Set\(\[137, 139, 149, 151, 153, 154, 156, 157\]\)/);
+  assert.match(source, /PUBLISH_IMAGE_COUNT_EXCEPTION_MIN_IMAGES\s*=\s*3/);
+});
+
+test('a blocked publish records its reason as a job event without changing job status', async () => {
+  const source = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
+  const fn = source.slice(source.indexOf('async function recordPublishBlock'), source.indexOf('export function validatePublicationResult'));
+  // Deduped on (job, reason) so a long-lived block does not log once per five-minute tick.
+  assert.match(fn, /event_type = 'publish_blocked' AND message = \?/);
+  assert.match(fn, /eventType: 'publish_blocked'/);
+  // Must never move the job out of 'ready' -- this block is routinely transient.
+  assert.doesNotMatch(fn, /persistJobTransition|needs_review/);
+  // Logging must never be able to stop a publish.
+  assert.match(fn, /catch \{\s*return false;\s*\}/);
+  assert.match(source, /await recordPublishBlock\(env, candidate\.job_id, eligibility\.reason\)/);
+  assert.match(source, /validatePublicationResult\(result, settings, images, candidate\.job_id\)/);
+});
+
 test('publisher scans recent carryover plan dates instead of only today', async () => {
   const source = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
   assert.match(source, /CARRYOVER_LOOKBACK_DAYS\s*=\s*14/);
