@@ -11,27 +11,17 @@ function aiMock(handler) {
   };
 }
 
-function noWorkers() {
-  return aiMock(() => {
-    throw new Error('WORKERS_AI_MUST_NOT_RUN_FOR_CRITIC');
-  });
+function criticWorkersAi(payload) {
+  return aiMock(() => ({ response: JSON.stringify(payload) }));
 }
 
-function geminiResponse(text) {
-  return new Response(JSON.stringify({
-    candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }],
-    usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20, totalTokenCount: 120 }
-  }), { status: 200, headers: { 'content-type': 'application/json' } });
+function geminiMustNotRun() {
+  return async () => { throw new Error('GEMINI_MUST_NOT_RUN_FOR_CRITIC'); };
 }
 
 function utf8Bytes(value) {
   return new TextEncoder().encode(String(value || '')).byteLength;
 }
-
-const GEMINI_ENV = Object.freeze({
-  GEMINI_API_KEY: 'test-key',
-  GEMINI_CRITIC_MODEL: 'gemini-3.5-flash-lite'
-});
 
 test('runWorkersAi maps token, reasoning, response-format, and deterministic sampling controls correctly', async () => {
   const seen = [];
@@ -92,9 +82,8 @@ test('runWorkersAi serializes structured response objects for existing JSON pars
   assert.equal(result.response, '{"status":"PASS"}');
 });
 
-test('AI routes use the full integrated Master v4.5 with role adapters and dedicated Gemini granular critic', async () => {
+test('AI routes use the full integrated Master v4.5 with role adapters, critic now on Workers AI only', async () => {
   const workersSeen = [];
-  let geminiBody = null;
   const binding = aiMock((model, body) => {
     workersSeen.push({ model, body });
     const system = body.messages?.[0]?.content || '';
@@ -113,6 +102,9 @@ test('AI routes use the full integrated Master v4.5 with role adapters and dedic
           }
         })
       };
+    }
+    if (system.includes('MASTER V4.5 COMPLIANCE CRITIC ADAPTER')) {
+      return { response: JSON.stringify({ status: 'PASS', score: 100, issues: [] }) };
     }
     if (system.includes('targeted repair editor')) {
       return {
@@ -137,13 +129,10 @@ test('AI routes use the full integrated Master v4.5 with role adapters and dedic
     binding
   );
   const criticResult = await critic(
-    GEMINI_ENV,
+    { CRITIC_MODEL: '@cf/openai/gpt-oss-120b' },
     { article: { title: 'Test' }, stage: 'initial', sourcePost: { bloggerPostId: '123' } },
     binding,
-    async (url, init) => {
-      geminiBody = JSON.parse(init.body);
-      return geminiResponse(JSON.stringify({ status: 'PASS', score: 100, issues: [] }));
-    }
+    async () => { throw new Error('GEMINI_MUST_NOT_RUN_FOR_CRITIC'); }
   );
   const repairResult = await repair(
     { REPAIR_MODEL: '@cf/openai/gpt-oss-120b' },
@@ -151,15 +140,16 @@ test('AI routes use the full integrated Master v4.5 with role adapters and dedic
     binding
   );
 
-  assert.equal(workersSeen.length, 3);
+  assert.equal(workersSeen.length, 4);
   assert.equal(workersSeen[0].body.max_tokens, 256);
   assert.equal(workersSeen[1].body.max_tokens, 12288);
   assert.equal(workersSeen[2].body.max_tokens, 12288);
-  assert.equal(workersSeen[2].body.response_format, undefined);
+  assert.equal(workersSeen[3].body.max_tokens, 12288);
+  assert.equal(workersSeen[3].body.response_format, undefined);
 
   const writerPromptBytes = utf8Bytes(workersSeen[1].body.messages[0].content);
-  const criticPromptBytes = utf8Bytes(geminiBody.systemInstruction.parts[0].text);
-  const repairPromptBytes = utf8Bytes(workersSeen[2].body.messages[0].content);
+  const criticPromptBytes = utf8Bytes(workersSeen[2].body.messages[0].content);
+  const repairPromptBytes = utf8Bytes(workersSeen[3].body.messages[0].content);
   assert.ok(writerPromptBytes > 93282);
   assert.ok(criticPromptBytes > 93282);
   assert.ok(repairPromptBytes > 93282);
@@ -169,27 +159,20 @@ test('AI routes use the full integrated Master v4.5 with role adapters and dedic
   assert.equal(writerResult.rolePrompt.size, 93282);
   assert.equal(writerResult.rolePrompt.sha256, '0df7c83bb3874c4802ca7c02306beee7cd7032366930d66abfc7fa1bdb6cda66');
 
-  assert.equal(geminiBody.generationConfig.maxOutputTokens, 12288);
-  assert.equal(geminiBody.generationConfig.thinkingConfig.thinkingLevel, 'medium');
-  assert.equal(geminiBody.generationConfig.responseMimeType, 'application/json');
-  assert.deepEqual(geminiBody.generationConfig.responseSchema.required, ['status', 'score', 'issues']);
-  assert.deepEqual(
-    geminiBody.generationConfig.responseSchema.properties.issues.items.required,
-    ['code', 'severity', 'location', 'reason', 'repairInstruction']
-  );
-  assert.deepEqual(JSON.parse(geminiBody.contents[0].parts[0].text), { article: { title: 'Test' } });
-  assert.ok(!geminiBody.contents[0].parts[0].text.includes('initial'));
-  assert.ok(!geminiBody.contents[0].parts[0].text.includes('bloggerPostId'));
-  assert.match(geminiBody.systemInstruction.parts[0].text, /MASTER V4\.5 COMPLIANCE CRITIC ADAPTER/);
-  assert.match(geminiBody.systemInstruction.parts[0].text, /Run the audit as separate passes/);
-  assert.match(geminiBody.systemInstruction.parts[0].text, /A distinct repair action must receive a distinct issue/);
-  assert.equal(criticResult.auditMode, 'master-v4.5-role-critic-gemini-granular');
+  const criticUserText = workersSeen[2].body.messages[1].content;
+  assert.deepEqual(JSON.parse(criticUserText), { article: { title: 'Test' } });
+  assert.ok(!criticUserText.includes('initial'));
+  assert.ok(!criticUserText.includes('bloggerPostId'));
+  assert.match(workersSeen[2].body.messages[0].content, /MASTER V4\.5 COMPLIANCE CRITIC ADAPTER/);
+  assert.match(workersSeen[2].body.messages[0].content, /Run the audit as separate passes/);
+  assert.match(workersSeen[2].body.messages[0].content, /A distinct repair action must receive a distinct issue/);
+  assert.equal(criticResult.auditMode, 'master-v4.5-role-critic-cloudflare-granular');
   assert.equal(criticResult.masterV45.size, 93282);
   assert.equal(criticResult.rolePrompt.size, 93282);
-  assert.equal(criticResult.provider, 'google-gemini');
+  assert.equal(criticResult.provider, 'cloudflare-workers-ai');
   assert.equal(criticResult.fallbackUsed, false);
 
-  assert.match(workersSeen[2].body.messages[0].content, /MASTER V4\.5 TARGETED REPAIR ADAPTER/);
+  assert.match(workersSeen[3].body.messages[0].content, /MASTER V4\.5 TARGETED REPAIR ADAPTER/);
   assert.equal(repairResult.repairMode, 'master-v4.5-role-targeted');
   assert.equal(repairResult.masterV45.size, 93282);
   assert.equal(repairResult.rolePrompt.size, 93282);
@@ -208,13 +191,13 @@ test('critic model-facing input is identical across initial/final stage labels f
     language: 'en',
     topic: 'same topic'
   };
-  const fetchMock = async (url, init) => {
-    modelInputs.push(JSON.parse(init.body).contents[0].parts[0].text);
-    return geminiResponse(JSON.stringify({ status: 'PASS', score: 100, issues: [] }));
-  };
+  const binding = aiMock((model, body) => {
+    modelInputs.push(body.messages[1].content);
+    return { response: JSON.stringify({ status: 'PASS', score: 100, issues: [] }) };
+  });
 
-  await critic(GEMINI_ENV, { article, stage: 'initial' }, noWorkers(), fetchMock);
-  await critic(GEMINI_ENV, { article, stage: 'final', sourcePost: { bloggerPostId: '999' } }, noWorkers(), fetchMock);
+  await critic({}, { article, stage: 'initial' }, binding, geminiMustNotRun());
+  await critic({}, { article, stage: 'final', sourcePost: { bloggerPostId: '999' } }, binding, geminiMustNotRun());
 
   assert.equal(modelInputs.length, 2);
   assert.equal(modelInputs[0], modelInputs[1]);
@@ -223,10 +206,9 @@ test('critic model-facing input is identical across initial/final stage labels f
 
 test('critic normalizes PASS with issues into FAIL so repair can run', async () => {
   const result = await critic(
-    GEMINI_ENV,
+    {},
     { article: { title: 'Test' } },
-    noWorkers(),
-    async () => geminiResponse(JSON.stringify({
+    criticWorkersAi({
       status: 'PASS',
       score: 93,
       issues: [{
@@ -236,7 +218,8 @@ test('critic normalizes PASS with issues into FAIL so repair can run', async () 
         reason: 'One sentence is dense.',
         repairInstruction: 'Shorten the sentence.'
       }]
-    }))
+    }),
+    geminiMustNotRun()
   );
 
   assert.equal(result.status, 'FAIL');
@@ -246,10 +229,10 @@ test('critic normalizes PASS with issues into FAIL so repair can run', async () 
 
 test('critic normalizes PASS without an issues array to an empty issues array', async () => {
   const result = await critic(
-    GEMINI_ENV,
+    {},
     { article: { title: 'Test' } },
-    noWorkers(),
-    async () => geminiResponse(JSON.stringify({ status: 'PASS', score: 100 }))
+    criticWorkersAi({ status: 'PASS', score: 100 }),
+    geminiMustNotRun()
   );
 
   assert.equal(result.status, 'PASS');
@@ -259,10 +242,10 @@ test('critic normalizes PASS without an issues array to an empty issues array', 
 test('critic rejects PASS below the 95-point publication threshold', async () => {
   await assert.rejects(
     () => critic(
-      GEMINI_ENV,
+      {},
       { article: { title: 'Test' } },
-      noWorkers(),
-      async () => geminiResponse(JSON.stringify({ status: 'PASS', score: 94, issues: [] }))
+      criticWorkersAi({ status: 'PASS', score: 94, issues: [] }),
+      geminiMustNotRun()
     ),
     /CRITIC_PASS_SCORE_BELOW_THRESHOLD/
   );
@@ -271,14 +254,14 @@ test('critic rejects PASS below the 95-point publication threshold', async () =>
 test('critic rejects malformed issue details instead of silently accepting a weak audit', async () => {
   await assert.rejects(
     () => critic(
-      GEMINI_ENV,
+      {},
       { article: { title: 'Test' } },
-      noWorkers(),
-      async () => geminiResponse(JSON.stringify({
+      criticWorkersAi({
         status: 'FAIL',
         score: 90,
         issues: [{ code: 'VAGUE', severity: 'LOW', location: '', reason: 'Too vague.', repairInstruction: 'Fix it.' }]
-      }))
+      }),
+      geminiMustNotRun()
     ),
     /CRITIC_ISSUE_SCHEMA_INVALID/
   );

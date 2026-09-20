@@ -60,28 +60,6 @@ const OUTPUT_TOKEN_BUDGET = Object.freeze({
 const GEMINI_DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 const CRITIC_PASS_MIN_SCORE = 95;
 const CRITIC_SEVERITIES = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
-const CRITIC_RESPONSE_SCHEMA = Object.freeze({
-  type: 'object',
-  properties: {
-    status: { type: 'string', enum: ['PASS', 'FAIL'] },
-    score: { type: 'number', minimum: 0, maximum: 100 },
-    issues: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          code: { type: 'string' },
-          severity: { type: 'string', enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] },
-          location: { type: 'string' },
-          reason: { type: 'string' },
-          repairInstruction: { type: 'string' }
-        },
-        required: ['code', 'severity', 'location', 'reason', 'repairInstruction']
-      }
-    }
-  },
-  required: ['status', 'score', 'issues']
-});
 
 function validateArticleShape(value, input, prefix) {
   const article = value?.article && typeof value.article === 'object' ? value.article : value;
@@ -274,7 +252,6 @@ export async function writer(env, input, aiBinding = env?.AI, fetchImpl = fetch)
 export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch) {
   const rolePrompt = await loadMasterV45RolePrompt('critic');
   const cloudflareModel = env.CRITIC_MODEL || '@cf/openai/gpt-oss-120b';
-  const geminiModel = env.GEMINI_CRITIC_MODEL || GEMINI_DEFAULT_MODEL;
   const article = input?.article && typeof input.article === 'object' ? input.article : input;
   if (!article || typeof article !== 'object' || Array.isArray(article)) {
     throw Object.assign(new Error('CRITIC_ARTICLE_REQUIRED'), { status: 400 });
@@ -285,7 +262,14 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
     article,
     ...(input?.seoBrief && typeof input.seoBrief === 'object' ? { seoBrief: input.seoBrief } : {})
   });
-  const result = await runPrimaryWithGeminiFallback({ ...env, TEXT_PRIMARY_PROVIDER: 'gemini' }, {
+  // Critic used to run on Gemini exclusively (falling back to Workers AI only on a
+  // transient Gemini outage). Removed at the operator's request: Gemini's critic issues
+  // and repairInstructions were suspected of driving repair() to progressively trim long
+  // articles shorter across successive critic->repair rounds. Critic now runs on Workers
+  // AI only -- blanking GEMINI_API_KEY for this call keeps runPrimaryWithGeminiFallback's
+  // cloudflare-primary path (the same one writer/repair already use) from ever reaching
+  // its Gemini-fallback branch, without needing a separate code path for "no fallback".
+  const result = await runPrimaryWithGeminiFallback({ ...env, GEMINI_API_KEY: '' }, {
     cloudflare: {
       model: cloudflareModel,
       messages: [
@@ -293,14 +277,6 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
         { role: 'user', content: userContent }
       ],
       maxTokens: OUTPUT_TOKEN_BUDGET.critic
-    },
-    gemini: {
-      model: geminiModel,
-      systemInstruction,
-      userContent,
-      maxOutputTokens: OUTPUT_TOKEN_BUDGET.critic,
-      responseSchema: CRITIC_RESPONSE_SCHEMA,
-      thinking: 'medium'
     }
   }, aiBinding, fetchImpl);
 
@@ -310,7 +286,7 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
     ...providerMetadata(result),
     masterV45: MASTER_V45,
     rolePrompt: rolePrompt.meta,
-    auditMode: 'master-v4.5-role-critic-gemini-granular'
+    auditMode: 'master-v4.5-role-critic-cloudflare-granular'
   };
 }
 

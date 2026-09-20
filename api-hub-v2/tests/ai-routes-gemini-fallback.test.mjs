@@ -12,14 +12,6 @@ function exhaustedWorkersAi() {
   };
 }
 
-function workersMustNotRun() {
-  return {
-    async run() {
-      throw new Error('WORKERS_AI_MUST_NOT_RUN_FOR_CRITIC');
-    }
-  };
-}
-
 function geminiResponse(text) {
   return new Response(JSON.stringify({
     candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }],
@@ -70,7 +62,13 @@ test('writer falls back to Gemini with the verified writer role prompt', async (
   assert.ok(requestBody.systemInstruction.parts[0].text.includes('# 4. 최초 플랫폼 선택'));
 });
 
-test('critic uses Gemini only with granular audit instructions, medium thinking and structured output', async () => {
+// Critic used to run on Gemini exclusively (with granular audit instructions and
+// structured JSON output). Removed at the operator's request -- Gemini's critic issues
+// and repairInstructions were suspected of driving repair() to progressively trim long
+// articles shorter across successive critic->repair rounds. Critic now runs on Workers
+// AI unconditionally and never calls Gemini at all, whether or not a Gemini key is
+// configured.
+test('critic runs on Workers AI with granular audit instructions, regardless of Gemini configuration', async () => {
   let requestBody = null;
   const article = {
     title: 'Test',
@@ -92,54 +90,52 @@ test('critic uses Gemini only with granular audit instructions, medium thinking 
       repairInstruction: 'Split it into shorter sentences.'
     }]
   };
+  const binding = {
+    async run(model, body) {
+      requestBody = body;
+      return { response: JSON.stringify(criticPayload), usage: { total_tokens: 10 } };
+    }
+  };
 
   const result = await critic(
     ENV,
     { article, stage: 'initial', sourcePost: { bloggerPostId: 'should-not-leak' } },
-    workersMustNotRun(),
-    async (url, init) => {
-      requestBody = JSON.parse(init.body);
-      return geminiResponse(JSON.stringify(criticPayload));
-    }
+    binding,
+    async () => { throw new Error('GEMINI_MUST_NOT_RUN_FOR_CRITIC'); }
   );
 
-  assert.equal(result.provider, 'google-gemini');
+  assert.equal(result.provider, 'cloudflare-workers-ai');
   assert.equal(result.fallbackUsed, false);
   assert.equal(result.primaryError, null);
-  assert.equal(result.auditMode, 'master-v4.5-role-critic-gemini-granular');
+  assert.equal(result.auditMode, 'master-v4.5-role-critic-cloudflare-granular');
   assert.equal(result.rolePrompt.size, 93282);
   assert.equal(result.status, 'FAIL');
   assert.equal(result.issues.length, 1);
-  assert.equal(requestBody.generationConfig.thinkingConfig.thinkingLevel, 'medium');
-  assert.equal(requestBody.generationConfig.responseMimeType, 'application/json');
-  assert.deepEqual(requestBody.generationConfig.responseSchema.required, ['status', 'score', 'issues']);
-  assert.match(requestBody.systemInstruction.parts[0].text, /Run the audit as separate passes/);
-  assert.match(requestBody.systemInstruction.parts[0].text, /A distinct repair action must receive a distinct issue/);
-  assert.match(requestBody.systemInstruction.parts[0].text, /misleading or overclaiming searchDescription/);
-  const userText = requestBody.contents[0].parts[0].text;
+  const systemText = requestBody.messages[0].content;
+  assert.match(systemText, /Run the audit as separate passes/);
+  assert.match(systemText, /A distinct repair action must receive a distinct issue/);
+  assert.match(systemText, /misleading or overclaiming searchDescription/);
+  const userText = requestBody.messages[1].content;
   assert.deepEqual(JSON.parse(userText), { article });
   assert.ok(!userText.includes('initial'));
   assert.ok(!userText.includes('bloggerPostId'));
 });
 
-test('critic fails closed when Gemini API key is not configured and never falls back to Workers', async () => {
-  let workersCalled = false;
+test('critic never calls Gemini even when a Gemini key is configured', async () => {
+  let geminiCalled = false;
   const binding = {
     async run() {
-      workersCalled = true;
-      return { response: 'unexpected' };
+      return { response: JSON.stringify({ status: 'PASS', score: 100, issues: [] }), usage: { total_tokens: 10 } };
     }
   };
-  await assert.rejects(
-    () => critic(
-      {},
-      { article: { title: 'Test' } },
-      binding,
-      async () => geminiResponse(JSON.stringify({ status: 'PASS', score: 100, issues: [] }))
-    ),
-    /GEMINI_API_KEY_REQUIRED/
+  const result = await critic(
+    ENV,
+    { article: { title: 'Test', html: '<p>Body.</p>', searchDescription: 'Description', labels: [], sources: [], language: 'en', topic: 'topic' } },
+    binding,
+    async () => { geminiCalled = true; return geminiResponse(JSON.stringify({ status: 'PASS', score: 100, issues: [] })); }
   );
-  assert.equal(workersCalled, false);
+  assert.equal(result.provider, 'cloudflare-workers-ai');
+  assert.equal(geminiCalled, false);
 });
 
 test('repair falls back to Gemini and preserves targeted repair contract', async () => {

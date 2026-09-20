@@ -93,7 +93,9 @@ export default {
         const kieConfigured = Boolean(String(env.KIE_API_KEY || '').trim());
         const imageQaRequired = String(env.IMAGE_QA_REQUIRED || 'false').trim().toLowerCase() === 'true';
         const writerProviderOrder = textProviderOrder(env);
-        const criticProviderOrder = textProviderOrder(env, true);
+        // critic() always blanks GEMINI_API_KEY for its own call (see ai-routes.js) so it
+        // never falls back to Gemini, regardless of the global text-provider config.
+        const criticProviderOrder = ['cloudflare-workers-ai'];
         const repairProviderOrder = textProviderOrder(env);
         const textPrimaryProvider = writerProviderOrder[0];
         const textCloudflareFallbackEnabled = String(env.TEXT_CLOUDFLARE_FALLBACK_ENABLED || 'false').trim().toLowerCase() === 'true';
@@ -124,12 +126,12 @@ export default {
           tavilyConfigured: tavilyConfigured(env),
           tavilySearchDepth: 'basic',
           tourApiConfigured: tourApiConfigured(env),
-          criticProvider: 'google-gemini',
+          criticProvider: 'cloudflare-workers-ai',
           criticProviderOrder,
-          criticFallbackEnabled: criticProviderOrder.length > 1,
-          criticModel: env.GEMINI_CRITIC_MODEL || 'gemini-3.5-flash-lite',
-          criticConfigured: geminiConfigured,
-          criticAuditMode: 'master-v4.5-role-critic-gemini-granular',
+          criticFallbackEnabled: false,
+          criticModel: env.CRITIC_MODEL || '@cf/openai/gpt-oss-120b',
+          criticConfigured: Boolean(env.AI),
+          criticAuditMode: 'master-v4.5-role-critic-cloudflare-granular',
           repairModel: env.REPAIR_MODEL || '@cf/openai/gpt-oss-120b',
           repairProviderOrder,
           imageProvider: imageProviderOrder[0],

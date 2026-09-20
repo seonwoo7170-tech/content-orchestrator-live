@@ -21,12 +21,6 @@ function aiMock(responseFactory) {
   };
 }
 
-function geminiResponse(text) {
-  return new Response(JSON.stringify({
-    candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }]
-  }), { status: 200, headers: { 'content-type': 'application/json' } });
-}
-
 const GOOGLE_ENV = {
   GOOGLE_CLIENT_ID: 'client-id',
   GOOGLE_CLIENT_SECRET: 'client-secret',
@@ -130,18 +124,18 @@ test('writer rejects missing or unsupported language before provider use', async
   await assert.rejects(() => writer({}, { topic: '', language: 'ko' }), /WRITER_TOPIC_REQUIRED/);
 });
 
-test('critic enforces PASS with zero issues through dedicated Gemini provider', async () => {
-  let workersCalled = false;
+test('critic enforces PASS with zero issues through Workers AI, never touching Gemini', async () => {
+  let geminiCalled = false;
   const result = await critic(
     { GEMINI_API_KEY: 'test-key', GEMINI_CRITIC_MODEL: 'gemini-3.5-flash-lite' },
     { article: {} },
-    { async run() { workersCalled = true; throw new Error('unexpected Workers call'); } },
-    async () => geminiResponse(JSON.stringify({ status: 'PASS', score: 98, issues: [] }))
+    { async run() { return { response: JSON.stringify({ status: 'PASS', score: 98, issues: [] }) }; } },
+    async () => { geminiCalled = true; throw new Error('unexpected Gemini call'); }
   );
   assert.equal(result.status, 'PASS');
   assert.deepEqual(result.issues, []);
-  assert.equal(result.provider, 'google-gemini');
-  assert.equal(workersCalled, false);
+  assert.equal(result.provider, 'cloudflare-workers-ai');
+  assert.equal(geminiCalled, false);
 });
 
 test('Google OAuth is explicitly configured only when all three secrets exist', () => {

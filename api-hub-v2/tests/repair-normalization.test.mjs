@@ -10,12 +10,6 @@ function aiMock(handler) {
   };
 }
 
-function geminiResponse(text) {
-  return new Response(JSON.stringify({
-    candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }]
-  }), { status: 200, headers: { 'content-type': 'application/json' } });
-}
-
 function article() {
   return {
     title: 'Test title',
@@ -36,6 +30,9 @@ test('Writer and Critic Blogger adapters explicitly keep post H1 outside body HT
     if (system.includes('AUTOMATION WRITER ADAPTER')) {
       return { response: JSON.stringify({ article: article() }) };
     }
+    if (system.includes('COMPLIANCE CRITIC ADAPTER')) {
+      return { response: JSON.stringify({ status: 'PASS', score: 100, issues: [] }) };
+    }
     throw new Error('unexpected Workers AI call');
   });
 
@@ -45,13 +42,10 @@ test('Writer and Critic Blogger adapters explicitly keep post H1 outside body HT
     binding
   );
   await critic(
-    { GEMINI_API_KEY: 'test-key', GEMINI_CRITIC_MODEL: 'gemini-3.5-flash-lite' },
+    { CRITIC_MODEL: '@cf/openai/gpt-oss-120b' },
     { article: article() },
     binding,
-    async (url, init) => {
-      systems.push(JSON.parse(init.body).systemInstruction.parts[0].text);
-      return geminiResponse(JSON.stringify({ status: 'PASS', score: 100, issues: [] }));
-    }
+    async () => { throw new Error('GEMINI_MUST_NOT_RUN_FOR_CRITIC'); }
   );
 
   assert.match(systems[0], /do not duplicate the title as an <h1> inside html/i);
