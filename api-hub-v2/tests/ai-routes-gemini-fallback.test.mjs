@@ -107,7 +107,7 @@ test('critic runs on Workers AI with granular audit instructions, regardless of 
   assert.equal(result.provider, 'cloudflare-workers-ai');
   assert.equal(result.fallbackUsed, false);
   assert.equal(result.primaryError, null);
-  assert.equal(result.auditMode, 'master-v4.5-role-critic-cloudflare-granular');
+  assert.equal(result.auditMode, 'master-v4.5-role-critic-free-ai-granular');
   assert.equal(result.rolePrompt.size, 93282);
   assert.equal(result.status, 'FAIL');
   assert.equal(result.issues.length, 1);

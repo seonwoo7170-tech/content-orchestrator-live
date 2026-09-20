@@ -134,14 +134,18 @@ jobs:
           // never graded the same model family that wrote the article -- removed at the operator's
           // request (2026-09-20): Gemini's critic issues/repairInstructions were suspected of driving
           // repair() to progressively trim long articles shorter across successive critic->repair
-          // rounds. Critic now runs on Workers AI only, with no fallback chain at all.
+          // rounds. Critic briefly ran on Workers AI only, then moved to free-ai (qwen7b) as primary
+          // (same day) once that was confirmed configured in production -- genuinely distinct from
+          // both writer/repair's Cloudflare model and Gemini -- with Cloudflare as its only fallback.
           for(const [name,order] of [['writer',h.writerProviderOrder],['repair',h.repairProviderOrder]]){
             if(!Array.isArray(order)||order[0]!=='cloudflare-workers-ai'||!order.includes('google-gemini')) throw new Error(`${name.toUpperCase()}_PROVIDER_ORDER_INVALID`);
             if(order.includes('free-ai')) throw new Error(`${name.toUpperCase()}_FREE_AI_SHOULD_BE_INACTIVE`);
           }
-          if(!Array.isArray(h.criticProviderOrder)||h.criticProviderOrder.length!==1||h.criticProviderOrder[0]!=='cloudflare-workers-ai') throw new Error('CRITIC_PROVIDER_ORDER_INVALID');
+          const expectedCriticOrder=freeConfigured?['free-ai','cloudflare-workers-ai']:['cloudflare-workers-ai'];
+          if(JSON.stringify(h.criticProviderOrder)!==JSON.stringify(expectedCriticOrder)) throw new Error('CRITIC_PROVIDER_ORDER_INVALID');
+          if(h.criticProviderOrder.includes('google-gemini')) throw new Error('CRITIC_GEMINI_SHOULD_BE_INACTIVE');
           if(Boolean(h.freeAiConfigured)!==freeConfigured) throw new Error('FREE_AI_CONFIG_READBACK_FAILED');
-          console.log(`API_HUB_AI_FAILOVER_GATE_OK|writerPrimary=cloudflare-workers-ai|criticPrimary=cloudflare-workers-ai|freeAi=${freeConfigured?'enabled':'inactive'}|geminiTimeoutMs=60000|geminiRetryDelayMs=4000`);
+          console.log(`API_HUB_AI_FAILOVER_GATE_OK|writerPrimary=cloudflare-workers-ai|criticPrimary=${expectedCriticOrder[0]}|freeAi=${freeConfigured?'enabled':'inactive'}|geminiTimeoutMs=60000|geminiRetryDelayMs=4000`);
           console.log(`MODELSCOPE_DEPLOY_CONFIG|token=${process.env.MODELSCOPE_TOKEN?'configured':'missing-fallback-only'}|endpoint=https://api-inference.modelscope.ai|model=Tongyi-MAI/Z-Image-Turbo`);
           console.log('API_HUB_WRITE_GATE_OK|enabled=true|mode=managed_allowlist|count=7');
           const headers={'content-type':'application/json','x-hub-api-key':process.env.ORCHESTRATOR_API_KEY};

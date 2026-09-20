@@ -58,7 +58,7 @@ jobs:
           console.log(`Safe-state check: apiHubWrites=${hub.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}, hubMode=${hub.bloggerWriteMode || 'unknown'}, critic=${hub.criticProvider || 'unknown'}, orchestratorWrites=${orch.bloggerWritesEnabled === true ? 'ENABLED' : 'disabled'}`);
           if (!hubResp.ok || hub.ok !== true) throw new Error('API_HUB_HEALTH_REQUIRED');
           if (hub.bloggerWritesEnabled !== false || hub.bloggerWriteMode !== 'disabled') throw new Error('API_HUB_SAFE_NORMAL_STATE_REQUIRED');
-          if (hub.criticProvider !== 'cloudflare-workers-ai' || hub.criticConfigured !== true) throw new Error('CRITIC_NOT_READY');
+          if (!['free-ai', 'cloudflare-workers-ai'].includes(hub.criticProvider) || hub.criticConfigured !== true) throw new Error('CRITIC_NOT_READY');
           const expectedSha = '0df7c83bb3874c4802ca7c02306beee7cd7032366930d66abfc7fa1bdb6cda66';
           if (hub.masterV45?.bundled !== true || hub.masterV45?.sha256 !== expectedSha || Number(hub.masterV45?.size) !== 93282) throw new Error('MASTER_V45_NOT_VERIFIED');
           if (!orchResp.ok || orch.ok !== true || orch.bloggerWritesEnabled !== false || orch.apiHubConfigured !== true) throw new Error('ORCHESTRATOR_SAFE_NORMAL_STATE_REQUIRED');
@@ -183,7 +183,7 @@ jobs:
           for (let i=1;i<=20;i++) {
             const r = await fetch(`${process.env.API_HUB_V2_BASE_URL}/health`,{cache:'no-store'});
             const h = await r.json().catch(()=>({}));
-            const ok = r.ok && h.bloggerWritesEnabled === true && h.bloggerWriteMode === 'phase1_single_draft' && h.criticProvider === 'cloudflare-workers-ai' && h.criticConfigured === true;
+            const ok = r.ok && h.bloggerWritesEnabled === true && h.bloggerWriteMode === 'phase1_single_draft' && ['free-ai', 'cloudflare-workers-ai'].includes(h.criticProvider) && h.criticConfigured === true;
             console.log(`Guard propagation ${i}: writes=${h.bloggerWritesEnabled === true ? 'enabled' : 'disabled'}, mode=${h.bloggerWriteMode || 'unknown'}, critic=${h.criticConfigured === true ? 'ready' : 'not-ready'}`);
             if (ok) process.exit(0);
             await sleep(1500);

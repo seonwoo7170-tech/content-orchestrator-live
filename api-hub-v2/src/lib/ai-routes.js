@@ -5,6 +5,7 @@ import { MASTER_V45, parseJsonText } from './contracts.js';
 import { loadMasterV45RolePrompt } from './master-v45-role-prompts.js';
 import { collectWriterResearch } from './tavily-search.js';
 import { buildTourApiResearch, getAttractionDetail } from './tour-api.js';
+import { freeAiConfigured, freeAiFallbackEnabled, freeAiModel, runFreeAi, shouldFallbackFromFreeAi } from './free-ai.js';
 
 const WRITER_ADAPTER = `AUTOMATION WRITER ADAPTER — this adapter overrides any interactive/questioning flow in the master prompt for this server call.
 Platform is Google Blogger / Blogspot. Do not ask questions. Do not wait for user selection. Produce one complete publication-ready Article from the supplied topic and language.
@@ -262,23 +263,36 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
     article,
     ...(input?.seoBrief && typeof input.seoBrief === 'object' ? { seoBrief: input.seoBrief } : {})
   });
-  // Critic used to run on Gemini exclusively (falling back to Workers AI only on a
-  // transient Gemini outage). Removed at the operator's request: Gemini's critic issues
-  // and repairInstructions were suspected of driving repair() to progressively trim long
-  // articles shorter across successive critic->repair rounds. Critic now runs on Workers
-  // AI only -- blanking GEMINI_API_KEY for this call keeps runPrimaryWithGeminiFallback's
-  // cloudflare-primary path (the same one writer/repair already use) from ever reaching
-  // its Gemini-fallback branch, without needing a separate code path for "no fallback".
-  const result = await runPrimaryWithGeminiFallback({ ...env, GEMINI_API_KEY: '' }, {
-    cloudflare: {
-      model: cloudflareModel,
-      messages: [
-        { role: 'system', content: systemInstruction },
-        { role: 'user', content: userContent }
-      ],
-      maxTokens: OUTPUT_TOKEN_BUDGET.critic
+  const messages = [
+    { role: 'system', content: systemInstruction },
+    { role: 'user', content: userContent }
+  ];
+  // Critic used to run on Gemini exclusively, then briefly on Workers AI only -- both put
+  // it on the exact same model as (or same family as) writer/repair, which undermines
+  // independent review: a model is a poor judge of its own output. Critic now runs on
+  // free-ai (qwen7b) as primary, a genuinely distinct model from both Cloudflare's
+  // gpt-oss-120b (writer/repair) and Gemini, falling back to Cloudflare only if free-ai
+  // itself is unavailable or returns unparseable output. Gemini stays fully excluded.
+  let result;
+  if (freeAiFallbackEnabled(env) && freeAiConfigured(env)) {
+    try {
+      const raw = await runFreeAi(env, {
+        model: freeAiModel(env, 'critic'),
+        messages,
+        maxTokens: OUTPUT_TOKEN_BUDGET.critic,
+        responseFormat: { type: 'json_object' }
+      }, fetchImpl);
+      parseJsonText(raw.response);
+      result = { ...raw, provider: 'free-ai', fallbackUsed: false, primaryError: null };
+    } catch (error) {
+      if (!shouldFallbackFromFreeAi(error) && error?.message !== 'AI_PROVIDER_JSON_INVALID') throw error;
+      const raw = await runWorkersAi(env, { model: cloudflareModel, messages, maxTokens: OUTPUT_TOKEN_BUDGET.critic }, aiBinding);
+      result = { ...raw, provider: 'cloudflare-workers-ai', fallbackUsed: true, primaryError: String(error.message) };
     }
-  }, aiBinding, fetchImpl);
+  } else {
+    const raw = await runWorkersAi(env, { model: cloudflareModel, messages, maxTokens: OUTPUT_TOKEN_BUDGET.critic }, aiBinding);
+    result = { ...raw, provider: 'cloudflare-workers-ai', fallbackUsed: false, primaryError: null };
+  }
 
   const parsed = normalizeCriticResult(parseJsonText(result.response));
   return {
@@ -286,7 +300,7 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
     ...providerMetadata(result),
     masterV45: MASTER_V45,
     rolePrompt: rolePrompt.meta,
-    auditMode: 'master-v4.5-role-critic-cloudflare-granular'
+    auditMode: 'master-v4.5-role-critic-free-ai-granular'
   };
 }
 

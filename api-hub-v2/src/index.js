@@ -94,8 +94,11 @@ export default {
         const imageQaRequired = String(env.IMAGE_QA_REQUIRED || 'false').trim().toLowerCase() === 'true';
         const writerProviderOrder = textProviderOrder(env);
         // critic() always blanks GEMINI_API_KEY for its own call (see ai-routes.js) so it
-        // never falls back to Gemini, regardless of the global text-provider config.
-        const criticProviderOrder = ['cloudflare-workers-ai'];
+        // never falls back to Gemini, regardless of the global text-provider config. It
+        // runs on free-ai (qwen7b) as primary when configured/enabled -- a genuinely
+        // different model from writer/repair's Cloudflare model -- falling back to
+        // Cloudflare only if free-ai itself is unavailable.
+        const criticProviderOrder = freeAiIsEnabled ? ['free-ai', 'cloudflare-workers-ai'] : ['cloudflare-workers-ai'];
         const repairProviderOrder = textProviderOrder(env);
         const textPrimaryProvider = writerProviderOrder[0];
         const textCloudflareFallbackEnabled = String(env.TEXT_CLOUDFLARE_FALLBACK_ENABLED || 'false').trim().toLowerCase() === 'true';
@@ -126,12 +129,12 @@ export default {
           tavilyConfigured: tavilyConfigured(env),
           tavilySearchDepth: 'basic',
           tourApiConfigured: tourApiConfigured(env),
-          criticProvider: 'cloudflare-workers-ai',
+          criticProvider: criticProviderOrder[0],
           criticProviderOrder,
-          criticFallbackEnabled: false,
-          criticModel: env.CRITIC_MODEL || '@cf/openai/gpt-oss-120b',
+          criticFallbackEnabled: criticProviderOrder.length > 1,
+          criticModel: freeAiIsEnabled ? freeAiModel(env, 'critic') : (env.CRITIC_MODEL || '@cf/openai/gpt-oss-120b'),
           criticConfigured: Boolean(env.AI),
-          criticAuditMode: 'master-v4.5-role-critic-cloudflare-granular',
+          criticAuditMode: 'master-v4.5-role-critic-free-ai-granular',
           repairModel: env.REPAIR_MODEL || '@cf/openai/gpt-oss-120b',
           repairProviderOrder,
           imageProvider: imageProviderOrder[0],

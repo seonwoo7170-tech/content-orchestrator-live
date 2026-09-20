@@ -166,7 +166,7 @@ test('AI routes use the full integrated Master v4.5 with role adapters, critic n
   assert.match(workersSeen[2].body.messages[0].content, /MASTER V4\.5 COMPLIANCE CRITIC ADAPTER/);
   assert.match(workersSeen[2].body.messages[0].content, /Run the audit as separate passes/);
   assert.match(workersSeen[2].body.messages[0].content, /A distinct repair action must receive a distinct issue/);
-  assert.equal(criticResult.auditMode, 'master-v4.5-role-critic-cloudflare-granular');
+  assert.equal(criticResult.auditMode, 'master-v4.5-role-critic-free-ai-granular');
   assert.equal(criticResult.masterV45.size, 93282);
   assert.equal(criticResult.rolePrompt.size, 93282);
   assert.equal(criticResult.provider, 'cloudflare-workers-ai');

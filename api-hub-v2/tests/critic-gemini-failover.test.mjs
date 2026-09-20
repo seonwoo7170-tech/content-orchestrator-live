@@ -43,7 +43,7 @@ test('critic runs on Workers AI even when a Gemini key is configured, and never 
   assert.equal(result.status, 'PASS');
   assert.equal(result.provider, 'cloudflare-workers-ai');
   assert.equal(result.fallbackUsed, false);
-  assert.equal(result.auditMode, 'master-v4.5-role-critic-cloudflare-granular');
+  assert.equal(result.auditMode, 'master-v4.5-role-critic-free-ai-granular');
   assert.equal(geminiCalled, false);
 });
 
