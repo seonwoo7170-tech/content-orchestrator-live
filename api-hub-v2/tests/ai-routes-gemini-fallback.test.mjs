@@ -115,6 +115,9 @@ test('critic runs on Workers AI with granular audit instructions, regardless of 
   assert.match(systemText, /Run the audit as separate passes/);
   assert.match(systemText, /A distinct repair action must receive a distinct issue/);
   assert.match(systemText, /misleading or overclaiming searchDescription/);
+  assert.match(systemText, /ARTICLE LENGTH PASS/);
+  assert.match(systemText, /Standard News\/Explainer ~1,500-2,500 words/);
+  assert.match(systemText, /never as a standalone length defect/);
   const userText = requestBody.messages[1].content;
   assert.deepEqual(JSON.parse(userText), { article });
   assert.ok(!userText.includes('initial'));
