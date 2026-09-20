@@ -325,6 +325,47 @@ test('the generic KIE prompt fallback explicitly excludes the screen-wiping stoc
   assert.match(body.input.prompt, /do not default to a generic stock scene of a person wiping, dusting, or cleaning a screen or device/i);
 });
 
+// The wiping-cliche exclusion's original "unless the topic is specifically about physically
+// cleaning that device" carve-out was too loose: bodyScene() folds the whole article's topic
+// into every section's subject phrase, so the exception fired for sections that had nothing
+// to do with cleaning merely because the broader article mentioned it (confirmed on job #204,
+// a GPU-temperature article where a fan-speed-settings image and a diagnosis image both
+// rendered a wiping-cloth scene). The carve-out must be scoped to this image's own subject.
+test('the wiping/dusting exclusion is scoped to this image\'s own subject, not the broader article', async () => {
+  const calls = [];
+  const prompt = 'Photorealistic real-world photograph focused on 팬 속도 설정 within the broader context of 그래픽카드 온도 정상 범위와 낮추는 방법.';
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'body', prompt, providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
+  const body = JSON.parse(create.init.body);
+  assert.match(body.input.prompt, /only use a cleaning\/dusting scene when the subject phrase above is itself specifically about physically cleaning or dusting the device/i);
+  assert.match(body.input.prompt, /being part of a broader article that separately mentions cleaning as one of several remedies is not sufficient grounds/i);
+});
+
+// KIE_NO_TEXT_TAIL used to be emptied entirely on the theory that hookText's Latin-only gate
+// (isLatinRenderableHookText) already prevented all garbled-text risk -- but body images never
+// receive hookText at all (thumbnail-only) and were left with zero guidance, so a numeric
+// topic like GPU temperature produced a body image with an invented, garbled digital readout
+// (confirmed on job #204). This restores generation-time guidance without resurrecting the
+// removed QA rejection gate.
+test('body image prompts tell the generator not to invent a digital readout or on-screen text', async () => {
+  const calls = [];
+  const prompt = 'Photorealistic real-world photograph focused on 그래픽카드 정상 온도 범위.';
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'body', prompt, providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
+  const body = JSON.parse(create.init.body);
+  assert.match(body.input.prompt, /do not bake any invented digits, dials, readouts, labels, or lettering into the photo/i);
+});
+
 test('forced KIE mode still recognizes a genuine home-repair AI-assistant topic when "home" is explicitly mentioned', async () => {
   const calls = [];
   const prompt = 'Photorealistic real-world photograph focused on ai assistants for home maintenance. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';

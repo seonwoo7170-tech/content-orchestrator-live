@@ -9,12 +9,17 @@ const ALLOWED_IMAGE_MODELS = new Set([DEFAULT_IMAGE_MODEL]);
 const IMAGE_ROLES = new Set(['thumbnail', 'body']);
 const PROVIDER_MODES = new Set(['auto', 'cloudflare', 'kie', 'modelscope']);
 const PLAIN_SURFACE_GUARD = 'Favor simple generic real-world subjects with broad uniform surfaces, simple geometry, natural textures, and minimal decorative detail.';
-// Used to say "No visible text" and then "No logos, branding, or watermark" -- both only
-// ever existed to stop the gpt4o hook-baking feature from producing garbled Korean headline
-// text, which is now prevented at its source (isLatinRenderableHookText). Nothing about a
-// scene's ordinary content (text, UI, logos, watermarks) is restricted anymore; this tail is
-// kept only as the non-hook counterpart to gpt4oHookRenderTail so the two never coexist.
-const KIE_NO_TEXT_TAIL = '';
+// A blanket "no visible text" QA rejection gate used to sit downstream of this tail and was
+// removed (over-rejected benign real-world text like product labels), which is a separate
+// concern from what this prompt tail should say. Emptying this tail at the same time was a
+// mistake for body images: they never receive hookText (thumbnail-only) and have no reason to
+// render any text at all, yet with no guidance here the model spontaneously hallucinates a
+// digital gauge/readout with garbled pseudo-Korean text for numeric topics like GPU
+// temperature (confirmed on job #204's body images). This does not resurrect the old QA
+// rejection gate -- it only tells the generator itself not to invent on-screen text/UI, which
+// is unrelated to whether a rejection gate exists downstream. It must never coexist with
+// gpt4oHookRenderTail (the thumbnail hook-caption instruction), since the two contradict.
+const KIE_NO_TEXT_TAIL = 'Do not bake any invented digits, dials, readouts, labels, or lettering into the photo as if it depicted a working numeric indicator. Depict the physical subject itself, not a rendered readout or caption overlaid on it.';
 const IMAGE_QA_TRANSIENT_DELAYS_MS = [250, 750];
 const IMAGE_QA_SCHEMA = Object.freeze({
   type: 'object',
@@ -90,7 +95,14 @@ function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   // dusting a screen with a cloth -- completely unrelated to almost every such topic. An
   // explicit exclusion is far more reliable here than hoping a better subject phrase alone
   // steers the model away from it.
-  return `A realistic editorial photograph focused on ${subject}. One clear focal subject in natural everyday surroundings. Depict a concrete real-world detail specific to this subject -- do not default to a generic stock scene of a person wiping, dusting, or cleaning a screen or device with a cloth unless the topic is specifically about physically cleaning that device. ${composition} ${tail}`;
+  // The original "unless the topic is specifically about physically cleaning that device"
+  // carve-out was too loose: bodyScene() always folds the whole article's topic into every
+  // section's subject phrase ("<section> within the broader context of <topic>"), so on a
+  // GPU-temperature article the wiping cliche resurfaced across multiple unrelated sections
+  // (fan-speed settings, cause diagnosis) merely because dust cleaning is one plausible
+  // remedy for the *article*, not because that specific section was about cleaning
+  // (confirmed on job #204). The carve-out must be scoped to this image's own subject.
+  return `A realistic editorial photograph focused on ${subject}. One clear focal subject in natural everyday surroundings. Depict a concrete real-world detail specific to this subject -- do not default to a generic stock scene of a person wiping, dusting, or cleaning a screen or device with a cloth. Only use a cleaning/dusting scene when the subject phrase above is itself specifically about physically cleaning or dusting the device -- being part of a broader article that separately mentions cleaning as one of several remedies is not sufficient grounds. ${composition} ${tail}`;
 }
 function normalizeSteps(value) { if (value === undefined || value === null || value === '') return undefined; const steps = Number(value); if (!Number.isInteger(steps) || steps < 1 || steps > 8) throw Object.assign(new Error('IMAGE_STEPS_INVALID'), { status: 400 }); return steps; }
 function normalizeSeed(value) { if (value === undefined || value === null || value === '') return undefined; const seed = Number(value); if (!Number.isInteger(seed) || seed < 0 || seed > 2147483647) throw Object.assign(new Error('IMAGE_SEED_INVALID'), { status: 400 }); return seed; }
