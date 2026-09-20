@@ -147,6 +147,40 @@ test('new article pipeline runs targeted Repair and re-checks Critic after FAIL'
   assert.deepEqual(stages, ['critic_review', 'repairing', 'final_critic']);
 });
 
+test('new article pipeline reports per-round critic issue and repair word-count meta via onStage', async () => {
+  const calls = [];
+  const original = article('<p>Dense original with plenty of words in it.</p>');
+  const repaired = article('<p>Short.</p>');
+  const responses = [
+    { article: original },
+    { status: 'FAIL', score: 90, issues: [issue()] },
+    { article: repaired },
+    { status: 'PASS', score: 98, issues: [] }
+  ];
+  const rounds = [];
+
+  const result = await runNewArticlePipeline(
+    env,
+    { blogId: '11', topic: 'test topic', language: 'en' },
+    makeFetch(responses, calls),
+    { onStage: async (stage, meta) => rounds.push({ stage, meta: meta ?? null }) }
+  );
+
+  assert.equal(result.status, 'READY');
+  assert.deepEqual(rounds.map((round) => round.stage), ['critic_review', 'repairing', 'final_critic']);
+
+  assert.equal(rounds[0].meta, null);
+
+  assert.equal(rounds[1].meta.criticStatus, 'FAIL');
+  assert.equal(rounds[1].meta.criticScore, 90);
+  assert.equal(rounds[1].meta.issueCount, 1);
+  assert.deepEqual(rounds[1].meta.issueLocations, ['html p 1']);
+
+  assert.equal(rounds[2].meta.repairAttempt, 1);
+  assert.equal(rounds[2].meta.repairIssueCount, 1);
+  assert.ok(rounds[2].meta.wordCountBefore > rounds[2].meta.wordCountAfter);
+});
+
 test('new article pipeline regenerates instead of patching when critic finds multiple core information gaps', async () => {
   const calls = [];
   const first = article('<p>Generic answer.</p><p>More generic advice.</p>');

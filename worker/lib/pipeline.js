@@ -15,8 +15,16 @@ const STRUCTURAL_REPLAN_CODES = new Set([
   'ARTICLE_TOO_THIN'
 ]);
 
-async function emitStage(hooks, stage) {
-  if (typeof hooks?.onStage === 'function') await hooks.onStage(stage);
+async function emitStage(hooks, stage, meta) {
+  if (typeof hooks?.onStage === 'function') await hooks.onStage(stage, meta);
+}
+
+function htmlWordCount(html) {
+  const text = String(html || '')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+  return text.split(/\s+/).filter(Boolean).length;
 }
 
 function boundedInteger(value, fallback, min, max) {
@@ -86,8 +94,8 @@ function styleLintSummary(initialLint, history) {
   };
 }
 
-async function criticCheck(env, article, fetchImpl, hooks, context, criticCheckCount) {
-  await emitStage(hooks, criticCheckCount === 0 ? 'critic_review' : 'final_critic');
+async function criticCheck(env, article, fetchImpl, hooks, context, criticCheckCount, stageMeta) {
+  await emitStage(hooks, criticCheckCount === 0 ? 'critic_review' : 'final_critic', stageMeta);
   return validateCriticResult(await callHub(
     env,
     env.HUB_CRITIC_PATH || '/api/hub/ai/critic',
@@ -115,6 +123,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
   let initialCritic = null;
   let finalCritic = null;
   const repairGuardViolations = [];
+  let pendingStageMeta = null;
 
   while (true) {
     let issueSource;
@@ -124,7 +133,8 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
       issueSource = 'linter';
       issues = currentLint.blockingIssues;
     } else {
-      const critic = await criticCheck(env, article, fetchImpl, hooks, context, criticCheckCount);
+      const critic = await criticCheck(env, article, fetchImpl, hooks, context, criticCheckCount, pendingStageMeta);
+      pendingStageMeta = null;
       if (!initialCritic) initialCritic = critic;
       finalCritic = critic;
       criticCheckCount += 1;
@@ -159,6 +169,12 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
       }
       issueSource = 'critic';
       issues = critic.issues;
+      pendingStageMeta = {
+        criticStatus: critic.status,
+        criticScore: critic.score ?? critic.totalScore ?? null,
+        issueCount: Array.isArray(issues) ? issues.length : 0,
+        issueLocations: Array.isArray(issues) ? issues.map((issue) => issue?.location ?? null).slice(0, 10) : []
+      };
     }
 
     if (repairAttempts >= maxRepairs) {
@@ -181,9 +197,11 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
 
     let repairSucceeded = false;
     while (!repairSucceeded && repairAttempts < maxRepairs) {
-      await emitStage(hooks, issueSource === 'linter' ? 'style_repairing' : 'repairing');
+      await emitStage(hooks, issueSource === 'linter' ? 'style_repairing' : 'repairing', pendingStageMeta);
+      pendingStageMeta = null;
       repairAttempts += 1;
       const beforeRepair = article;
+      const beforeRepairWordCount = htmlWordCount(beforeRepair.html);
       const repairIssues = escalatedRepairIssues(issues, context);
 
       try {
@@ -210,6 +228,12 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
         repairApplied = true;
         if (issueSource === 'linter') styleRepairApplied = true;
         repairSucceeded = true;
+        pendingStageMeta = {
+          repairAttempt: repairAttempts,
+          repairIssueCount: repairIssues.length,
+          wordCountBefore: beforeRepairWordCount,
+          wordCountAfter: htmlWordCount(article.html)
+        };
       } catch (error) {
         if (!isRepairGuardError(error)) throw error;
         repairGuardViolations.push({

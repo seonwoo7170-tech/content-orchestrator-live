@@ -47,16 +47,17 @@ function resumesAtCritic(job) {
   return job?.resumeResult?.rewriteMode === EXISTING_REWRITE_MODE;
 }
 
-function stageEvent(stage, counters, maxRepairs) {
+function stageEvent(stage, counters, maxRepairs, extra) {
+  const extraMeta = extra && typeof extra === 'object' ? extra : null;
   if (stage === 'writing') return { eventType: 'writer', stage, message: 'Writer 시작', level: 'info' };
   if (stage === 'candidate_regenerating') return { eventType: 'writer_retry', stage: 'writing', message: 'Writer 후보 재작성 시작', level: 'warn' };
   if (stage === 'critic_review') {
     counters.critic += 1;
-    return { eventType: 'critic', stage, message: counters.critic === 1 ? '딴지 1차 검사 시작' : `딴지 재검사 ${counters.critic}회차 시작`, level: 'info', meta: { criticCheck: counters.critic } };
+    return { eventType: 'critic', stage, message: counters.critic === 1 ? '딴지 1차 검사 시작' : `딴지 재검사 ${counters.critic}회차 시작`, level: 'info', meta: { criticCheck: counters.critic, ...extraMeta } };
   }
   if (stage === 'final_critic') {
     counters.critic += 1;
-    return { eventType: 'critic', stage, message: `최종 딴지 검사 시작 (${counters.critic}회차)`, level: 'info', meta: { criticCheck: counters.critic } };
+    return { eventType: 'critic', stage, message: `최종 딴지 검사 시작 (${counters.critic}회차)`, level: 'info', meta: { criticCheck: counters.critic, ...extraMeta } };
   }
   if (stage === 'repairing' || stage === 'style_repairing') {
     counters.repair += 1;
@@ -66,7 +67,7 @@ function stageEvent(stage, counters, maxRepairs) {
       stage: 'repairing',
       message: `${label} ${counters.repair}/${maxRepairs} 시작`,
       level: 'warn',
-      meta: { repairAttempt: counters.repair, maxRepairAttempts: maxRepairs }
+      meta: { repairAttempt: counters.repair, maxRepairAttempts: maxRepairs, ...extraMeta }
     };
   }
   return { eventType: 'stage', stage: normalizePipelineStage(stage), message: `${stage} 단계 시작`, level: 'info' };
@@ -125,8 +126,8 @@ export async function processStoredJob(env, row, options = {}) {
   try {
     if (current === 'queued') await transition(initial);
     const result = await executeJob(env, job, fetchImpl, {
-      onStage: async (stage) => {
-        await appendJobEvent(env, job.id, stageEvent(stage, counters, maxRepairs));
+      onStage: async (stage, meta) => {
+        await appendJobEvent(env, job.id, stageEvent(stage, counters, maxRepairs, meta));
         return transition(stage);
       }
     });
