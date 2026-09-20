@@ -342,6 +342,73 @@ jobs:
           }));
           NODE
 
+      - name: Verify the new critic/repair word-count instrumentation is actually landing in job_events
+        shell: bash
+        env:
+          INSTRUMENTATION_SINCE: '2026-09-20T03:40:00Z'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          const since=new Date(process.env.INSTRUMENTATION_SINCE);
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${String(j.error||'unknown').slice(0,150)}`);
+            return j;
+          }
+          function toDate(value){
+            const raw=String(value||'').trim(); if(!raw) return null;
+            const normalized=/(?:Z|[+-]\d\d:\d\d)$/i.test(raw)?raw:`${raw.replace(' ','T')}Z`;
+            const date=new Date(normalized); return Number.isNaN(date.getTime())?null:date;
+          }
+          const statusesToScan=['writing','critic_review','repairing','final_critic','needs_review','ready','failed'];
+          const candidateIds=new Set();
+          for(const status of statusesToScan){
+            const resp=await get(`/api/jobs?status=${encodeURIComponent(status)}&limit=100`);
+            const jobs=Array.isArray(resp.jobs)?resp.jobs:[];
+            for(const job of jobs){
+              const updated=toDate(job.updated_at||job.created_at);
+              if(updated && updated>=since) candidateIds.add(Number(job.id));
+            }
+          }
+          const completedResp=await get('/api/jobs?status=completed&archived=true&limit=100');
+          for(const job of (Array.isArray(completedResp.jobs)?completedResp.jobs:[])){
+            const updated=toDate(job.archived_at||job.updated_at);
+            if(updated && updated>=since) candidateIds.add(Number(job.id));
+          }
+          console.log('INSTRUMENTATION_CANDIDATE_JOB_IDS',JSON.stringify([...candidateIds]));
+
+          const roundRows=[];
+          const eventsRouteOk=[];
+          for(const jobId of candidateIds){
+            let after=0; const all=[]; let routeFailed=false;
+            for(let page=0; page<20; page+=1){
+              const r=await fetch(`${base}/api/jobs/${jobId}/events?after=${after}&limit=100`,{headers,cache:'no-store'});
+              const j=await r.json().catch(()=>({}));
+              if(!r.ok){ console.log('EVENTS_READ_FAILED',jobId,r.status,JSON.stringify(j)); routeFailed=true; break; }
+              const events=Array.isArray(j.events)?j.events:[];
+              all.push(...events);
+              if(events.length===0) break;
+              after=j.lastEventId;
+            }
+            eventsRouteOk.push({jobId,ok:!routeFailed,eventCount:all.length});
+            for(const event of all){
+              if(!event.meta) continue;
+              const hasCriticMeta=Object.prototype.hasOwnProperty.call(event.meta,'criticStatus');
+              const hasRepairMeta=Object.prototype.hasOwnProperty.call(event.meta,'wordCountBefore');
+              if(hasCriticMeta||hasRepairMeta){
+                roundRows.push({jobId,stage:event.stage,eventType:event.event_type,createdAt:event.created_at,meta:event.meta});
+              }
+            }
+          }
+          console.log('EVENTS_ROUTE_STATUS',JSON.stringify(eventsRouteOk));
+          console.log('INSTRUMENTATION_ROUNDS_FOUND',JSON.stringify({count:roundRows.length}));
+          console.log('INSTRUMENTATION_ROUNDS_DETAIL',JSON.stringify(roundRows));
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
