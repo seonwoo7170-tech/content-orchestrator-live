@@ -912,3 +912,44 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
             "SELECT job_id || ' | ' || status || ' | post=' || COALESCE(blogger_post_id, '-') || ' | at=' || COALESCE(scheduled_time, '-') || ' | err=' || COALESCE(error, '-') AS publish_row FROM job_publications WHERE job_id IN (137,139,149,151,153,154,156,157) ORDER BY job_id;"
+
+      # ONE-TIME, GUARDED MUTATION. Jobs 206/172/165 died at the critic stage on the contract gap
+      # fixed in ai-routes.js on 2026-09-20, and recovery_state 'held' excludes them from every
+      # automatic retry, so they cannot come back on their own. The guard below is what makes this
+      # safe to leave in a workflow that re-runs on every push to this file: it POSTs only while a
+      # job is still failed AND held AND holding a CRITIC_*_INVALID reason AND has zero images, so
+      # a second run after a successful retry does nothing. The zero-image check also means this
+      # can never discard a paid KIE image -- these three never reached image generation.
+      - name: One-time guarded retry of the three critic-contract jobs (mutating, no-op once cleared)
+        shell: bash
+        env:
+          CRITIC_CONTRACT_JOB_IDS: '206,172,165'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${JSON.stringify(j)}`);
+            return j;
+          }
+          for(const jobId of String(process.env.CRITIC_CONTRACT_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const [detail,imageResp]=await Promise.all([get(`/api/jobs/${jobId}`), get(`/api/jobs/${jobId}/images`)]);
+            const job=detail.job||{};
+            const images=imageResp.images||[];
+            const eligible=String(job.status)==='failed'
+              && String(job.recovery_state)==='held'
+              && /^CRITIC_[A-Z_]*INVALID$/.test(String(job.hold_reason||''))
+              && images.length===0;
+            if(!eligible){
+              console.log('CRITIC_RETRY_SKIPPED',jobId,JSON.stringify({status:job.status,recoveryState:job.recovery_state||null,hold:job.hold_reason||null,imageCount:images.length}));
+              continue;
+            }
+            const r=await fetch(`${base}/api/jobs/${jobId}/retry`,{method:'POST',headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            console.log('CRITIC_RETRY_RESULT',jobId,r.status,JSON.stringify(j));
+          }
+          NODE
