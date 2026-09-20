@@ -12,7 +12,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment: production
     env:
       ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
@@ -440,6 +440,41 @@ jobs:
           }));
           const readyResp=await get('/api/jobs?status=ready&limit=100');
           console.log('READY_BACKLOG_COUNT',JSON.stringify({count:(readyResp.jobs||[]).length}));
+          NODE
+
+      - name: Manually queue and run one test article to observe free-ai Critic live (operator-approved, text-only, no image generation triggered)
+        shell: bash
+        env:
+          TEST_BLOG_ID: '3842750331568707733'
+          TEST_TOPIC: '그래픽카드 온도 정상 범위와 낮추는 방법'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          const createResp=await fetch(`${base}/api/jobs/new`,{method:'POST',headers,body:JSON.stringify({blogId:process.env.TEST_BLOG_ID,topic:process.env.TEST_TOPIC})});
+          const created=await createResp.json().catch(()=>({}));
+          if(!createResp.ok) throw new Error(`JOB_CREATE_FAILED:${createResp.status}:${JSON.stringify(created)}`);
+          console.log('TEST_JOB_CREATED',JSON.stringify(created));
+          const jobId=created.jobId;
+          const runResp=await fetch(`${base}/api/jobs/${jobId}/run`,{method:'POST',headers,body:'{}'});
+          const run=await runResp.json().catch(()=>({}));
+          console.log('TEST_JOB_RUN_HTTP_STATUS',runResp.status);
+          console.log('TEST_JOB_RUN_RESULT',JSON.stringify(run));
+
+          // Pull job_events for this exact job to see the word-count/critic-provider instrumentation.
+          let after=0; const events=[];
+          for(let page=0; page<20; page+=1){
+            const r=await fetch(`${base}/api/jobs/${jobId}/events?after=${after}&limit=100`,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok){ console.log('TEST_JOB_EVENTS_READ_FAILED',r.status); break; }
+            const batch=Array.isArray(j.events)?j.events:[];
+            events.push(...batch);
+            if(batch.length===0) break;
+            after=j.lastEventId;
+          }
+          console.log('TEST_JOB_EVENTS',JSON.stringify(events.map((e)=>({stage:e.stage,eventType:e.event_type,message:e.message,meta:e.meta,createdAt:e.created_at}))));
           NODE
 
 # probe: inspect-kie-qa-prompt-2026-09-06
