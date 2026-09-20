@@ -442,28 +442,37 @@ jobs:
           console.log('READY_BACKLOG_COUNT',JSON.stringify({count:(readyResp.jobs||[]).length}));
           NODE
 
-      - name: Manually queue and run one test article to observe free-ai Critic live (operator-approved, text-only, no image generation triggered)
+      - name: Check test job 204's writer/critic/repair outcome (read-only, does not create a new job)
         shell: bash
         env:
-          TEST_BLOG_ID: '3842750331568707733'
-          TEST_TOPIC: '그래픽카드 온도 정상 범위와 낮추는 방법'
+          TEST_JOB_ID: '204'
         run: |
           node - <<'NODE'
           const base=process.env.BASE_URL;
           const admin=process.env.ADMIN_API_KEY;
           if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
-          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
-          const createResp=await fetch(`${base}/api/jobs/new`,{method:'POST',headers,body:JSON.stringify({blogId:process.env.TEST_BLOG_ID,topic:process.env.TEST_TOPIC})});
-          const created=await createResp.json().catch(()=>({}));
-          if(!createResp.ok) throw new Error(`JOB_CREATE_FAILED:${createResp.status}:${JSON.stringify(created)}`);
-          console.log('TEST_JOB_CREATED',JSON.stringify(created));
-          const jobId=created.jobId;
-          const runResp=await fetch(`${base}/api/jobs/${jobId}/run`,{method:'POST',headers,body:'{}'});
-          const run=await runResp.json().catch(()=>({}));
-          console.log('TEST_JOB_RUN_HTTP_STATUS',runResp.status);
-          console.log('TEST_JOB_RUN_RESULT',JSON.stringify(run));
-
-          // Pull job_events for this exact job to see the word-count/critic-provider instrumentation.
+          const headers={'x-admin-api-key':admin};
+          const jobId=process.env.TEST_JOB_ID;
+          const jobResp=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+          const jobBody=await jobResp.json().catch(()=>({}));
+          console.log('TEST_JOB_STATE',JSON.stringify({status:jobBody.job?.status,updated_at:jobBody.job?.updated_at}));
+          let result=null;
+          try{ result=jobBody.job?.result_json?JSON.parse(jobBody.job.result_json):null; }catch{}
+          if(result){
+            console.log('TEST_JOB_RESULT_SUMMARY',JSON.stringify({
+              status:result.status,
+              repairApplied:result.repairApplied,
+              repairAttempts:result.repairAttempts,
+              repairGuardViolations:result.repairGuardViolations,
+              initialCriticStatus:result.initialCritic?.status,
+              initialCriticProvider:result.initialCritic?.provider,
+              initialCriticScore:result.initialCritic?.score,
+              finalCriticStatus:result.finalCritic?.status,
+              finalCriticProvider:result.finalCritic?.provider,
+              finalCriticScore:result.finalCritic?.score,
+              finalCriticIssues:result.finalCritic?.issues
+            }));
+          }
           let after=0; const events=[];
           for(let page=0; page<20; page+=1){
             const r=await fetch(`${base}/api/jobs/${jobId}/events?after=${after}&limit=100`,{headers,cache:'no-store'});
