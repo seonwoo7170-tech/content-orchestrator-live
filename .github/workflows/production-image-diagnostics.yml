@@ -18,6 +18,8 @@ jobs:
       ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
       BASE_URL: https://content-orchestrator.smileseon.workers.dev
       API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - name: Read production image state
         shell: bash
@@ -580,6 +582,19 @@ jobs:
             maxPublishesPerDay:b.effective?.maxPublishesPerDay
           }))));
           NODE
+
+      - name: Read-only D1 check of daily_plan_slots and job_publications for the 12 stuck new_article ready jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+          echo '--- daily_plan_slots for stuck new_article ready jobs ---'
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT id, plan_date, blog_id, slot_no, kind, status, job_id FROM daily_plan_slots WHERE job_id IN (157,156,155,154,153,152,151,150,149,147,139,137) ORDER BY blog_id, slot_no;"
+          echo '--- job_publications for the same jobs (any claim/schedule attempt at all?) ---'
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT job_id, blog_id, plan_date, slot_no, status, attempts, scheduled_time, error, updated_at FROM job_publications WHERE job_id IN (157,156,155,154,153,152,151,150,149,147,139,137) ORDER BY job_id;"
 
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
