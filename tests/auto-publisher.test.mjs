@@ -67,7 +67,7 @@ test('image checks are skipped only when blog image automation is disabled', () 
 
 test('publisher scans recent carryover plan dates instead of only today', async () => {
   const source = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
-  assert.match(source, /CARRYOVER_LOOKBACK_DAYS\s*=\s*2/);
+  assert.match(source, /CARRYOVER_LOOKBACK_DAYS\s*=\s*14/);
   assert.match(source, /s\.plan_date BETWEEN date\(\?, \?\) AND \?/);
   assert.match(source, /ORDER BY s\.plan_date, s\.slot_no/);
 });

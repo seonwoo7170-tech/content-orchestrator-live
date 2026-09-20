@@ -12,7 +12,14 @@ import { buildSchemaAwareDelivery } from './schema-delivery.js';
 
 const MAX_PUBLICATION_ATTEMPTS = 3;
 const MIN_SCHEDULE_LEAD_MINUTES = 10;
-const CARRYOVER_LOOKBACK_DAYS = 2;
+// A 2-day window silently dropped any ready new_article job that didn't get published within
+// 2 days of its own daily-plan slot: listCandidates() simply stops returning it, with zero
+// error or event, so it sits in 'ready' forever with no publication row at all (confirmed on
+// production jobs #137-#157, ready for 8-9 days from plan dates 2026-09-11/12, still with zero
+// job_publications rows). 14 days gives real backlog (e.g. a temporary publish-capacity crunch)
+// room to clear before a job is permanently excluded, while still bounding how old a
+// "carried over" article can be before it's dropped from consideration.
+const CARRYOVER_LOOKBACK_DAYS = 14;
 const STALE_PUBLICATION_CLAIM_MINUTES = 15;
 
 function requireDb(env) {

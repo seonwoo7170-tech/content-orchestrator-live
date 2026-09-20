@@ -10,7 +10,12 @@ import { deliveryEvidenceComplete, validateBloggerReadback } from './delivery-ev
 import { buildSchemaAwareDelivery } from './schema-delivery.js';
 
 const MIN_SCHEDULE_LEAD_MINUTES = 10;
-const REPAIR_CARRYOVER_LOOKBACK_DAYS = 2;
+// Kept in sync with auto-publisher.js's CARRYOVER_LOOKBACK_DAYS: a slotted repair candidate
+// (one still tied to a daily_plan_slots row, not yet orphaned) silently drops out of
+// consideration once its slot's plan_date falls outside this window, with no error or event.
+// 14 days gives a repair backlog room to clear through the per-day position cap
+// (resolveRepairPosition/REPAIR_POSITION_EXCEEDS_DAILY_LIMIT) before being dropped entirely.
+const REPAIR_CARRYOVER_LOOKBACK_DAYS = 14;
 const STALE_UPDATE_CLAIM_MINUTES = 15;
 const MAX_UPDATE_CLAIM_RECOVERIES = 3;
 

@@ -4,8 +4,8 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../worker/lib/auto-repair-updater.js', import.meta.url), 'utf8');
 
-test('slotted repair jobs survive plan-date rollover for two days', () => {
-  assert.match(source, /REPAIR_CARRYOVER_LOOKBACK_DAYS\s*=\s*2/);
+test('slotted repair jobs survive plan-date rollover for fourteen days', () => {
+  assert.match(source, /REPAIR_CARRYOVER_LOOKBACK_DAYS\s*=\s*14/);
   assert.match(source, /s\.plan_date BETWEEN date\(\?, \?\) AND \?/);
   assert.match(source, /bind\(planDate, `-\$\{REPAIR_CARRYOVER_LOOKBACK_DAYS\} days`, planDate\)/);
   assert.doesNotMatch(source, /WHERE s\.plan_date = \?/);
