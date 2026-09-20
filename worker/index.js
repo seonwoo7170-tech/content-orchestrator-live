@@ -30,6 +30,7 @@ import { applyRealPhotoFallback } from './lib/real-photo-images.js';
 import { diagnoseCloudflareViaHub } from './lib/provider-diagnostics.js';
 import { getStoredJob, listArchivedJobs, listStoredJobs, persistJobResult, persistJobTransition } from './lib/job-store.js';
 import { processStoredJob } from './lib/stored-job-executor.js';
+import { listJobEvents } from './lib/job-events.js';
 
 function json(data, status = 200, extraHeaders = {}) {
   const headers = new Headers({
@@ -451,6 +452,17 @@ export default {
         await persistJobResult(env, attachImagesJobId, nextResult);
         for (const image of images) if (image.status === 'stored') await markImageAttached(env, image.id);
         return json({ ok: true, jobId: attachImagesJobId, article, images: await listJobImages(env, attachImagesJobId) });
+      }
+
+      const jobEventsId = matchJobPath(url.pathname, 'events');
+      if (request.method === 'GET' && jobEventsId !== null) {
+        if (!await requireAdmin(request, env)) return json({ error: 'UNAUTHORIZED' }, 401);
+        const events = await listJobEvents(env, jobEventsId, {
+          afterId: url.searchParams.get('after'),
+          limit: url.searchParams.get('limit')
+        });
+        const lastEventId = events.length ? Number(events[events.length - 1].id) : Number(url.searchParams.get('after') || 0);
+        return json({ jobId: jobEventsId, events, lastEventId });
       }
 
       const readJobId = matchJobPath(url.pathname);
