@@ -172,6 +172,7 @@ test('new article pipeline reports per-round critic issue and repair word-count 
   assert.equal(rounds[0].meta, null);
 
   assert.equal(rounds[1].meta.criticStatus, 'FAIL');
+  assert.equal(rounds[1].meta.criticProvider, null);
   assert.equal(rounds[1].meta.criticScore, 90);
   assert.equal(rounds[1].meta.issueCount, 1);
   assert.deepEqual(rounds[1].meta.issueLocations, ['html p 1']);
@@ -179,6 +180,29 @@ test('new article pipeline reports per-round critic issue and repair word-count 
   assert.equal(rounds[2].meta.repairAttempt, 1);
   assert.equal(rounds[2].meta.repairIssueCount, 1);
   assert.ok(rounds[2].meta.wordCountBefore > rounds[2].meta.wordCountAfter);
+});
+
+test('new article pipeline threads the critic\'s actual provider (e.g. free-ai vs cloudflare-workers-ai) into the onStage meta', async () => {
+  const calls = [];
+  const original = article('<p>Dense original.</p>');
+  const repaired = article('<p>Short repaired answer.</p>');
+  const responses = [
+    { article: original },
+    { status: 'FAIL', score: 90, issues: [issue()], provider: 'free-ai' },
+    { article: repaired },
+    { status: 'PASS', score: 98, issues: [] }
+  ];
+  const rounds = [];
+
+  const result = await runNewArticlePipeline(
+    env,
+    { blogId: '11', topic: 'test topic', language: 'en' },
+    makeFetch(responses, calls),
+    { onStage: async (stage, meta) => rounds.push({ stage, meta: meta ?? null }) }
+  );
+
+  assert.equal(result.status, 'READY');
+  assert.equal(rounds[1].meta.criticProvider, 'free-ai');
 });
 
 test('new article pipeline regenerates instead of patching when critic finds multiple core information gaps', async () => {

@@ -171,6 +171,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
       issues = critic.issues;
       pendingStageMeta = {
         criticStatus: critic.status,
+        criticProvider: critic.provider ?? null,
         criticScore: critic.score ?? critic.totalScore ?? null,
         issueCount: Array.isArray(issues) ? issues.length : 0,
         issueLocations: Array.isArray(issues) ? issues.map((issue) => issue?.location ?? null).slice(0, 10) : []

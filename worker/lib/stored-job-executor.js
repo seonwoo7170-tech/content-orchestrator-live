@@ -77,19 +77,20 @@ function resultEvent(result, counters) {
   const critic = result?.finalCritic || result?.initialCritic || null;
   const score = critic?.score ?? critic?.totalScore ?? null;
   const status = String(critic?.status || '');
+  const provider = critic?.provider ?? null;
   const issueCount = Array.isArray(critic?.issues) ? critic.issues.length : 0;
   const scoreText = score === null ? '' : ` · ${score}점`;
   if (result?.status === 'NEEDS_REVIEW') {
     return {
       eventType: 'quality_result', stage: 'final_critic', level: 'warn',
       message: `최종 딴지 ${status || 'FAIL'}${scoreText} · 확인 필요`,
-      meta: { status, score, issueCount, repairAttempts: counters.repair }
+      meta: { status, score, provider, issueCount, repairAttempts: counters.repair }
     };
   }
   return {
     eventType: 'quality_result', stage: 'final_critic', level: 'success',
     message: `최종 딴지 ${status || 'PASS'}${scoreText} · 품질검사 완료`,
-    meta: { status, score, issueCount, repairAttempts: counters.repair }
+    meta: { status, score, provider, issueCount, repairAttempts: counters.repair }
   };
 }
 
