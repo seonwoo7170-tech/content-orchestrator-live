@@ -668,6 +668,32 @@ jobs:
           console.log('PUBLISHING_NEW_NOW',JSON.stringify({count:(publishingResp.jobs||[]).length,ids:(publishingResp.jobs||[]).map((j)=>j.id)}));
           NODE
 
+      - name: Confirm the 6 image-count-exception repair jobs actually cleared after deploy (read-only)
+        shell: bash
+        env:
+          IMAGE_EXCEPTION_JOB_IDS: '140,141,143,158,159,160'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${JSON.stringify(j)}`);
+            return j;
+          }
+          for(const jobId of String(process.env.IMAGE_EXCEPTION_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const detail=await get(`/api/jobs/${jobId}`);
+            const job=detail.job||{};
+            let result=null; try{result=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            console.log('IMAGE_EXCEPTION_JOB_STATUS',jobId,JSON.stringify({
+              status:job.status,updated_at:job.updated_at,resultStatus:result?.status||null
+            }));
+          }
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
