@@ -345,7 +345,7 @@ jobs:
       - name: Verify the new critic/repair word-count instrumentation is actually landing in job_events
         shell: bash
         env:
-          INSTRUMENTATION_SINCE: '2026-09-20T03:40:00Z'
+          INSTRUMENTATION_SINCE: '2026-09-20T03:21:00Z'
         run: |
           node - <<'NODE'
           const base=process.env.BASE_URL;
@@ -383,6 +383,7 @@ jobs:
 
           const roundRows=[];
           const eventsRouteOk=[];
+          const criticStartRows=[];
           for(const jobId of candidateIds){
             let after=0; const all=[]; let routeFailed=false;
             for(let page=0; page<20; page+=1){
@@ -396,6 +397,11 @@ jobs:
             }
             eventsRouteOk.push({jobId,ok:!routeFailed,eventCount:all.length});
             for(const event of all){
+              const createdAt=toDate(event.created_at);
+              const isCriticStart=event.event_type==='critic'&&createdAt&&createdAt>=since;
+              if(isCriticStart){
+                criticStartRows.push({jobId,stage:event.stage,createdAt:event.created_at,message:event.message,meta:event.meta||null});
+              }
               if(!event.meta) continue;
               const hasCriticMeta=Object.prototype.hasOwnProperty.call(event.meta,'criticStatus');
               const hasRepairMeta=Object.prototype.hasOwnProperty.call(event.meta,'wordCountBefore');
@@ -405,6 +411,7 @@ jobs:
             }
           }
           console.log('EVENTS_ROUTE_STATUS',JSON.stringify(eventsRouteOk));
+          console.log('CRITIC_STARTS_SINCE_FREEAI_DEPLOY',JSON.stringify({count:criticStartRows.length,rows:criticStartRows}));
           console.log('INSTRUMENTATION_ROUNDS_FOUND',JSON.stringify({count:roundRows.length}));
           console.log('INSTRUMENTATION_ROUNDS_DETAIL',JSON.stringify(roundRows));
           NODE
