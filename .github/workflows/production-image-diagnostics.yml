@@ -845,6 +845,15 @@ jobs:
           }
           NODE
 
+      - name: Confirm the real published post id/url for the 4 completed Smile Atlas jobs (read-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT job_id, blog_id, status, blogger_post_id, url, error, updated_at FROM job_publications WHERE job_id IN (195,190,185,168) ORDER BY job_id;"
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
