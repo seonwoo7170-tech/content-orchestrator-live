@@ -112,12 +112,16 @@ export async function listArchivedJobs(env, options = {}) {
   const db = requireDb(env);
   const limit = normalizeJobListLimit(options.limit);
   const status = String(options.status || '').trim();
+  const blogId = String(options.blogId || '').trim();
   const columns = `id, mode, blog_id, blogger_post_id, target_url, topic, status,
     CASE WHEN result_json IS NULL THEN 0 ELSE 1 END AS has_result,
     created_at, updated_at, archived_at`;
-  const statement = status
-    ? db.prepare(`SELECT ${columns} FROM jobs WHERE status = ? AND archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT ?`).bind(status, limit)
-    : db.prepare(`SELECT ${columns} FROM jobs WHERE archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT ?`).bind(limit);
+  const conditions = ['archived_at IS NOT NULL'];
+  const args = [];
+  if (status) { conditions.push('status = ?'); args.push(status); }
+  if (blogId) { conditions.push('blog_id = ?'); args.push(blogId); }
+  args.push(limit);
+  const statement = db.prepare(`SELECT ${columns} FROM jobs WHERE ${conditions.join(' AND ')} ORDER BY archived_at DESC LIMIT ?`).bind(...args);
   const rows = await statement.all();
   return rows.results || [];
 }

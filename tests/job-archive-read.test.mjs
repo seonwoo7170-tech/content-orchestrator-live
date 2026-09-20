@@ -52,9 +52,29 @@ test('listArchivedJobs queries archived_at IS NOT NULL, the inverse of the activ
   assert.match(capturedSql, /ORDER BY archived_at DESC/);
 });
 
+test('listArchivedJobs can scope the preserved history to one blog', async () => {
+  let capturedSql = '';
+  let capturedArgs = [];
+  const spyDb = {
+    prepare(sql) {
+      capturedSql = sql;
+      return {
+        bind: (...args) => {
+          capturedArgs = args;
+          return { all: async () => ({ results: [] }) };
+        }
+      };
+    }
+  };
+  await listArchivedJobs({ ORCHESTRATOR_DB: spyDb }, { status: 'completed', blogId: '123456' });
+  assert.match(capturedSql, /blog_id = \?/);
+  assert.deepEqual(capturedArgs, ['completed', '123456', 30]);
+});
+
 test('the /api/jobs route exposes archived history behind an explicit ?archived=true switch', () => {
   assert.match(workerIndex, /listArchivedJobs/);
   assert.match(workerIndex, /searchParams\.get\('archived'\)/);
+  assert.match(workerIndex, /blogId: url\.searchParams\.get\('blogId'\)/);
 });
 
 test('the "오늘 완료" panel actually requests the archived history instead of a query that can never return one', () => {

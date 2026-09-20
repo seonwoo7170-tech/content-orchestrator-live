@@ -345,7 +345,8 @@ export default {
         const jobs = archived
           ? await listArchivedJobs(env, {
               limit: url.searchParams.get('limit'),
-              status: url.searchParams.get('status')
+              status: url.searchParams.get('status'),
+              blogId: url.searchParams.get('blogId')
             })
           : await listStoredJobs(env, {
               limit: url.searchParams.get('limit'),
