@@ -17,6 +17,7 @@ jobs:
     env:
       ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
       BASE_URL: https://content-orchestrator.smileseon.workers.dev
+      API_HUB_V2_BASE_URL: https://api-hub-v2.smileseon.workers.dev
     steps:
       - name: Read production image state
         shell: bash
@@ -320,6 +321,25 @@ jobs:
             duplicateTitles
           }));
           console.log('CONTENT_AUDIT_FULL',JSON.stringify(audits));
+          NODE
+
+      - name: Check whether free-ai (qwen7b) is actually configured before considering it for Critic
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.API_HUB_V2_BASE_URL;
+          const r=await fetch(`${base}/health?free_ai_check=${Date.now()}`,{cache:'no-store'});
+          const h=await r.json().catch(()=>({}));
+          if(!r.ok) throw new Error(`API_HUB_HEALTH_READ_FAILED:${r.status}`);
+          console.log('FREE_AI_CONFIG_STATUS',JSON.stringify({
+            freeAiConfigured:h.freeAiConfigured,
+            freeAiFallbackEnabled:h.freeAiFallbackEnabled,
+            freeAiModel:h.freeAiModel,
+            freeAiCriticModel:h.freeAiCriticModel,
+            geminiConfigured:h.geminiConfigured,
+            criticProvider:h.criticProvider,
+            criticConfigured:h.criticConfigured
+          }));
           NODE
 
 # probe: inspect-kie-qa-prompt-2026-09-06
