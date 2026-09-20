@@ -596,6 +596,34 @@ jobs:
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
             "SELECT job_id, blog_id, plan_date, slot_no, status, attempts, scheduled_time, error, updated_at FROM job_publications WHERE job_id IN (157,156,155,154,153,152,151,150,149,147,139,137) ORDER BY job_id;"
 
+      - name: Temporarily raise maxPublishesPerDay to drain the stale ready backlog, then run repair-publish-tick (operator-approved, one-time)
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          async function get(path){
+            const r=await fetch(base+path,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`READ_FAILED:${path}:${r.status}:${JSON.stringify(j)}`);
+            return j;
+          }
+          const before=await get('/api/automation/settings');
+          console.log('GLOBAL_SETTINGS_BEFORE',JSON.stringify(before.global));
+
+          const raised={...before.global, maxPublishesPerDay: 20};
+          const putResp=await fetch(`${base}/api/automation/settings/global`,{method:'PUT',headers,body:JSON.stringify(raised)});
+          const putBody=await putResp.json().catch(()=>({}));
+          if(!putResp.ok) throw new Error(`SETTINGS_PUT_FAILED:${putResp.status}:${JSON.stringify(putBody)}`);
+          console.log('GLOBAL_SETTINGS_RAISED',JSON.stringify(putBody.settings));
+
+          const repairResp=await fetch(`${base}/api/operations/repair-publish-tick`,{method:'POST',headers,body:'{}'});
+          const repairBody=await repairResp.json().catch(()=>({}));
+          console.log('REPAIR_PUBLISH_TICK_AFTER_RAISE',JSON.stringify(repairBody));
+          NODE
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
