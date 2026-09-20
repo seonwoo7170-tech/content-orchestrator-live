@@ -18,6 +18,9 @@ export function normalizeDailySlotAssignment(slot, input = {}) {
     if (!['ko', 'en'].includes(language)) throw new Error('LANGUAGE_INVALID');
     const candidateId = Number(input.topicCandidateId || 0);
     const topicSource = input.topicSource ? String(input.topicSource).trim().slice(0, 40) : '';
+    const tourApiContentId = /^\d+$/.test(String(input.tourApiContentId || '').trim())
+      ? String(input.tourApiContentId).trim()
+      : '';
     return {
       mode: 'new_article',
       blogId,
@@ -25,6 +28,7 @@ export function normalizeDailySlotAssignment(slot, input = {}) {
       language,
       ...(Number.isInteger(candidateId) && candidateId > 0 ? { topicCandidateId: candidateId } : {}),
       ...(topicSource ? { topicSource } : {}),
+      ...(tourApiContentId ? { tourApiContentId } : {}),
       dailySlotId: slotId
     };
   }

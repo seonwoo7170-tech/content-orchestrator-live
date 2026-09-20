@@ -13,7 +13,8 @@ import {
   normalizeKlookProductRow,
   normalizeKoreanCityName,
   parseKlookProductCsv,
-  smileatlasBlogId
+  smileatlasBlogId,
+  tourApiConnectedBlogIds
 } from '../worker/lib/klook-catalog.js';
 
 const SAMPLE_CSV = `Country Name,City Name,Product Name (Activity name or Hotel name),Product Image,Currency,Sell Price,Commission Rate,Instant Confirmation tag,Affiliate Link
@@ -210,6 +211,14 @@ test('inferKlookCityFromText prefers whichever known city is named first when an
 test('smileatlasBlogId defaults to the known smileatlas blog id and can be overridden via env', () => {
   assert.equal(smileatlasBlogId({}), '4712699686222371580');
   assert.equal(smileatlasBlogId({ SMILEATLAS_BLOG_ID: '999' }), '999');
+});
+
+test('tourApiConnectedBlogIds defaults to just smileatlas but can be widened via env', () => {
+  assert.deepEqual([...tourApiConnectedBlogIds({})], ['4712699686222371580']);
+  assert.deepEqual(
+    [...tourApiConnectedBlogIds({ TOUR_API_CONNECTED_BLOG_IDS: '111, 222 ,333' })],
+    ['111', '222', '333']
+  );
 });
 
 test('normalizeKoreanCityName strips administrative suffixes so different Klook exports of the same place agree', () => {

@@ -22,6 +22,20 @@ test('new article slot requires a topic and normalizes language', () => {
   );
 });
 
+test('new article slot passes through a valid numeric tourApiContentId and rejects a non-numeric one', () => {
+  const grounded = normalizeDailySlotAssignment(
+    { id: 4, blog_id: 'blog-1', kind: 'new_article', status: 'pending' },
+    { topic: 'Gyeongbokgung Palace', language: 'en', tourApiContentId: '126508' }
+  );
+  assert.equal(grounded.tourApiContentId, '126508');
+
+  const ungrounded = normalizeDailySlotAssignment(
+    { id: 4, blog_id: 'blog-1', kind: 'new_article', status: 'pending' },
+    { topic: 'Gyeongbokgung Palace', language: 'en', tourApiContentId: 'not-a-number' }
+  );
+  assert.equal(ungrounded.tourApiContentId, undefined);
+});
+
 test('repair slot requires an existing Blogger Post ID', () => {
   const job = normalizeDailySlotAssignment(
     { id: 2, blog_id: 'blog-2', kind: 'repair_existing', status: 'pending' },

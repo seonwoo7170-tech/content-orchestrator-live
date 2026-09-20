@@ -24,6 +24,8 @@ import {
   registerJobFailure,
   safeFailureCode
 } from './job-recovery.js';
+import { tourApiConnectedBlogIds } from './klook-catalog.js';
+import { selectTourApiAttractionTopic } from './tour-api-topic.js';
 
 function requireDb(env) {
   if (!env?.ORCHESTRATOR_DB) throw new Error('DB_NOT_BOUND');
@@ -332,6 +334,51 @@ async function planUniqueTopic(env, selection, blog, recentPosts, callHubFn, opt
   throw error;
 }
 
+// TourAPI-connected blogs (see tourApiConnectedBlogIds) get their daily topic grounded in a
+// real attraction instead of an invented one, so both the writer and the real-photo image
+// fallback have something concrete to work from. Mirrors planUniqueTopic's retry-and-reserve
+// shape (a real topic_candidates row backs every planned topic, TourAPI or not), but sources
+// candidate topics from selectTourApiAttractionTopic and excludes each rejected attraction by
+// contentId on retry rather than re-asking the same attraction. Returns null (never throws)
+// when this blog isn't TourAPI-connected or no unused attraction turns up, so the caller can
+// fall back to the ordinary planner exactly as if this function didn't exist.
+async function planUniqueTopicFromTourApi(env, selection, recentPosts, callHubFn, options = {}) {
+  if (!tourApiConnectedBlogIds(env).has(String(selection.blogId || '').trim())) return null;
+  const findConflictFn = options.findTopicConflictFn || findNewArticleTopicConflict;
+  const reservePlannerFn = options.reservePlannerTopicFn || reservePlannerTopicCandidate;
+  const selectAttractionFn = options.selectTourApiAttractionTopicFn || selectTourApiAttractionTopic;
+  const excludeContentIds = [];
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const attraction = await advisory(() => selectAttractionFn(env, {
+      blogId: selection.blogId,
+      language: selection.language,
+      recentPosts,
+      excludeContentIds,
+      callHubFn
+    }), null);
+    if (!attraction?.topic || !attraction?.tourApiContentId) return null;
+
+    const conflict = await findConflictFn(env, {
+      blogId: selection.blogId,
+      topic: attraction.topic,
+      threshold: 0.74
+    });
+    if (conflict) {
+      excludeContentIds.push(attraction.tourApiContentId);
+      continue;
+    }
+
+    const reservation = await reservePlannerFn(env, { blogId: selection.blogId, topic: attraction.topic });
+    if (!reservation?.ok || !reservation?.candidateId) {
+      excludeContentIds.push(attraction.tourApiContentId);
+      continue;
+    }
+    return { topic: attraction.topic, tourApiContentId: attraction.tourApiContentId, reservation };
+  }
+  return null;
+}
+
 export async function runAutomaticWork(env, blogs, automation, options = {}) {
   if (env?.DAILY_WORK_EXECUTION_ENABLED !== 'true') {
     return { ok: true, enabled: false, reason: 'DAILY_WORK_EXECUTION_DISABLED', attempted: 0, completed: 0, items: [] };
@@ -407,14 +454,16 @@ export async function runAutomaticWork(env, blogs, automation, options = {}) {
             []
           );
           const recentPosts = [...posts.slice(-40).reverse(), ...strategyRecentPosts(avoidTopics)].slice(0, 70);
-          const planned = await planUniqueTopic(env, selection, blog, recentPosts, callHubFn, options);
-          topicSource = 'planner';
-          reservedTopic = { id: planned.reservation.candidateId, query: planned.topic, source: 'planner' };
+          const tourApiPlanned = await planUniqueTopicFromTourApi(env, selection, recentPosts, callHubFn, options);
+          const planned = tourApiPlanned || await planUniqueTopic(env, selection, blog, recentPosts, callHubFn, options);
+          topicSource = tourApiPlanned ? 'tour-api' : 'planner';
+          reservedTopic = { id: planned.reservation.candidateId, query: planned.topic, source: topicSource };
           materialized = await (options.materializeFn || materializeDailySlot)(env, selection.slotId, {
             topic: planned.topic,
             language: selection.language,
             topicCandidateId: Number(planned.reservation.candidateId),
-            topicSource
+            topicSource,
+            ...(tourApiPlanned ? { tourApiContentId: tourApiPlanned.tourApiContentId } : {})
           });
           await advisory(
             () => (options.markTopicCandidateUsedFn || markTopicCandidateUsed)(env, Number(planned.reservation.candidateId), materialized.jobId),

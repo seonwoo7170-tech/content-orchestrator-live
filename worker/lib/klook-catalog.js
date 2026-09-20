@@ -195,6 +195,16 @@ export function smileatlasBlogId(env) {
   return String(env?.SMILEATLAS_BLOG_ID || DEFAULT_SMILEATLAS_BLOG_ID).trim();
 }
 
+// Which blogs should have their daily new_article topics grounded in a real TourAPI
+// attraction (see tour-api-topic.js) instead of an invented generic topic. Defaults to just
+// Smile Atlas, but env.TOUR_API_CONNECTED_BLOG_IDS (comma-separated) lets a future
+// public-data-connected blog opt in without another source change.
+export function tourApiConnectedBlogIds(env) {
+  const raw = String(env?.TOUR_API_CONNECTED_BLOG_IDS || '').trim();
+  const configured = raw ? raw.split(',').map((value) => value.trim()).filter(Boolean) : [];
+  return new Set(configured.length ? configured : [smileatlasBlogId(env)]);
+}
+
 // Klook's affiliate dashboard ("기타 툴" → city page link list) publishes a stable table of
 // destination-page ids per city. Unlike the product catalog (which needs a fresh manual CSV
 // export per city to have anything to recommend), these ids are a fixed, official mapping:
