@@ -694,6 +694,22 @@ jobs:
           }
           NODE
 
+      - name: Explain why repair-publish-tick reported zero outcomes for the 6 exception jobs (read-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+          echo '--- jobs table: blog_id/status/archived_at/daily_slot_id for the 6 exception jobs ---'
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT id, blog_id, status, archived_at, daily_slot_id, mode FROM jobs WHERE id IN (140,141,143,158,159,160);"
+          echo '--- daily_plan_slots rows (if any) for those jobs ---'
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT id, plan_date, blog_id, slot_no, kind, status, job_id FROM daily_plan_slots WHERE job_id IN (140,141,143,158,159,160);"
+          echo '--- any job_publications rows already present for those jobs ---'
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT job_id, blog_id, plan_date, slot_no, status, attempts, scheduled_time, error, updated_at FROM job_publications WHERE job_id IN (140,141,143,158,159,160);"
+
 # probe: inspect-kie-qa-prompt-2026-09-06
 # probe: post-deploy-autonomous-progress-2026-09-07-0300
 # probe: job-167-semantic-mismatch-investigation-2026-09-19
