@@ -310,7 +310,12 @@ test('forced KIE mode does not force an AI-subscription topic into a residential
 // usage/task manager, #171 circuit breaker trips): for a diagnostic/settings topic with no
 // obvious hands-on physical action, the model's most common fallback interpretation was a
 // person wiping/dusting/cleaning a screen with a cloth -- completely unrelated to the topic.
-test('the generic KIE prompt fallback explicitly excludes the screen-wiping stock-photo cliche', async () => {
+// A negation ("do not depict wiping/dusting/cleaning") was tried first and did not hold up in
+// production (confirmed again on an unrelated Smile Atlas travel blog on 2026-09-20): z-image
+// is a distilled/turbo model with no classifier-free guidance, so naming the cliche at all --
+// negated or not -- keeps biasing generations toward it. The prompt must never name it and
+// instead point at concrete positive actions instead.
+test('the generic KIE prompt fallback gives concrete positive actions instead of naming the screen-wiping stock-photo cliche', async () => {
   const calls = [];
   const prompt = 'Photorealistic real-world photograph focused on 램 RAM 용량 부족 현상 원인과 작업관리자 메모리 점유율 분석 방법. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
   await generateImage(
@@ -322,16 +327,16 @@ test('the generic KIE prompt fallback explicitly excludes the screen-wiping stoc
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
   assert.match(body.input.prompt, /램 RAM 용량 부족 현상 원인과 작업관리자 메모리 점유율 분석 방법/);
-  assert.match(body.input.prompt, /do not default to a generic stock scene of a person wiping, dusting, or cleaning a screen or device/i);
+  assert.match(body.input.prompt, /a hand holding, pointing to, comparing, arranging, or closely inspecting the actual object or detail named above/i);
+  assert.doesNotMatch(body.input.prompt, /wip(e|ing)|dust(ing)?|cloth/i);
 });
 
-// The wiping-cliche exclusion's original "unless the topic is specifically about physically
-// cleaning that device" carve-out was too loose: bodyScene() folds the whole article's topic
-// into every section's subject phrase, so the exception fired for sections that had nothing
-// to do with cleaning merely because the broader article mentioned it (confirmed on job #204,
-// a GPU-temperature article where a fan-speed-settings image and a diagnosis image both
-// rendered a wiping-cloth scene). The carve-out must be scoped to this image's own subject.
-test('the wiping/dusting exclusion is scoped to this image\'s own subject, not the broader article', async () => {
+// The old carve-out ("unless the topic is specifically about physically cleaning that device")
+// existed only because the negation above named the cliche in the first place. Now that the
+// prompt never names wiping/dusting/cleaning at all, there is nothing for a scoped carve-out to
+// guard, and bodyScene() folding the whole article's topic into every section's subject phrase
+// (confirmed on job #204, a GPU-temperature article) can no longer resurrect it either.
+test('the positive-actions phrasing applies the same way whether or not a broader topic is present', async () => {
   const calls = [];
   const prompt = 'Photorealistic real-world photograph focused on 팬 속도 설정 within the broader context of 그래픽카드 온도 정상 범위와 낮추는 방법.';
   await generateImage(
@@ -342,8 +347,8 @@ test('the wiping/dusting exclusion is scoped to this image\'s own subject, not t
   );
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
-  assert.match(body.input.prompt, /only use a cleaning\/dusting scene when the subject phrase above is itself specifically about physically cleaning or dusting the device/i);
-  assert.match(body.input.prompt, /being part of a broader article that separately mentions cleaning as one of several remedies is not sufficient grounds/i);
+  assert.match(body.input.prompt, /a hand holding, pointing to, comparing, arranging, or closely inspecting the actual object or detail named above/i);
+  assert.doesNotMatch(body.input.prompt, /wip(e|ing)|dust(ing)?|cloth/i);
 });
 
 // KIE_NO_TEXT_TAIL used to be emptied entirely on the theory that hookText's Latin-only gate
