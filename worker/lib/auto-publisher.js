@@ -22,6 +22,12 @@ const MIN_SCHEDULE_LEAD_MINUTES = 10;
 // "carried over" article can be before it's dropped from consideration.
 const CARRYOVER_LOOKBACK_DAYS = 14;
 const STALE_PUBLICATION_CLAIM_MINUTES = 15;
+// Blogger answers 429 when several posts are written in the same minute, which is exactly what
+// a shared plan minute across blogs produces (six of the eight jobs freed on 2026-09-20 were
+// all scheduled for 20:30:11 and three of them were rejected). A 429 says "not now", not "never",
+// so it must not burn one of the three publication attempts, and the retry has to wait out the
+// window instead of re-hitting Blogger on the next five-minute tick.
+const PUBLISH_RATE_LIMIT_COOLDOWN_MINUTES = 30;
 
 function requireDb(env) {
   if (!env?.ORCHESTRATOR_DB) throw new Error('DB_NOT_BOUND');
@@ -242,7 +248,9 @@ async function claimPublication(env, candidate, scheduledTime) {
     const retry = await db.prepare(
       `UPDATE job_publications
        SET status = 'claimed', attempts = attempts + 1, scheduled_time = ?, error = NULL, updated_at = datetime('now')
-       WHERE job_id = ? AND status = 'failed' AND blogger_post_id IS NULL AND attempts < ?`
+       WHERE job_id = ? AND status = 'failed' AND blogger_post_id IS NULL AND attempts < ?
+         AND (error IS NULL OR error NOT LIKE '%429%'
+              OR updated_at <= datetime('now', '-${PUBLISH_RATE_LIMIT_COOLDOWN_MINUTES} minutes'))`
     ).bind(String(scheduledTime), Number(candidate.job_id), MAX_PUBLICATION_ATTEMPTS).run();
     return Number(retry?.meta?.changes ?? 0) === 1;
   }
@@ -283,6 +291,26 @@ async function markFailed(env, jobId, error) {
      SET status = 'failed', error = ?, updated_at = datetime('now')
      WHERE job_id = ? AND status = 'claimed'`
   ).bind(String(error || 'AUTO_PUBLISH_FAILED').slice(0, 300), Number(jobId)).run();
+}
+
+// A rate limit refunds the attempt this claim consumed, so a busy hour cannot exhaust the
+// three-attempt budget a real publishing failure is meant to spend. The 429 stays in `error`
+// because claimPublication() reads it back to enforce the cooldown above.
+async function markRateLimited(env, jobId, error) {
+  await requireDb(env).prepare(
+    `UPDATE job_publications
+     SET status = 'failed', attempts = MAX(attempts - 1, 0), error = ?, updated_at = datetime('now')
+     WHERE job_id = ? AND status = 'claimed'`
+  ).bind(String(error || 'BLOGGER_API_429').slice(0, 300), Number(jobId)).run();
+}
+
+export function isPublishRateLimitError(error) {
+  const code = String(error?.code || error?.message || '').toUpperCase();
+  if (Number(error?.status || 0) === 429) return true;
+  // Not \b429\b: the real code is API_HUB_429:BLOGGER_API_429, and an underscore is a word
+  // character, so a word boundary never matches before the 4. Digit lookaround is what keeps
+  // this off a longer number such as API_HUB_4290.
+  return /(?<!\d)429(?!\d)/.test(code) || code.includes('RATE_LIMIT') || code.includes('TOO_MANY_REQUESTS');
 }
 
 async function markAmbiguousWriteHeld(env, jobId) {
@@ -500,7 +528,11 @@ export async function runDueAutoPublications(env, blogs, options = {}) {
         evidence: completedResult.deliveryEvidence
       });
     } catch (error) {
-      if (isAmbiguousWriteError(error)) {
+      if (isPublishRateLimitError(error)) {
+        await markRateLimited(env, candidate.job_id, error?.message || 'BLOGGER_API_429');
+        try { await persistJobTransition(env, candidate.job_id, 'failed', { error: error?.message || 'BLOGGER_API_429' }); } catch { /* preserve primary failure */ }
+        outcomes.push({ jobId: Number(candidate.job_id), planDate: String(candidate.plan_date), status: 'rate_limited', reason: String(error?.message || 'BLOGGER_API_429') });
+      } else if (isAmbiguousWriteError(error)) {
         await markAmbiguousWriteHeld(env, candidate.job_id);
         try { await persistJobTransition(env, candidate.job_id, 'failed', { error: 'BLOGGER_WRITE_OUTCOME_UNKNOWN' }); } catch { /* preserve primary failure */ }
         outcomes.push({ jobId: Number(candidate.job_id), planDate: String(candidate.plan_date), status: 'held', reason: 'BLOGGER_WRITE_OUTCOME_UNKNOWN' });
@@ -513,11 +545,11 @@ export async function runDueAutoPublications(env, blogs, options = {}) {
   }
 
   return {
-    ok: outcomes.every((item) => !['failed', 'held'].includes(item.status)),
+    ok: outcomes.every((item) => !['failed', 'held', 'rate_limited'].includes(item.status)),
     enabled: true,
     planDate,
     staleClaimsHeld,
-    attempted: outcomes.filter((item) => ['scheduled', 'verification_pending', 'failed', 'held'].includes(item.status)).length,
+    attempted: outcomes.filter((item) => ['scheduled', 'verification_pending', 'failed', 'held', 'rate_limited'].includes(item.status)).length,
     published: 0,
     scheduled: outcomes.filter((item) => item.status === 'scheduled').length,
     verificationPending: outcomes.filter((item) => item.status === 'verification_pending').length,

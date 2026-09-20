@@ -120,3 +120,34 @@ test('publisher scans recent carryover plan dates instead of only today', async 
   assert.match(source, /s\.plan_date BETWEEN date\(\?, \?\) AND \?/);
   assert.match(source, /ORDER BY s\.plan_date, s\.slot_no/);
 });
+
+// Blogger answered 429 to three of the eight jobs freed on 2026-09-20, all of which had been
+// scheduled into the same minute. A rate limit is "not now", not "never", so it must not spend
+// one of the three publication attempts and must not be retried on the very next tick.
+test('a Blogger rate limit is recognised from its real error code, not from a bare 429 substring', async () => {
+  const { isPublishRateLimitError } = await import('../worker/lib/auto-publisher.js');
+  assert.equal(isPublishRateLimitError(new Error('API_HUB_429:BLOGGER_API_429')), true);
+  assert.equal(isPublishRateLimitError({ status: 429 }), true);
+  assert.equal(isPublishRateLimitError(new Error('BLOGGER_RATE_LIMIT')), true);
+  assert.equal(isPublishRateLimitError(new Error('TOO_MANY_REQUESTS')), true);
+  // A longer number that merely contains 429 is not a rate limit.
+  assert.equal(isPublishRateLimitError(new Error('API_HUB_4290')), false);
+  assert.equal(isPublishRateLimitError(new Error('DELIVERY_EVIDENCE_INCOMPLETE')), false);
+  assert.equal(isPublishRateLimitError(null), false);
+});
+
+test('a rate-limited publish refunds its attempt and waits out a cooldown before re-claiming', async () => {
+  const source = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
+  assert.match(source, /PUBLISH_RATE_LIMIT_COOLDOWN_MINUTES\s*=\s*30/);
+  // The refund: the claim incremented attempts, the rate limit gives it back.
+  const fn = source.slice(source.indexOf('async function markRateLimited'), source.indexOf('export function isPublishRateLimitError'));
+  assert.match(fn, /attempts = MAX\(attempts - 1, 0\)/);
+  assert.match(fn, /WHERE job_id = \? AND status = 'claimed'/);
+  // The cooldown: a row that failed with a 429 is not re-claimed until it has aged out.
+  assert.match(source, /error NOT LIKE '%429%'/);
+  assert.match(source, /updated_at <= datetime\('now', '-\$\{PUBLISH_RATE_LIMIT_COOLDOWN_MINUTES\} minutes'\)/);
+  // Rate limits are checked before the ambiguous-write branch and never fall through to markFailed.
+  assert.match(source, /if \(isPublishRateLimitError\(error\)\) \{[\s\S]*?\} else if \(isAmbiguousWriteError\(error\)\) \{/);
+  // A rate-limited tick is reported honestly rather than counted as a clean run.
+  assert.match(source, /ok: outcomes\.every\(\(item\) => !\['failed', 'held', 'rate_limited'\]\.includes\(item\.status\)\)/);
+});
