@@ -114,11 +114,39 @@ function normalizeHook(value, language) {
   return clampText(text, language === 'ko' ? 22 : 38).replace(/…$/, '').trim();
 }
 
+// The writer supplies a real per-article thumbnailHook (WRITER_ADAPTER asks for one), but it
+// is not a required field, so an article that omits it -- including every article written
+// before that contract shipped on 2026-09-18 -- used to drop straight through the keyword
+// buckets below to a content-free filler. "Signs Your Home Electrical Panel Needs an Upgrade"
+// matched none of the English patterns (its title never says safety, error, cost or compare)
+// and was published with "Start Here" baked onto the thumbnail, which tells a reader nothing.
+//
+// A section heading is the article's own language, so it beats any generic phrase. Only a
+// heading that fits the overlay whole is usable: a truncated one is no longer the heading's
+// meaning, and a chopped phrase reads worse than a short generic one.
+function hookFromHeadings(html, language, title) {
+  const limit = language === 'ko' ? 22 : 38;
+  for (const section of extractSections(html)) {
+    if (abstractVisualHeading(section.heading)) continue;
+    // "Core Decision: When to Upgrade vs. Repair" -> "When to Upgrade vs. Repair".
+    const stripped = cleanText(section.heading).replace(/^[^:：]{2,24}[:：]\s*/, '').trim();
+    if (!stripped || stripped.length > limit) continue;
+    const hook = normalizeHook(stripped, language);
+    if (!hook || hook.endsWith('…')) continue;
+    if (hook.toLowerCase() === String(title || '').toLowerCase()) continue;
+    return hook;
+  }
+  return '';
+}
+
 export function buildThumbnailHook(article) {
   const language = String(article?.language || '').toLowerCase() === 'en' ? 'en' : 'ko';
   const title = cleanText(article?.title);
   const explicit = normalizeHook(article?.thumbnailHook, language);
   if (explicit && explicit.toLowerCase() !== title.toLowerCase()) return explicit;
+
+  const fromHeading = hookFromHeadings(article?.html, language, title);
+  if (fromHeading) return fromHeading;
 
   const lower = `${title} ${cleanText(article?.topic)}`.toLowerCase();
   if (language === 'en') {

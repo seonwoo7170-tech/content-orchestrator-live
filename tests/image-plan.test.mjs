@@ -22,7 +22,8 @@ test('image plan creates positive-only physical-scene prompts', () => {
   assert.match(plan.images[2].prompt, /사진은 백업 후 정리/);
   assert.ok(plan.images.every((image) => !GLYPH_SEEDING_WORDS.test(image.prompt)));
   assert.ok(plan.images.every((image) => !/["“”]/.test(image.prompt)));
-  assert.equal(plan.images[0].hookText, '놓치면 안 되는 것');
+  // The article's own first heading, not the generic safety bucket its title would have hit.
+  assert.equal(plan.images[0].hookText, '큰 파일 먼저 찾기');
   assert.notEqual(plan.images[0].hookText, ARTICLE.title);
   assert.equal(plan.images[1].hookText, null);
 });
@@ -166,4 +167,58 @@ test('attachment is idempotent for already embedded image ids', () => {
   const once = attachStoredImages(ARTICLE, rows);
   const twice = attachStoredImages(once, rows);
   assert.equal((twice.html.match(/data-job-image-id="1"/g) || []).length, 1);
+});
+
+// "Signs Your Home Electrical Panel Needs an Upgrade and When to Call a Professional" went out
+// on 2026-09-21 with "Start Here" baked onto its thumbnail: the writer contract that asks for a
+// real per-article hook only shipped on 2026-09-18, this article predated it, and its title
+// happens to contain none of the keyword-bucket words (safety, error, cost, compare), so it fell
+// through to the content-free catch-all. The article's own headings say far more than any
+// generic phrase can.
+test('a thumbnail hook falls back to the article own heading before any generic phrase', () => {
+  const article = {
+    title: 'Signs Your Home Electrical Panel Needs an Upgrade and When to Call a Professional',
+    topic: 'home electrical panel upgrade',
+    language: 'en',
+    html: [
+      '<h2>Core Decision: When to Upgrade vs. Repair</h2><p>Weigh the panel age.</p>',
+      '<h2>Physical and Operational Warning Signs</h2><p>Look for scorch marks.</p>'
+    ].join('')
+  };
+  const hook = buildThumbnailHook(article);
+  // The label prefix is dropped; what is left is the heading's real substance.
+  assert.equal(hook, 'When to Upgrade vs. Repair');
+  assert.notEqual(hook, 'Start Here');
+  assert.notEqual(hook, article.title);
+});
+
+test('the heading fallback skips boilerplate headings and never ships a truncated one', () => {
+  // Overview/FAQ-style headings carry no article-specific meaning, so they are passed over.
+  assert.equal(buildThumbnailHook({
+    title: 'Panel Upgrades', topic: 'panel upgrades', language: 'en',
+    html: '<h2>Overview</h2><p>a.</p><h2>Reader Questions</h2><p>b.</p>'
+  }), 'Start Here');
+
+  // A heading too long for the overlay would arrive chopped mid-phrase, which reads worse than
+  // a short generic line, so the generic line wins instead.
+  assert.equal(buildThumbnailHook({
+    title: 'Panel Upgrades', topic: 'panel upgrades', language: 'en',
+    html: '<h2>Everything You Could Possibly Need To Know About Residential Service Panels</h2><p>a.</p>'
+  }), 'Start Here');
+
+  // Korean articles use the same path against the 22-character Korean limit.
+  assert.equal(buildThumbnailHook({
+    title: '배수구 관리법', topic: '배수구 관리', language: 'ko',
+    html: '<h2>배수구 냄새가 올라오는 진짜 이유</h2><p>본문.</p>'
+  }), '배수구 냄새가 올라오는 진짜 이유');
+});
+
+test('a writer-supplied hook still beats the heading fallback', () => {
+  assert.equal(buildThumbnailHook({
+    title: 'Panel Upgrades',
+    topic: 'panel upgrades',
+    language: 'en',
+    thumbnailHook: 'Your Breaker Is Telling You',
+    html: '<h2>Core Decision: When to Upgrade vs. Repair</h2><p>a.</p>'
+  }), 'Your Breaker Is Telling You');
 });
