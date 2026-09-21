@@ -75,9 +75,14 @@ function structuralReplanRequired(critic) {
   const issues = Array.isArray(critic?.issues) ? critic.issues : [];
   const codes = issues.map((issue) => String(issue?.code || '').trim().toUpperCase()).filter(Boolean);
   if (codes.some((code) => STRUCTURAL_REPLAN_CODES.has(code))) return true;
-  // Was >= 2. One is already enough: repair cannot apply even a single expansion finding, so a
-  // lone CORE_INFORMATION_MISSING used to guarantee four wasted continuations instead of a replan.
-  return codes.filter((code) => code === 'CORE_INFORMATION_MISSING').length >= 1;
+  // Briefly lowered to >= 1 on 2026-09-21, which was a mistake while every article still carried
+  // a deep-dive word floor from seo-brief.js: a lone length-driven CORE_INFORMATION_MISSING then
+  // skipped repair entirely (repairAttempts 0) and sent jobs 154, 156, 157 and 165 round the
+  // replan loop until candidates ran out, each rewrite coming back shorter than the article it
+  // replaced. The real deadlock fix is keeping unfixable findings out of the repair batch, which
+  // REPAIR_INAPPLICABLE_CODES does; one such finding should not also cancel the repair of
+  // everything beside it.
+  return codes.filter((code) => code === 'CORE_INFORMATION_MISSING').length >= 2;
 }
 
 function retryReasonForEvaluation(evaluation) {

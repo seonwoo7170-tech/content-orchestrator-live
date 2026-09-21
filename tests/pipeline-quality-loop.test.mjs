@@ -28,8 +28,11 @@ test('a batch with nothing repairable fails fast instead of spending attempts', 
   );
 });
 
-test('one expansion finding is enough to send a draft back for a replan', () => {
-  // Repair cannot apply even a single one, so the old >= 2 threshold guaranteed four wasted
-  // continuations before the job was held.
-  assert.match(source, /code === 'CORE_INFORMATION_MISSING'\)\.length >= 1;/);
+test('a lone expansion finding does not cancel the repair of everything beside it', () => {
+  // Lowering this to >= 1 on 2026-09-21 was a mistake: with every article still carrying a
+  // deep-dive word floor, one length-driven finding skipped repair entirely (repairAttempts 0)
+  // and sent 154, 156, 157 and 165 round the replan loop until candidates ran out, each rewrite
+  // shorter than the article it replaced. Keeping unfixable findings out of the repair batch is
+  // the actual deadlock fix; the replan threshold stays where it was.
+  assert.match(source, /code === 'CORE_INFORMATION_MISSING'\)\.length >= 2;/);
 });

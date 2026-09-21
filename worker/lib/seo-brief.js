@@ -13,10 +13,21 @@ function safetySensitive(topic) {
   return /(의료|건강|약|증상|법률|세금|투자|주식|대출|보험|전기|가스|화재|안전|medical|health|medicine|legal|tax|invest|loan|insurance|electric|gas|fire|safety)/i.test(String(topic || ''));
 }
 
-function substantiveTopic(topic, intent) {
+// This decides recommendedDepth, and the critic's Section 26 length pass follows the brief
+// whenever one is supplied -- so whatever this returns becomes the word floor every article is
+// judged against. It used to answer "deep-dive" for repair, replace, install, troubleshoot,
+// diagnose, maintenance, fix, compare, vs, cost, electric, appliance, 수리, 교체, 설치, 진단,
+// 점검, 비교, 비용, 전기, 가전 and any commercial or transactional intent, which is the entire
+// subject matter of these blogs: a home-repair site, a PC-troubleshooting site and a comparison
+// site had essentially every article held to a 2,500-word floor. That produced a permanent
+// CORE_INFORMATION_MISSING on ordinary 1,200-1,700-word guides (jobs 154, 156, 157, 165, 172).
+//
+// Deep-dive is now the exception it was meant to be: a practical guide, comparison or
+// troubleshooting article is a standard explainer no matter which of those words is in its
+// title. Only a topic that announces itself as long-form analysis earns the higher band.
+function substantiveTopic(topic) {
   const text = String(topic || '').toLowerCase();
-  if (['commercial', 'transactional'].includes(String(intent || ''))) return true;
-  return /(repair|restore|restoration|replace|replacement|install|installation|troubleshoot|diagnos|maintenance|fix|compare|comparison|versus|\bvs\b|cost|budget|floor|threshold|plumb|electric|roof|foundation|hvac|appliance|수리|복원|교체|설치|진단|점검|유지보수|비교|비용|바닥|문턱|배관|전기|지붕|기초|가전)/i.test(text);
+  return /(in-?depth (analysis|report|investigation)|deep dive|deep-dive|comprehensive (study|analysis|report)|market (analysis|report)|research report|white ?paper|심층 (분석|취재|리포트)|종합 (분석|리포트)|백서)/i.test(text);
 }
 
 function intentGoal(intent) {
@@ -27,7 +38,7 @@ function intentGoal(intent) {
 }
 
 function planningProfile(topic, intent, { freshnessRequired, primarySourceRequired }) {
-  const deep = substantiveTopic(topic, intent);
+  const deep = substantiveTopic(topic);
   const recommendedWordRange = deep
     ? { min: 2500, max: 4000, unit: 'words', flexible: true }
     : { min: 1500, max: 2500, unit: 'words', flexible: true };
