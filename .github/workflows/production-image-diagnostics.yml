@@ -939,7 +939,7 @@ jobs:
       - name: Read what the critic keeps flagging on the five quality-limit jobs (read-only)
         shell: bash
         env:
-          QUALITY_LIMIT_JOB_IDS: '154,156,157,165,172'
+          QUALITY_LIMIT_JOB_IDS: '213,212,208,207'
         run: |
           node - <<'NODE'
           const base=process.env.BASE_URL;
