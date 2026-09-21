@@ -12,8 +12,30 @@ const STRUCTURAL_REPLAN_CODES = new Set([
   'LOW_INFORMATION_GAIN',
   'OUTLINE_REDESIGN_REQUIRED',
   'STRUCTURAL_COMPLETENESS_GAP',
-  'ARTICLE_TOO_THIN'
+  'ARTICLE_TOO_THIN',
+  // Inserting a lead paragraph adds a block, which targeted repair can never do -- see below.
+  'MISSING_LEAD_PARAGRAPH'
 ]);
+
+// A finding whose fix means adding or removing a block can never be applied by targeted repair:
+// constrainTargetedRepair rebuilds the article from the original block list and
+// assertTargetedRepairPreserved throws TARGETED_REPAIR_CHANGED_HTML_STRUCTURE the moment the
+// count differs. Handing one to repair does not merely fail to fix it -- the entire repair is
+// discarded, taking every in-scope fix batched beside it. On 2026-09-21 jobs 154, 156, 157, 165
+// and 172 each burned four continuations and ten repair calls this way, with guard rejections on
+// every single attempt, and 172's five fixable unsupported-fact findings never landed because one
+// MISSING_LEAD_PARAGRAPH sat in the same batch. Such findings belong to the replan path, which is
+// allowed to rewrite, and must never consume a repair attempt.
+const REPAIR_INAPPLICABLE_CODES = new Set([
+  ...STRUCTURAL_REPLAN_CODES,
+  'CORE_INFORMATION_MISSING'
+]);
+
+function repairableIssues(issues) {
+  return (Array.isArray(issues) ? issues : []).filter(
+    (issue) => !REPAIR_INAPPLICABLE_CODES.has(String(issue?.code || '').trim().toUpperCase())
+  );
+}
 
 async function emitStage(hooks, stage, meta) {
   if (typeof hooks?.onStage === 'function') await hooks.onStage(stage, meta);
@@ -53,7 +75,9 @@ function structuralReplanRequired(critic) {
   const issues = Array.isArray(critic?.issues) ? critic.issues : [];
   const codes = issues.map((issue) => String(issue?.code || '').trim().toUpperCase()).filter(Boolean);
   if (codes.some((code) => STRUCTURAL_REPLAN_CODES.has(code))) return true;
-  return codes.filter((code) => code === 'CORE_INFORMATION_MISSING').length >= 2;
+  // Was >= 2. One is already enough: repair cannot apply even a single expansion finding, so a
+  // lone CORE_INFORMATION_MISSING used to guarantee four wasted continuations instead of a replan.
+  return codes.filter((code) => code === 'CORE_INFORMATION_MISSING').length >= 1;
 }
 
 function retryReasonForEvaluation(evaluation) {
@@ -196,6 +220,25 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
       };
     }
 
+    // Repair runs only on what it is structurally able to change. When nothing is left, spending
+    // attempts is pure waste: every one of them would be rejected by the guard.
+    const applicableIssues = repairableIssues(issues);
+    if (applicableIssues.length === 0) {
+      return {
+        status: 'FAIL',
+        article,
+        initialCritic,
+        finalCritic,
+        repairApplied,
+        styleRepairApplied,
+        repairAttempts,
+        repairStrategy,
+        repairGuardViolations,
+        styleLint: styleLintSummary(initialLint, lintHistory),
+        reviewReason: 'STRUCTURAL_REPLAN_REQUIRED'
+      };
+    }
+
     let repairSucceeded = false;
     while (!repairSucceeded && repairAttempts < maxRepairs) {
       await emitStage(hooks, issueSource === 'linter' ? 'style_repairing' : 'repairing', pendingStageMeta);
@@ -203,7 +246,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
       repairAttempts += 1;
       const beforeRepair = article;
       const beforeRepairWordCount = htmlWordCount(beforeRepair.html);
-      const repairIssues = escalatedRepairIssues(issues, context);
+      const repairIssues = escalatedRepairIssues(applicableIssues, context);
 
       try {
         const repair = await callHub(
