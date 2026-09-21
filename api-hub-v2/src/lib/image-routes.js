@@ -19,7 +19,20 @@ const PLAIN_SURFACE_GUARD = 'Favor simple generic real-world subjects with broad
 // rejection gate -- it only tells the generator itself not to invent on-screen text/UI, which
 // is unrelated to whether a rejection gate exists downstream. It must never coexist with
 // gpt4oHookRenderTail (the thumbnail hook-caption instruction), since the two contradict.
-const KIE_NO_TEXT_TAIL = 'Do not bake any invented digits, dials, readouts, labels, or lettering into the photo as if it depicted a working numeric indicator. Depict the physical subject itself, not a rendered readout or caption overlaid on it.';
+// This tail is appended to EVERY KIE prompt, so whatever it names appears in every image.
+// It used to negate the failure ("do not bake any invented digits, dials, readouts, labels,
+// or lettering ... not a rendered caption"), which named seven glyph tokens in one sentence.
+// z-image has no classifier-free guidance, so a negated token is still a token to draw toward
+// -- the same trap that put a hand in every image and kept the wiping cliche alive. The result
+// was a banner of fake Korean glyphs baked across published thumbnails and body images
+// ("2026 그래퍽카도 교해 주기기 간간가"), which nothing caught because the QA gate was
+// deliberately changed to ignore visible text. Emptying the tail is not the answer either:
+// that was tried, and a GPU-temperature topic came back with an invented garbled readout
+// (job #204) because the body images were left with no guidance at all.
+//
+// So the tail now says what the surfaces ARE instead of what they must not carry, and names
+// no glyph noun at all. A blank material surface is something the model can actually draw.
+const KIE_NO_TEXT_TAIL = 'Every surface in the frame shows only its own bare material texture: plain metal, plastic, glass, fabric, wood, or painted wall, clean and free of markings.';
 const IMAGE_QA_TRANSIENT_DELAYS_MS = [250, 750];
 const IMAGE_QA_SCHEMA = Object.freeze({
   type: 'object',

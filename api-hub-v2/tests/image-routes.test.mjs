@@ -391,13 +391,14 @@ test('the QA retry hints never reintroduce hands either', async () => {
   assert.doesNotMatch(fn, /\bhands?\b|\bhand tools\b/i);
 });
 
-// KIE_NO_TEXT_TAIL used to be emptied entirely on the theory that hookText's Latin-only gate
-// (isLatinRenderableHookText) already prevented all garbled-text risk -- but body images never
-// receive hookText at all (thumbnail-only) and were left with zero guidance, so a numeric
-// topic like GPU temperature produced a body image with an invented, garbled digital readout
-// (confirmed on job #204). This restores generation-time guidance without resurrecting the
-// removed QA rejection gate.
-test('body image prompts tell the generator not to invent a digital readout or on-screen text', async () => {
+// This tail rides on every KIE prompt, so whatever it names is in every image. Emptying it was
+// tried and failed -- body images never receive hookText, so a numeric topic like GPU
+// temperature came back with an invented garbled readout (job #204). Negating the failure
+// failed differently and worse: naming "digits, dials, readouts, labels, lettering, caption"
+// in one sentence seeded exactly those glyphs, and published thumbnails carried banners of
+// fake Hangul ("2026 그래퍽카도 교해 주기기 간간가") on 2026-09-21. z-image has no negative
+// conditioning, so the tail must describe the surfaces positively and name no glyph noun.
+test('the tail that rides on every image prompt names no glyph noun at all', async () => {
   const calls = [];
   const prompt = 'Photorealistic real-world photograph focused on 그래픽카드 정상 온도 범위.';
   await generateImage(
@@ -408,7 +409,26 @@ test('body image prompts tell the generator not to invent a digital readout or o
   );
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
-  assert.match(body.input.prompt, /do not bake any invented digits, dials, readouts, labels, or lettering into the photo/i);
+  assert.match(body.input.prompt, /Every surface in the frame shows only its own bare material texture/i);
+  // The prompt as a whole must not hand the generator a glyph to draw. gpt4o hook thumbnails
+  // are the one exception and take a different tail (gpt4oHookRenderTail), never this one.
+  assert.doesNotMatch(body.input.prompt, /\blettering\b|\bcaptions?\b|\breadouts?\b|\bdigits?\b|\bdials?\b|\blabels?\b|\bletters?\b|\bwatermarks?\b|\bsignage\b|\btext\b/i);
+});
+
+// The same tail is on thumbnails that are not baking a hook, which is where the garbled Hangul
+// banners were actually seen.
+test('a thumbnail with a Korean hook gets the plain tail, never a glyph noun', async () => {
+  const calls = [];
+  await generateImage(
+    { KIE_API_KEY: 'test-secret' },
+    { role: 'thumbnail', prompt: 'Photorealistic real-world photograph focused on 그래픽카드 교체 주기.', hookText: '핵심부터 확인', providerMode: 'kie' },
+    aiMock(async () => ({ image: 'unused' })),
+    kieFetchMock(calls)
+  );
+  const body = JSON.parse(calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask')).init.body);
+  assert.doesNotMatch(body.input.prompt, /\blettering\b|\bcaptions?\b|\breadouts?\b|\bdigits?\b|\bdials?\b|\blabels?\b|\bletters?\b|\bwatermarks?\b|\btext\b/i);
+  // A Korean hook is never renderable by the model, so it must not reach the prompt either.
+  assert.doesNotMatch(body.input.prompt, /핵심부터 확인/);
 });
 
 test('forced KIE mode still recognizes a genuine home-repair AI-assistant topic when "home" is explicitly mentioned', async () => {
