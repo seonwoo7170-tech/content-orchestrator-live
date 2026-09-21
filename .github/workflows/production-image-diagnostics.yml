@@ -991,37 +991,3 @@ jobs:
             }))));
           }
           NODE
-
-      # ONE-TIME, GUARDED MUTATION. 154, 156, 157, 165 and 172 were held at the continuation
-      # limit by a deadlock that is now fixed: the critic's expansion findings no longer reach
-      # targeted repair, so the in-scope fixes batched beside them can finally land. The retry
-      # path was fixed first -- a quality-limit hold now takes the preserving branch, so the
-      # article and the three paid KIE images on 154/156/157 survive, and continuationAttempt is
-      # cleared so the job is not re-held on the next tick. The guard makes a re-run a no-op once
-      # a job has moved, and clearedImages in the response proves nothing was destroyed.
-      - name: One-time guarded retry of the five quality-limit jobs (mutating, no-op once cleared)
-        shell: bash
-        env:
-          QUALITY_LIMIT_JOB_IDS: '154,156,157,165,172'
-        run: |
-          node - <<'NODE'
-          const base=process.env.BASE_URL;
-          const admin=process.env.ADMIN_API_KEY;
-          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
-          const headers={'x-admin-api-key':admin};
-          for(const jobId of String(process.env.QUALITY_LIMIT_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
-            const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
-            const j=await r.json().catch(()=>({}));
-            const job=j.job||{};
-            const eligible=String(job.status)==='needs_review'
-              && String(job.recovery_state)==='held'
-              && String(job.hold_reason||'')==='QUALITY_REVIEW_LIMIT_REACHED';
-            if(!eligible){
-              console.log('QLIMIT_RETRY_SKIPPED',jobId,JSON.stringify({status:job.status,recoveryState:job.recovery_state||null,hold:job.hold_reason||null}));
-              continue;
-            }
-            const res=await fetch(`${base}/api/jobs/${jobId}/retry`,{method:'POST',headers,cache:'no-store'});
-            const body=await res.json().catch(()=>({}));
-            console.log('QLIMIT_RETRY_RESULT',jobId,res.status,JSON.stringify(body));
-          }
-          NODE
