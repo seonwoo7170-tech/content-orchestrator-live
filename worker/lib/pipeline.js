@@ -36,10 +36,24 @@ const REPAIR_INAPPLICABLE_CODES = new Set([
   'MISSING_FOOTNOTE_CONTENT'
 ]);
 
+// The critic invents its issue codes freely -- there is no enum -- so a denylist of names can
+// never hold. Across four fresh jobs on 2026-09-21 the same "add a block" request arrived as
+// MISSING_LEAD_SECTION, MISSING_DIRECT_ANSWER_IN_LEAD, INSUFFICIENT_CONTENT_DEPTH,
+// MISSING_SAFETY_WARNING and MISSING_H2_IN_HTML, none of which were on the list, and every one
+// of them failed the structure guard again. What is stable is the instruction: a finding repair
+// cannot apply asks for a NEW paragraph, section, table or warning, or to expand the article.
+// Editing inside an existing block -- rewrite this lead, qualify this claim, add an inline
+// citation after this sentence, replace this URL -- is untouched by these patterns and still
+// goes to repair.
+const EXPANSION_INSTRUCTION_RE = /\b(?:add|insert|append)\b[^.]{0,80}\b(?:paragraph|section|subsection|heading|table|checklist|footnote|warning|lead|list item|bullet)\b|\bexpand\b|\badd (?:new |additional )?(?:sections?|content)\b|(?:문단|단락|섹션|소제목|표|목록|경고문?|주석|리드)[^.]{0,20}(?:추가|삽입)|보강(?:하|한다|하세요|하여)/i;
+
+export function requiresNewBlock(issue) {
+  if (REPAIR_INAPPLICABLE_CODES.has(String(issue?.code || '').trim().toUpperCase())) return true;
+  return EXPANSION_INSTRUCTION_RE.test(String(issue?.repairInstruction || ''));
+}
+
 function repairableIssues(issues) {
-  return (Array.isArray(issues) ? issues : []).filter(
-    (issue) => !REPAIR_INAPPLICABLE_CODES.has(String(issue?.code || '').trim().toUpperCase())
-  );
+  return (Array.isArray(issues) ? issues : []).filter((issue) => !requiresNewBlock(issue));
 }
 
 async function emitStage(hooks, stage, meta) {

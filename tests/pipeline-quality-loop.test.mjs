@@ -39,3 +39,37 @@ test('a lone expansion finding does not cancel the repair of everything beside i
   // the actual deadlock fix; the replan threshold stays where it was.
   assert.match(source, /code === 'CORE_INFORMATION_MISSING'\)\.length >= 2;/);
 });
+
+// The critic invents its issue codes freely -- there is no enum. On 2026-09-21 four fresh jobs
+// sent the same "add a block" request under five different names (MISSING_LEAD_SECTION,
+// MISSING_DIRECT_ANSWER_IN_LEAD, INSUFFICIENT_CONTENT_DEPTH, MISSING_SAFETY_WARNING,
+// MISSING_H2_IN_HTML), none on the denylist, and every one failed the structure guard again.
+// The instruction is what is stable, so that is what decides.
+test('an instruction asking for a new block is recognised whatever the issue is called', async () => {
+  const { requiresNewBlock } = await import('../worker/lib/pipeline.js');
+  const expansion = [
+    { code: 'MISSING_SAFETY_WARNING', repairInstruction: 'Add a safety warning paragraph before any hardware handling steps.' },
+    { code: 'MISSING_FOOTNOTE_CONTENT', repairInstruction: 'Add a footnote after the paragraph that cites the official fare page.' },
+    { code: 'ANYTHING_AT_ALL', repairInstruction: 'Expand the article by adding substantive sections such as benchmark methodology.' },
+    { code: 'MISSING_LEAD_SECTION', repairInstruction: '본문 최상단에 핵심 답변을 제시하는 리드 문단을 추가한다.' },
+    { code: 'CORE_INFORMATION_MISSING', repairInstruction: '구매 절차 섹션에 벤치마크 결과를 추가하여 최소 1500단어 수준으로 보강한다.' },
+    { code: 'MISSING_DIRECT_ANSWER_IN_LEAD', repairInstruction: 'Insert a concise lead <p> element before the first <h2>.' }
+  ];
+  for (const issue of expansion) {
+    assert.equal(requiresNewBlock(issue), true, `${issue.code} should be recognised as a block insertion`);
+  }
+});
+
+test('an edit inside an existing block still goes to repair', async () => {
+  const { requiresNewBlock } = await import('../worker/lib/pipeline.js');
+  const inScope = [
+    { code: 'MISSING_INLINE_CITATION', repairInstruction: 'Add an inline citation after the sentence, e.g. "(ESFI)", linking to the source URL.' },
+    { code: 'MISLEADING_SOURCE_LINK', repairInstruction: 'Replace the EEOC URL with a legitimate state licensing board site.' },
+    { code: 'UNSUPPORTED_CLAIM', repairInstruction: 'Qualify the statement (e.g. "in this case"), or provide a broader data set.' },
+    { code: 'MISSING_DIRECT_ANSWER_IN_LEAD', repairInstruction: 'Rewrite the lead paragraph (html p 1) to start with a concise answer.' },
+    { code: 'UNSUPPORTED_PRICE_CLAIM', repairInstruction: '가격 수치를 삭제하거나, 공식 유통업체의 최신 데이터를 인용하여 출처를 명시한다.' }
+  ];
+  for (const issue of inScope) {
+    assert.equal(requiresNewBlock(issue), false, `${issue.code} is an in-block edit and must still be repaired`);
+  }
+});
