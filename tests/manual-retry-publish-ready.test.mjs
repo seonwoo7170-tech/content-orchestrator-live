@@ -30,3 +30,26 @@ test('the retry response reports the ready status and preserved images for a pub
   assert.match(source, /publishReady: preservePublishReady,/);
   assert.match(source, /preserveResult: preserveImages,/);
 });
+
+// A job held at QUALITY_REVIEW_LIMIT_REACHED carries the same saved state as one held at
+// CRITIC_REVIEW_CONTINUE -- a finished article plus its critic verdict -- so a manual retry must
+// take the preserving branch. Leaving the code off that list sent it down the destructive one,
+// which nulls result_json and deletes job_images and their R2 objects; jobs 154, 156 and 157
+// each hold three paid KIE images.
+test('a quality-limit hold keeps its article and images on a manual retry', async () => {
+  const source = await readFile(new URL('../worker/lib/job-store.js', import.meta.url), 'utf8');
+  assert.match(source, /CONTINUATION_RESULT_CODES = new Set\(\['CRITIC_REVIEW_CONTINUE', 'QUALITY_REVIEW_LIMIT_REACHED'\]\)/);
+  assert.match(source, /if \(!CONTINUATION_RESULT_CODES\.has\(/);
+  // The preserving branch is what skips the job_images delete.
+  assert.match(source, /const preserveImages = preserveContinuation \|\| preservePublishReady;/);
+});
+
+test('a quality-limit retry clears the continuation counter it was held on', async () => {
+  const source = await readFile(new URL('../worker/lib/job-store.js', import.meta.url), 'utf8');
+  // Without this the job re-queues with continuationAttempt still at the maximum and
+  // job-auto-rescue holds it again on the very next tick.
+  assert.match(source, /const resetContinuationBudget = preserveContinuation && isQualityLimitHold\(row\);/);
+  assert.match(source, /resetContinuationBudget \? "result_json = json_set\(result_json, '\$\.continuationAttempt', 0\)," : ''/);
+  // Only a quality-limit hold resets it -- an ordinary continuation keeps its own count.
+  assert.match(source, /function isQualityLimitHold\(row\) \{\s*return String\(row\?\.last_error_code \|\| row\?\.error \|\| ''\)\.toUpperCase\(\) === 'QUALITY_REVIEW_LIMIT_REACHED';/);
+});

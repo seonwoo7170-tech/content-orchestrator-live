@@ -24,10 +24,20 @@ function parseResult(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+// QUALITY_REVIEW_LIMIT_REACHED is the same saved state as CRITIC_REVIEW_CONTINUE -- a finished
+// article plus its critic verdict -- only reached after the continuation budget ran out. Leaving
+// it off this list sent a manual retry down the destructive branch, which nulls result_json and
+// deletes job_images and their R2 objects: jobs 154, 156 and 157 hold three paid KIE images each.
+const CONTINUATION_RESULT_CODES = new Set(['CRITIC_REVIEW_CONTINUE', 'QUALITY_REVIEW_LIMIT_REACHED']);
+
 function hasContinuationResult(row) {
-  if (String(row?.last_error_code || row?.error || '').toUpperCase() !== 'CRITIC_REVIEW_CONTINUE') return false;
+  if (!CONTINUATION_RESULT_CODES.has(String(row?.last_error_code || row?.error || '').toUpperCase())) return false;
   const result = parseResult(row?.result_json);
   return Boolean(result?.article && typeof result.article === 'object');
+}
+
+function isQualityLimitHold(row) {
+  return String(row?.last_error_code || row?.error || '').toUpperCase() === 'QUALITY_REVIEW_LIMIT_REACHED';
 }
 
 // A job can fail with API_HUB_403 (BLOGGER_WRITE_TARGET_NOT_ALLOWED) purely because its blog
@@ -274,6 +284,10 @@ export async function resetStoredJobForManualRetry(env, id) {
   }
 
   const preserveContinuation = hasContinuationResult(row);
+  // A job held at the continuation limit still carries continuationAttempt at the maximum, so
+  // re-queueing it without clearing that counter has job-auto-rescue hold it again on the very
+  // next tick. The retry is an explicit decision to give it a fresh set of rounds.
+  const resetContinuationBudget = preserveContinuation && isQualityLimitHold(row);
   const preservePublishReady = !preserveContinuation && hasPublishReadyResult(row);
   const preserveImages = preserveContinuation || preservePublishReady;
   const statements = [];
@@ -300,6 +314,7 @@ export async function resetStoredJobForManualRetry(env, id) {
            hold_reason = NULL,
            last_error_code = 'CRITIC_REVIEW_CONTINUE',
            last_failure_at = NULL,
+           ${resetContinuationBudget ? "result_json = json_set(result_json, '$.continuationAttempt', 0)," : ''}
            updated_at = datetime('now')
        WHERE id = ? AND archived_at IS NULL AND status IN ('failed', 'needs_review')`
     ).bind(jobId);
