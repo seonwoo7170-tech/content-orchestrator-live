@@ -76,7 +76,7 @@ function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   // (e.g. "AI subscription tiers against long-term maintenance and budget planning") was wrongly
   // forced into this residential scene, which the Gemini QA gate then rejected as a semantic
   // mismatch (confirmed on job #167, an AI-subscription-plan article for freelancers).
-  if (/\bartificial intelligence\b[^.]*\b(?:home|household)\b|\bai\b[^.]*\b(?:home|household)\b/i.test(raw)) return `A realistic editorial photograph of a homeowner inspecting a household fixture with simple hand tools in a clean residential setting. Natural candid pose with one clear focal subject. ${composition} ${tail}`;
+  if (/\bartificial intelligence\b[^.]*\b(?:home|household)\b|\bai\b[^.]*\b(?:home|household)\b/i.test(raw)) return `A realistic editorial photograph of a household fixture with simple repair tools resting beside it in a clean residential setting. Slightly angled close view with one clear focal subject. ${composition} ${tail}`;
   const focused = raw.match(/focused on\s+([^.]+)/i)?.[1]?.replace(/\b(?:devices?|screens?|displays?|monitors?|interfaces?|gauges?|meters?)\b/gi, '').replace(/control panels?/gi, '').replace(/\s+/g, ' ').trim();
   // Everything above is genuinely home-repair-specific (shower/water-valve/AI-home-assistant
   // topics), which only ever match a blog actually writing about those things -- harmless
@@ -98,9 +98,18 @@ function prepareKiePrompt(value, tail = KIE_NO_TEXT_TAIL) {
   // distilled/turbo model with no classifier-free guidance at inference, so it has no real
   // negative-conditioning pathway -- every token in the prompt, negated or not, is something
   // to draw toward, not away from. Naming "wiping, dusting, cleaning, cloth" at all keeps
-  // biasing generations toward exactly that scene. The fix is to never name the cliche and
-  // instead give a small set of concrete positive actions to depict instead.
-  return `A realistic editorial photograph focused on ${subject}. One clear focal subject in natural everyday surroundings. Depict a specific, literal real-world moment unique to this exact subject: a hand holding, pointing to, comparing, arranging, or closely inspecting the actual object or detail named above. ${composition} ${tail}`;
+  // biasing generations toward exactly that scene.
+  //
+  // Replacing the negation with positive actions ("a hand holding, pointing to, comparing,
+  // arranging, or closely inspecting the actual object") then made things worse in a new way:
+  // it put a hand in EVERY body image, and "a hand near a household object" is one short step
+  // from the wiping pose the negation was trying to avoid -- three consecutive body images in
+  // one 2026-09-21 article were a hand with a sponge, a hand with a cloth, and a hand with a
+  // brush. The same no-negative-conditioning property applies to "hand": naming it guarantees
+  // it appears. Specificity has to come from the object instead of from a human action, so the
+  // prompt now describes the subject as a still life and names no person, hand or body part at
+  // all. Keep it that way: any human noun added back here will show up in every single image.
+  return `A realistic editorial photograph of ${subject} as the only subject, filling most of the frame in its real everyday location. Show the object itself close enough to read its surface, material and condition. Quiet documentary still life of an object at rest in natural light. ${composition} ${tail}`;
 }
 function normalizeSteps(value) { if (value === undefined || value === null || value === '') return undefined; const steps = Number(value); if (!Number.isInteger(steps) || steps < 1 || steps > 8) throw Object.assign(new Error('IMAGE_STEPS_INVALID'), { status: 400 }); return steps; }
 function normalizeSeed(value) { if (value === undefined || value === null || value === '') return undefined; const seed = Number(value); if (!Number.isInteger(seed) || seed < 0 || seed > 2147483647) throw Object.assign(new Error('IMAGE_SEED_INVALID'), { status: 400 }); return seed; }
@@ -109,7 +118,7 @@ function imageQaRequired(env) { return String(env?.IMAGE_QA_REQUIRED || 'false')
 function imageQaAttempts(env) { const attempts = Number(env?.IMAGE_QA_MAX_ATTEMPTS || 3); if (!Number.isInteger(attempts) || attempts < 1 || attempts > 4) throw Object.assign(new Error('IMAGE_QA_MAX_ATTEMPTS_INVALID'), { status: 500 }); return attempts; }
 function isTransientImageQaFailure(error) { const message = String(error?.message || ''); return ['GEMINI_UNAVAILABLE', 'GEMINI_RATE_LIMITED', 'GEMINI_TIMEOUT', 'GEMINI_REQUEST_FAILED', 'GEMINI_EMPTY_RESPONSE'].includes(message); }
 function nextSeed(seed, attempt) { if (!Number.isInteger(seed)) return undefined; return (seed + Math.max(0, attempt - 1) * 104729) % 2147483647; }
-function promptForAttempt(prompt, attempt) { if (attempt <= 1) return prompt; if (attempt === 2) return `${prompt} Simplify the composition to a closer view of only the essential physical subject and plain surroundings. Remove secondary props and decorative detail. Use fewer objects, broader uniform surfaces, and simple natural geometry.`; return `${prompt} Use an even tighter close-up with only the minimum physical elements needed to show the subject. Favor simple fixtures, hand tools, walls, tile, pipes, hands, or materials with broad uniform surfaces and subdued detail.`; }
+function promptForAttempt(prompt, attempt) { if (attempt <= 1) return prompt; if (attempt === 2) return `${prompt} Simplify the composition to a closer view of only the essential physical subject and plain surroundings. Remove secondary props and decorative detail. Use fewer objects, broader uniform surfaces, and simple natural geometry.`; return `${prompt} Use an even tighter close-up with only the minimum physical elements needed to show the subject. Favor simple fixtures, tools, walls, tile, pipes, or materials with broad uniform surfaces and subdued detail.`; }
 async function generateCloudflareImage(env, { role, prompt, steps, seed }, aiBinding) {
   if (!aiBinding || typeof aiBinding.run !== 'function') throw Object.assign(new Error('IMAGE_AI_BINDING_REQUIRED'), { status: 500 });
   const model = String(env?.IMAGE_MODEL || DEFAULT_IMAGE_MODEL).trim(); if (!ALLOWED_IMAGE_MODELS.has(model)) throw Object.assign(new Error('IMAGE_MODEL_NOT_ALLOWED'), { status: 500 });

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { generateImage } from '../src/lib/image-routes.js';
 
 function aiMock(handler) {
@@ -203,7 +204,7 @@ test('forced KIE mode converts risky digital HomeFix concepts into a short physi
   const body = JSON.parse(create.init.body);
   assert.equal(body.model, 'z-image');
   assert.equal(body.input.aspect_ratio, '16:9');
-  assert.match(body.input.prompt, /homeowner inspecting a household fixture with simple hand tools/);
+  assert.match(body.input.prompt, /household fixture with simple repair tools resting beside it/);
   assert.match(body.input.prompt, /Simple uncluttered composition/);
   assert.doesNotMatch(body.input.prompt.split('Preserve the exact subject')[0], KIE_RISKY_SCENE_WORDS);
   assert.doesNotMatch(body.input.prompt, /broad uniform surfaces|simple geometry|minimal decorative detail/i);
@@ -282,7 +283,7 @@ test('forced KIE mode never forces an unrelated topic into a residential repair 
   );
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
-  assert.match(body.input.prompt, /focused on choosing an ai subscription plan for freelancers/);
+  assert.match(body.input.prompt, /photograph of choosing an ai subscription plan for freelancers/);
   assert.doesNotMatch(body.input.prompt, /residential|household repair or maintenance/i);
 });
 
@@ -315,7 +316,7 @@ test('forced KIE mode does not force an AI-subscription topic into a residential
 // is a distilled/turbo model with no classifier-free guidance, so naming the cliche at all --
 // negated or not -- keeps biasing generations toward it. The prompt must never name it and
 // instead point at concrete positive actions instead.
-test('the generic KIE prompt fallback gives concrete positive actions instead of naming the screen-wiping stock-photo cliche', async () => {
+test('the generic KIE prompt fallback describes the object itself and names no person or hand', async () => {
   const calls = [];
   const prompt = 'Photorealistic real-world photograph focused on 램 RAM 용량 부족 현상 원인과 작업관리자 메모리 점유율 분석 방법. Depict the subject through tangible people, objects, tools, devices, materials, and surroundings appropriate to the topic.';
   await generateImage(
@@ -327,8 +328,9 @@ test('the generic KIE prompt fallback gives concrete positive actions instead of
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
   assert.match(body.input.prompt, /램 RAM 용량 부족 현상 원인과 작업관리자 메모리 점유율 분석 방법/);
-  assert.match(body.input.prompt, /a hand holding, pointing to, comparing, arranging, or closely inspecting the actual object or detail named above/i);
+  assert.match(body.input.prompt, /as the only subject, filling most of the frame in its real everyday location/i);
   assert.doesNotMatch(body.input.prompt, /wip(e|ing)|dust(ing)?|cloth/i);
+  assert.doesNotMatch(body.input.prompt, /\bhands?\b|\bperson\b|\bpeople\b|\bhomeowner\b|\bsomeone\b|\bfingers?\b|\barms?\b/i);
 });
 
 // The old carve-out ("unless the topic is specifically about physically cleaning that device")
@@ -336,7 +338,7 @@ test('the generic KIE prompt fallback gives concrete positive actions instead of
 // prompt never names wiping/dusting/cleaning at all, there is nothing for a scoped carve-out to
 // guard, and bodyScene() folding the whole article's topic into every section's subject phrase
 // (confirmed on job #204, a GPU-temperature article) can no longer resurrect it either.
-test('the positive-actions phrasing applies the same way whether or not a broader topic is present', async () => {
+test('the still-life phrasing applies the same way whether or not a broader topic is present', async () => {
   const calls = [];
   const prompt = 'Photorealistic real-world photograph focused on 팬 속도 설정 within the broader context of 그래픽카드 온도 정상 범위와 낮추는 방법.';
   await generateImage(
@@ -347,8 +349,46 @@ test('the positive-actions phrasing applies the same way whether or not a broade
   );
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
-  assert.match(body.input.prompt, /a hand holding, pointing to, comparing, arranging, or closely inspecting the actual object or detail named above/i);
+  assert.match(body.input.prompt, /as the only subject, filling most of the frame in its real everyday location/i);
   assert.doesNotMatch(body.input.prompt, /wip(e|ing)|dust(ing)?|cloth/i);
+  assert.doesNotMatch(body.input.prompt, /\bhands?\b|\bperson\b|\bpeople\b|\bhomeowner\b|\bsomeone\b|\bfingers?\b|\barms?\b/i);
+});
+
+// The wiping cliche came back on 2026-09-21 in a new form: the positive-action wording that
+// replaced the old negation ("a hand holding, pointing to, comparing, arranging, or closely
+// inspecting the actual object") named a hand outright, so every body image had one, and a hand
+// beside a household object drifts straight back into the wiping pose -- one article's three body
+// images were a hand with a sponge, a hand with a cloth, and a hand with a brush. z-image has no
+// negative conditioning, so any human noun in the prompt is a guarantee, not a suggestion. No
+// prompt this function can produce, on any branch or retry attempt, may name one.
+test('no branch or retry attempt of the KIE prompt can put a person or a hand in the frame', async () => {
+  const human = /\bhands?\b|\bperson\b|\bpeople\b|\bhomeowner\b|\bsomeone\b|\bfingers?\b|\barms?\b|\bforearms?\b/i;
+  const subjects = [
+    // The generic fallback, which is what almost every article goes through.
+    'Photorealistic real-world photograph focused on 음식물 쓰레기통 냄새 제거와 관리 방법.',
+    // The AI-in-the-home branch, which used to depict a homeowner with hand tools.
+    'Photorealistic real-world photograph focused on artificial intelligence assistants for the home.',
+    // The two hard-coded plumbing branches.
+    'Photorealistic real-world photograph focused on shower water pressure problems.',
+    'Photorealistic real-world photograph focused on the main water shutoff valve.'
+  ];
+  for (const prompt of subjects) {
+    const calls = [];
+    await generateImage(
+      { KIE_API_KEY: 'test-secret' },
+      { role: 'body', prompt, providerMode: 'kie' },
+      aiMock(async () => ({ image: 'unused' })),
+      kieFetchMock(calls)
+    );
+    const body = JSON.parse(calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask')).init.body);
+    assert.doesNotMatch(body.input.prompt, human, `prompt for "${prompt}" named a person`);
+  }
+});
+
+test('the QA retry hints never reintroduce hands either', async () => {
+  const source = await readFile(new URL('../src/lib/image-routes.js', import.meta.url), 'utf8');
+  const fn = source.slice(source.indexOf('function promptForAttempt'), source.indexOf('async function generateCloudflareImage'));
+  assert.doesNotMatch(fn, /\bhands?\b|\bhand tools\b/i);
 });
 
 // KIE_NO_TEXT_TAIL used to be emptied entirely on the theory that hookText's Latin-only gate
@@ -382,7 +422,7 @@ test('forced KIE mode still recognizes a genuine home-repair AI-assistant topic 
   );
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
-  assert.match(body.input.prompt, /homeowner inspecting a household fixture with simple hand tools/);
+  assert.match(body.input.prompt, /household fixture with simple repair tools resting beside it/);
 });
 
 test('forced KIE mode falls back to a neutral generic subject only when the concept could not be extracted at all', async () => {
@@ -395,7 +435,7 @@ test('forced KIE mode falls back to a neutral generic subject only when the conc
   );
   const create = calls.find((call) => call.url.endsWith('/api/v1/jobs/createTask'));
   const body = JSON.parse(create.init.body);
-  assert.match(body.input.prompt, /focused on a practical everyday subject/);
+  assert.match(body.input.prompt, /photograph of a practical everyday subject/);
   assert.doesNotMatch(body.input.prompt, /residential|household repair or maintenance/i);
 });
 
