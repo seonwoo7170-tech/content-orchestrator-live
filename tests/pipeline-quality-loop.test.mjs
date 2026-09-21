@@ -13,6 +13,9 @@ const source = await readFile(new URL('../worker/lib/pipeline.js', import.meta.u
 test('findings that require adding a block never reach targeted repair', () => {
   assert.match(source, /const REPAIR_INAPPLICABLE_CODES = new Set\(\[\s*\.\.\.STRUCTURAL_REPLAN_CODES,\s*'CORE_INFORMATION_MISSING'/);
   assert.match(source, /'MISSING_LEAD_PARAGRAPH'/);
+  // Adding a footnote is a block insertion too -- found on job 172's first run after the filter
+  // landed, where it was the only thing still failing the guard.
+  assert.match(source, /'MISSING_FOOTNOTE_CONTENT'/);
   // The repair call takes the filtered list, not the raw critic list.
   assert.match(source, /const repairIssues = escalatedRepairIssues\(applicableIssues, context\);/);
   assert.doesNotMatch(source, /escalatedRepairIssues\(issues, context\)/);

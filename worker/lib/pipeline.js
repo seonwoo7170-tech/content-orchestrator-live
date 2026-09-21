@@ -28,7 +28,12 @@ const STRUCTURAL_REPLAN_CODES = new Set([
 // allowed to rewrite, and must never consume a repair attempt.
 const REPAIR_INAPPLICABLE_CODES = new Set([
   ...STRUCTURAL_REPLAN_CODES,
-  'CORE_INFORMATION_MISSING'
+  'CORE_INFORMATION_MISSING',
+  // Same shape, found on job 172's first clean run after the filter landed: "add a footnote
+  // after the paragraph ... include the footnote text at the end" is a block insertion, so it
+  // failed the guard and took the round with it even though the filter had already rescued the
+  // rest of that batch (score 45 -> 85, eight findings down to four).
+  'MISSING_FOOTNOTE_CONTENT'
 ]);
 
 function repairableIssues(issues) {
