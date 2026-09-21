@@ -912,3 +912,21 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
             "SELECT job_id || ' | plan=' || plan_date || ' | ' || status || ' | post=' || COALESCE(blogger_post_id, '-') || ' | at=' || COALESCE(scheduled_time, '-') || ' | n=' || attempts || ' | err=' || COALESCE(error, '-') AS publish_row FROM job_publications WHERE job_id IN (137,139,149,151,153,154,156,157) ORDER BY job_id;"
+
+      # 176 and 164 have sat in publishing_new for ten hours across five snapshots, so this is
+      # not a slow publish. holdStalePublicationClaims() repairs only the job_publications row
+      # and never jobs.status, and publication-readback-recovery only lists rows that already
+      # carry a blogger_post_id -- so a publish that broke off before Blogger returned an id
+      # would have no owner at all. These reads say whether that is what happened.
+      - name: Read-only D1 check of the two jobs stuck in publishing_new
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT 'PUB ' || job_id || ' | ' || status || ' | post=' || COALESCE(blogger_post_id, '-') || ' | n=' || attempts || ' | upd=' || updated_at || ' | err=' || COALESCE(error, '-') AS row_text FROM job_publications WHERE job_id IN (176,164) ORDER BY job_id;"
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT 'JOB ' || id || ' | ' || status || ' | rec=' || COALESCE(recovery_state,'-') || ' | hold=' || COALESCE(hold_reason,'-') || ' | err=' || COALESCE(last_error_code,'-') || ' | upd=' || updated_at AS row_text FROM jobs WHERE id IN (176,164) ORDER BY id;"
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT 'EVT ' || job_id || ' | ' || created_at || ' | ' || event_type || ' | ' || substr(message,1,110) AS row_text FROM job_events WHERE job_id IN (176,164) ORDER BY id DESC LIMIT 16;"
