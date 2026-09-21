@@ -227,14 +227,45 @@ async function resolveScheduledAt(env, candidate, settings, now) {
 }
 
 async function holdStalePublicationClaims(env, now) {
+  const db = requireDb(env);
   const cutoff = new Date(now.getTime() - STALE_PUBLICATION_CLAIM_MINUTES * 60000).toISOString();
-  const result = await requireDb(env).prepare(
+  const result = await db.prepare(
     `UPDATE job_publications
      SET status = 'failed', attempts = ?, error = 'STALE_PUBLICATION_CLAIM_HELD', updated_at = datetime('now')
      WHERE status = 'claimed' AND updated_at <= ?
        AND job_id IN (SELECT id FROM jobs WHERE mode = 'new_article')`
   ).bind(MAX_PUBLICATION_ATTEMPTS, cutoff).run();
-  return Number(result?.meta?.changes || 0);
+
+  // Repairing the publication row was not enough. The publish loop sets the job to
+  // publishing_new before calling Blogger, so a worker that dies mid-write never runs its
+  // own catch: the row goes stale here, attempts is pushed to the maximum so claimPublication()
+  // will never re-claim it, and the job is left in publishing_new with recovery_state 'none'.
+  // Nothing owns that combination -- publication-ambiguity-recovery.js exists for exactly this
+  // error but only lists jobs in failed/needs_review, so the orphan is invisible to its own
+  // rescue. Jobs 164 and 176 sat there from 2026-09-19 until this was found on 2026-09-21.
+  //
+  // Demoting the job to failed hands it to that recovery, which searches Blogger for the
+  // article's exact title before doing anything: it adopts a post that did go live and only
+  // re-publishes when none exists, so this cannot duplicate a post. STALE_PUBLICATION_CLAIM is
+  // in job-auto-rescue's NEVER_AUTO_RETRY_CODES, so no other path will retry it blindly either.
+  // A live publish is never caught here: an in-flight attempt holds a 'claimed' row, not a
+  // stale-held one.
+  const demoted = await db.prepare(
+    `UPDATE jobs
+        SET status = 'failed', error = 'STALE_PUBLICATION_CLAIM_HELD',
+            last_error_code = 'STALE_PUBLICATION_CLAIM_HELD', recovery_state = 'held',
+            hold_reason = 'STALE_PUBLICATION_CLAIM_HELD', next_retry_at = NULL,
+            last_failure_at = datetime('now'), updated_at = datetime('now')
+      WHERE status = 'publishing_new'
+        AND archived_at IS NULL
+        AND id IN (
+          SELECT job_id FROM job_publications
+           WHERE status = 'failed'
+             AND error = 'STALE_PUBLICATION_CLAIM_HELD'
+             AND (blogger_post_id IS NULL OR blogger_post_id = '')
+        )`
+  ).run();
+  return { claims: Number(result?.meta?.changes || 0), orphans: Number(demoted?.meta?.changes || 0) };
 }
 
 async function claimPublication(env, candidate, scheduledTime) {
@@ -403,7 +434,7 @@ export async function runDueAutoPublications(env, blogs, options = {}) {
   const planDate = dateInTimeZone(now, timeZone);
   const automation = options.automation || await readAutomationSettings(env, blogs);
   const settingsByBlog = new Map((automation.blogs || []).map((item) => [String(item.blogId), item.effective]));
-  const staleClaimsHeld = await holdStalePublicationClaims(env, now);
+  const stale = await holdStalePublicationClaims(env, now);
   const candidates = await listCandidates(env, planDate);
   const outcomes = [];
   const fetchImpl = options.fetchImpl || fetch;
@@ -548,7 +579,8 @@ export async function runDueAutoPublications(env, blogs, options = {}) {
     ok: outcomes.every((item) => !['failed', 'held', 'rate_limited'].includes(item.status)),
     enabled: true,
     planDate,
-    staleClaimsHeld,
+    staleClaimsHeld: stale.claims,
+    orphanedPublishJobsDemoted: stale.orphans,
     attempted: outcomes.filter((item) => ['scheduled', 'verification_pending', 'failed', 'held', 'rate_limited'].includes(item.status)).length,
     published: 0,
     scheduled: outcomes.filter((item) => item.status === 'scheduled').length,

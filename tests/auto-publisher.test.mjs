@@ -151,3 +151,43 @@ test('a rate-limited publish refunds its attempt and waits out a cooldown before
   // A rate-limited tick is reported honestly rather than counted as a clean run.
   assert.match(source, /ok: outcomes\.every\(\(item\) => !\['failed', 'held', 'rate_limited'\]\.includes\(item\.status\)\)/);
 });
+
+// Jobs 164 and 176 sat in publishing_new from 2026-09-19 until 2026-09-21. The publish loop
+// sets that status before calling Blogger, so a worker that dies mid-write never runs its own
+// catch: holdStalePublicationClaims() repaired the job_publications row and pushed attempts to
+// the maximum, which stops claimPublication() re-claiming forever, while the job itself stayed
+// in publishing_new with recovery_state 'none'. publication-ambiguity-recovery.js exists for
+// precisely this error but only lists jobs in failed/needs_review, so the orphan was invisible
+// to its own rescue.
+test('a stale publication claim also demotes the job it orphaned in publishing_new', async () => {
+  const source = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
+  const fn = source.slice(source.indexOf('async function holdStalePublicationClaims'), source.indexOf('async function claimPublication'));
+
+  // The job is moved to a status publication-ambiguity-recovery.js actually lists.
+  assert.match(fn, /UPDATE jobs[\s\S]*?SET status = 'failed'/);
+  assert.match(fn, /WHERE status = 'publishing_new'/);
+  // Only an orphan qualifies: its publication row is stale-held and carries no post id. A live
+  // publish holds a 'claimed' row, so an in-flight attempt can never be caught by this.
+  assert.match(fn, /error = 'STALE_PUBLICATION_CLAIM_HELD'\s*\n\s*AND \(blogger_post_id IS NULL OR blogger_post_id = ''\)/);
+  const jobsUpdate = fn.slice(fn.indexOf('UPDATE jobs'));
+  assert.doesNotMatch(jobsUpdate, /'claimed'/);
+  // The error code must stay STALE_PUBLICATION_CLAIM_HELD: job-auto-rescue's
+  // NEVER_AUTO_RETRY_CODES matches on it, which is what stops a blind retry of an
+  // unknown-outcome write.
+  assert.match(fn, /last_error_code = 'STALE_PUBLICATION_CLAIM_HELD'/);
+  assert.match(fn, /recovery_state = 'held'/);
+  // The two counts stay separate so a tick cannot report a demotion as a stale claim.
+  assert.match(fn, /return \{ claims: [^}]*orphans: /);
+  assert.match(source, /staleClaimsHeld: stale\.claims/);
+  assert.match(source, /orphanedPublishJobsDemoted: stale\.orphans/);
+});
+
+test('the orphan demotion targets exactly the error the stale-claim sweep writes', async () => {
+  const source = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
+  const fn = source.slice(source.indexOf('async function holdStalePublicationClaims'), source.indexOf('async function claimPublication'));
+  // Both statements must agree on the marker, or the sweep writes one code and the demotion
+  // looks for another and silently never fires.
+  const markers = fn.match(/'STALE_PUBLICATION_CLAIM_HELD'/g) || [];
+  assert.ok(markers.length >= 5, `expected the same marker in both statements, saw ${markers.length}`);
+  assert.match(fn, /SET status = 'failed', attempts = \?, error = 'STALE_PUBLICATION_CLAIM_HELD'/);
+});
