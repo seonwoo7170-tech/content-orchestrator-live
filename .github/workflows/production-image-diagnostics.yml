@@ -930,3 +930,64 @@ jobs:
             "SELECT 'JOB ' || id || ' | ' || status || ' | rec=' || COALESCE(recovery_state,'-') || ' | hold=' || COALESCE(hold_reason,'-') || ' | err=' || COALESCE(last_error_code,'-') || ' | upd=' || updated_at AS row_text FROM jobs WHERE id IN (176,164) ORDER BY id;"
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
             "SELECT 'EVT ' || job_id || ' | ' || created_at || ' | ' || event_type || ' | ' || substr(message,1,110) AS row_text FROM job_events WHERE job_id IN (176,164) ORDER BY id DESC LIMIT 16;"
+
+      # The five jobs held at QUALITY_REVIEW_LIMIT_REACHED burned all four continuations. What
+      # matters is not that they failed but what the critic kept asking for and whether repair
+      # could ever satisfy it: repair runs strategy 'targeted_sections_only', so a finding that
+      # demands broad expansion (CORE_INFORMATION_MISSING from the Section 26 length pass) can
+      # be re-emitted every round without repair being allowed to fix it.
+      - name: Read what the critic keeps flagging on the five quality-limit jobs (read-only)
+        shell: bash
+        env:
+          QUALITY_LIMIT_JOB_IDS: '154,156,157,165,172'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          function words(html){
+            const text=String(html||'').replace(/<[^>]*>/g,' ').replace(/&[a-z#0-9]+;/gi,' ').replace(/\s+/g,' ').trim();
+            if(!text) return 0;
+            // Korean has no spaces between words, so a space count under-reports badly. Count
+            // Hangul syllables as ~0.5 words and space-separated Latin runs as 1 each.
+            const hangul=(text.match(/[가-힣]/g)||[]).length;
+            const latin=(text.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g)||[]).length;
+            return hangul ? Math.round(hangul/2)+latin : latin;
+          }
+          for(const jobId of String(process.env.QUALITY_LIMIT_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok){ console.log('QLIMIT_READ_FAILED',jobId,r.status); continue; }
+            const job=j.job||{};
+            let result=null; try{result=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            const critic=result?.finalCritic||null;
+            const issues=Array.isArray(critic?.issues)?critic.issues:[];
+            console.log('QLIMIT_JOB',jobId,JSON.stringify({
+              blog:job.blog_id,
+              lang:result?.article?.language||null,
+              title:String(result?.article?.title||'').slice(0,70),
+              wordEstimate:words(result?.article?.html),
+              continuationAttempt:result?.continuationAttempt??null,
+              totalRepairAttempts:result?.totalRepairAttempts??null,
+              repairAttempts:result?.repairAttempts??null,
+              repairStrategy:result?.repairStrategy||null,
+              reviewReason:result?.reviewReason||null,
+              criticStatus:critic?.status||null,
+              criticScore:critic?.score??null,
+              issueCodes:issues.map((i)=>i.code)
+            }));
+            for(const issue of issues.slice(0,6)){
+              console.log('QLIMIT_ISSUE',jobId,JSON.stringify({
+                code:issue.code,severity:issue.severity,
+                location:String(issue.location||'').slice(0,60),
+                reason:String(issue.reason||'').slice(0,200),
+                repairInstruction:String(issue.repairInstruction||'').slice(0,160)
+              }));
+            }
+            const history=Array.isArray(result?.continuationHistory)?result.continuationHistory:[];
+            console.log('QLIMIT_HISTORY',jobId,JSON.stringify(history.map((h)=>({
+              n:h.continuationAttempt,status:h.status,reason:h.reviewReason,repairs:h.repairAttempts,guard:h.repairGuardViolationCount
+            }))));
+          }
+          NODE
