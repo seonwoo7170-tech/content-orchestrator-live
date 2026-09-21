@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { runWorkersAi } from '../src/lib/cloudflare-ai.js';
 import { critic, diagnostic, repair, writer } from '../src/lib/ai-routes.js';
 
@@ -339,4 +340,23 @@ test('runWorkersAi rejects invalid provider controls before provider use', async
     /SEED_INVALID/
   );
   assert.equal(called, false);
+});
+
+// The writer was told "never force ... fixed word count" and was never shown the band at all,
+// while the critic measured the finished article against that exact band and emitted
+// CORE_INFORMATION_MISSING when it fell short. The writer was obeying its instructions and
+// failing a gate it had no knowledge of: four fresh articles on 2026-09-21 came in at 814,
+// 976, 1,085 and 1,492 words against a 1,500-2,500 band.
+test('the writer is shown the depth band as a coverage check, not a padding target', async () => {
+  const source = await readFile(new URL('../src/lib/ai-routes.js', import.meta.url), 'utf8');
+  const writerAdapter = source.slice(source.indexOf('CONTENT COMPLETENESS GATE'), source.indexOf('ARTICLE LENGTH PASS'));
+  assert.match(writerAdapter, /seoBrief\.planning\.recommendedWordRange/);
+  assert.match(writerAdapter, /the same band is applied when the finished article is reviewed/);
+  // Padding must still be forbidden, in both prompts.
+  assert.match(writerAdapter, /never pad, repeat or restate to reach it/);
+  assert.match(writerAdapter, /Do not pad to reach a word count/);
+  // A genuinely complete short draft must survive.
+  assert.match(writerAdapter, /genuinely covers every applicable dimension is correct and must be returned as is/);
+  // The contradictory clause is gone: the writer is no longer told to ignore word count outright.
+  assert.doesNotMatch(writerAdapter, /Never force keyword density, fixed word count/);
 });
