@@ -1065,3 +1065,50 @@ jobs:
             }
           }
           NODE
+
+      # Five of the holds created before the evidence deploy, and several after it, ended on
+      # reviewReason TARGETED_REPAIR_SCOPE_VIOLATION -- repair produced an article the guard
+      # rejected, every attempt, until the continuation budget ran out. result.repairGuardViolations
+      # records which guard threw and on what, so this says whether they are all the same guard
+      # and whether source-quality findings are the ones that cannot be applied.
+      - name: Which repair guard is actually rejecting the held jobs? (read-only)
+        shell: bash
+        env:
+          GUARD_JOB_IDS: '207,208,209,213,214,215,216,217,218,220,223'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          for(const jobId of String(process.env.GUARD_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+            if(!r.ok){ console.log('GUARD_READ_FAILED',jobId,r.status); continue; }
+            const j=await r.json().catch(()=>({}));
+            const job=j.job||{};
+            let result=null; try{result=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            const violations=Array.isArray(result?.repairGuardViolations)?result.repairGuardViolations:[];
+            const critic=result?.finalCritic||null;
+            const issues=Array.isArray(critic?.issues)?critic.issues:[];
+            console.log('GUARD_JOB',jobId,JSON.stringify({
+              err:job.last_error_code||null,
+              reviewReason:result?.reviewReason||null,
+              repairAttempts:result?.repairAttempts??null,
+              repairApplied:result?.repairApplied??null,
+              violationCount:violations.length,
+              violationCodes:violations.map((v)=>v&&v.code),
+              violationMeta:violations.map((v)=>v&&v.meta).slice(0,4)
+            }));
+            for(const issue of issues.slice(0,8)){
+              console.log('GUARD_ISSUE',jobId,JSON.stringify({
+                code:issue.code,
+                location:String(issue.location||'').slice(0,40),
+                repairInstruction:String(issue.repairInstruction||'').slice(0,150)
+              }));
+            }
+            const history=Array.isArray(result?.continuationHistory)?result.continuationHistory:[];
+            console.log('GUARD_HISTORY',jobId,JSON.stringify(history.map((h)=>({
+              n:h.continuationAttempt,reason:h.reviewReason,repairs:h.repairAttempts,guard:h.repairGuardViolationCount
+            }))));
+          }
+          NODE
