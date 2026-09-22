@@ -73,18 +73,3 @@ test('an edit inside an existing block still goes to repair', async () => {
     assert.equal(requiresNewBlock(issue), false, `${issue.code} is an in-block edit and must still be repaired`);
   }
 });
-
-// UNSUPPORTED_SOURCE_ATTRIBUTION always deletes an attribution or a figure from a block that
-// already exists, so it must never land in the structural-replan path -- replanning throws the
-// whole draft away, which is the opposite of the minimal edit this finding asks for.
-test('an unsupported attribution is repaired in place, never replanned', async () => {
-  const { requiresNewBlock } = await import('../worker/lib/pipeline.js');
-  const issues = [
-    { code: 'UNSUPPORTED_SOURCE_ATTRIBUTION', repairInstruction: 'Remove the "Marketo 2024 data shows 25-35%" attribution and keep the surrounding guidance.' },
-    { code: 'UNSUPPORTED_SOURCE_ATTRIBUTION', repairInstruction: 'EEOC 언급을 삭제하고 남는 설명을 그대로 유지한다.' },
-    { code: 'UNSUPPORTED_SOURCE_ATTRIBUTION', repairInstruction: 'Drop the Namu Wiki reference and state the specification without attributing it.' }
-  ];
-  for (const issue of issues) {
-    assert.equal(requiresNewBlock(issue), false, 'an attribution removal is an in-block edit');
-  }
-});

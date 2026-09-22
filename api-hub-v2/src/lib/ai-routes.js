@@ -9,12 +9,12 @@ import { freeAiConfigured, freeAiFallbackEnabled, freeAiModel, runFreeAi, should
 
 const WRITER_ADAPTER = `AUTOMATION WRITER ADAPTER — this adapter overrides any interactive/questioning flow in the master prompt for this server call.
 Platform is Google Blogger / Blogspot. Do not ask questions. Do not wait for user selection. Produce one complete publication-ready Article from the supplied topic and language.
-Return JSON only with this exact top-level shape: {"article":{"title":"...","html":"...","searchDescription":"...","labels":["..."],"sources":[...],"language":"ko|en","topic":"...","thumbnailHook":"...","evidence":[{"claim":"...","basis":"research|general|context|unverified","source":"..."}]}}.
+Return JSON only with this exact top-level shape: {"article":{"title":"...","html":"...","searchDescription":"...","labels":["..."],"sources":[...],"language":"ko|en","topic":"...","thumbnailHook":"..."}}.
 thumbnailHook is a short overlay caption rendered on top of the thumbnail image, separate from the title. It must be a punchy, curiosity- or benefit-driven phrase in the article's language, clearly different from the title and from the topic string, not a restatement, truncation, or light rewording of either. Keep it glanceable: at most 22 characters for Korean, at most 38 characters for other languages, no ellipsis, quotation marks, or trailing punctuation.
 The html field must contain only the Blogger post body, not <html>, <head>, or <body>. The title field is the Blogger post title and the Blogger theme/page template supplies the page-level heading; do not duplicate the title as an <h1> inside html. For language=en, write a natural search-oriented English title and do not default to "How to". Use "How to" only when the reader is genuinely looking for a procedural or step-by-step task. For explanation, diagnosis, comparison, selection, timing, cost, suitability, definition, or troubleshooting intent, choose the most natural title form for the query, including Why, What, Which, When, Can, Should, Is/Are, Does/Do, How Much, How Long, How Often, or a concise non-question title. Avoid formulaic repetition and preserve the supplied topic/search intent rather than forcing an awkward question word. Use <h2> for the first body section heading when a heading is needed. Do not use placeholders, invented URLs, invented quotations, invented first-hand experience, or unsupported current claims. Keep prose practical, answer-first, skimmable, and less academic/manual-like. If current facts cannot be verified from the supplied context, avoid asserting them as current facts. SearchDescription must be concise plain text. labels and sources must always be arrays.
 CONTENT COMPLETENESS GATE — before producing the final JSON, silently identify the reader's primary decision or action and the essential subquestions that must be answered for that reader to act confidently. A valid structure is not enough. Cover every applicable core dimension with concrete, non-redundant substance: the direct answer or recommendation; why it works or what causes the problem when relevant; decision criteria and meaningful trade-offs; practical steps in the order they should be done; prerequisites, materials, cost/time factors or setup requirements when relevant; safety limits, exceptions and cases where the advice should not be used; common failure modes or mistakes; and at least one concrete example, checkpoint, or decision rule when it materially improves understanding. Omit only dimensions that are genuinely irrelevant to the topic. Do not pad to reach a word count. Use the available output budget for information gain, examples, boundaries and actionable detail rather than filler. Never omit a core answer merely to keep the article short. If a necessary current fact cannot be supported, state the limitation or use stable guidance instead of inventing it.
 When a research object is supplied, treat it as the only web research performed for this request. Ground time-sensitive/current claims in those records, prefer primary or official sources when present, and never invent a source beyond the supplied research URLs. The Article.sources field must contain only sources actually used. When research was requested but unavailable, do not present unverifiable information as current fact; reframe the article around stable guidance or explicitly bounded information.
-EVIDENCE BASIS — name an external organisation, publication, standard, statute, study, or state an attributed statistic inside Article.html only when a supplied research record actually supports it. Where no supplied record supports it, write the guidance without the attribution or leave the claim out. Never reach for a plausible-sounding authority, a remembered study, a regulator whose remit does not cover the topic, or a wiki to make a sentence look sourced: naming a source that was not supplied is a fabrication even when the underlying fact happens to be true. Alongside the article, declare an "evidence" array covering the attributed claims you did write, each as {"claim":"...","basis":"research|general|context|unverified","source":"..."}. claim must be a short verbatim excerpt copied from Article.html, at most 20 words, so the server can locate it in the body. basis is exactly one of: "research" — supported by a supplied research record, and source must be that record's exact URL; "general" — stable, widely-established domain knowledge that carries no named authority and no specific statistic; "context" — taken from the supplied topic, seoBrief, or rewriteSource; "unverified" — could not be supported, in which case the body must state that limitation rather than assert the claim. Include at most 8 entries and cover only claims that name an authority or state a specific figure; when the article makes no such claim, return an empty array. Write "evidence" last, after html is complete, and keep every entry short — it is review metadata and is never published.
+SOURCE ATTRIBUTION — name an external organisation, publication, standard, statute, or study, or state an attributed statistic, only when a supplied research record actually supports it. Where no supplied record supports it, write the guidance without the attribution or leave the claim out. Never reach for a plausible-sounding authority, a remembered study, a regulator whose remit does not cover the topic, or a wiki to make a sentence look sourced: naming a source that was not supplied is a fabrication even when the underlying fact happens to be true.
 When seoBrief is supplied, use it as planning and search-intent context: follow its searchIntent, intentGoal, answerFirst, information-gain, freshness, internal-link and cannibalization guidance where applicable. SEO brief metrics are evidence for planning, not article facts to quote or invent. Never force keyword density or unsupported claims merely to satisfy the brief.
 DEPTH EXPECTATION — seoBrief.planning.recommendedWordRange states the editorial band this article is planned for, and the same band is applied when the finished article is reviewed. It is not a padding target and you must never pad, repeat or restate to reach it. Treat it as a coverage check instead: before returning, estimate your draft's visible word count, and if it lands clearly below the low end of that range, that is evidence you have skipped or compressed dimensions the CONTENT COMPLETENESS GATE above requires. Go back and add real substance -- the missing decision criteria, the trade-offs, the concrete example or numbers, the failure modes, the exceptions and the cases where the advice does not apply -- rather than lengthening what is already there. A short draft that genuinely covers every applicable dimension is correct and must be returned as is; a short draft that is short because it stayed shallow is not.
 When rewriteExisting is true, this is an in-place modernization of an existing Blogger post, not a patch and not a new post. Use rewriteSource only to preserve the same core subject, primary search intent, language, and important title terms. Rewrite the entire body from scratch under the current Master v4.5 and CONTENT COMPLETENESS GATE instead of imitating or lightly editing the old prose. The title may be improved modestly for clarity, natural wording, and search intent, but must remain recognizably about the same subject; do not pivot to a different angle merely to make it sound new. Do not copy old boilerplate. Do not output, alter, or invent Blogger identity fields, URLs, or post IDs; the caller preserves the existing post identity and will update that same post.
@@ -39,8 +39,6 @@ Run the audit as separate passes and do not collapse materially different violat
 
 Do not reward fluent prose by assuming compliance. Actively look for concrete violations. Do not invent violations, facts, sources, or external verification. If a rule is genuinely not applicable, do not penalize it. If external verification is unavailable, never pretend that you browsed the web; judge whether the Article itself provides adequate support and whether claims are framed safely.
 
-EVIDENCE PASS — when an evidenceAudit object is supplied alongside the Article, it is a deterministic comparison the server already ran between the writer's own declared evidence, Article.sources, and the body text; trust it over your own reading of those fields. evidenceAudit.researchClaimsMissingFromSources lists claims the writer declared as research-backed whose cited URL is absent from Article.sources. evidenceAudit.claimsWithoutResearchBasis lists claims the writer declared as general knowledge, supplied context, or unverified. For each entry in either list, find that verbatim claim in Article.html and judge what the sentence actually asserts: when it names an organisation, publication, standard, statute, or study, or states a specific attributed figure, emit code UNSUPPORTED_SOURCE_ATTRIBUTION at that block, with a repair instruction to drop the attribution or the figure and keep the surviving guidance — never an instruction to find, add, or substitute a source. A claim that names no authority and states no specific figure is ordinary general knowledge and must not be flagged. When no evidenceAudit is supplied, do not infer one and do not invent this issue; audit passes (3) and (4) above still apply exactly as before.
-
 LOCATION CONTRACT — every issue.location must be machine-targetable. For Article.html, enumerate the supported top-level blocks <p>, <h2>, <h3>, <li>, and <blockquote> in one shared document-order sequence starting at 1, then use exactly: "html p N", "html h2 N", "html h3 N", "html li N", or "html blockquote N". N is the shared document-order block number, not a per-tag counter. For non-HTML fields use exactly one of: "title", "searchDescription", "labels", "sources", "language", or "topic". Never use only a heading title, prose fragment, "introduction", "conclusion", "section-1", "body", or another human-only location. If two different HTML blocks need changes, emit separate issues with their exact locations.
 
 Return JSON only using exactly this schema: {"status":"PASS|FAIL","score":0-100,"issues":[{"code":"UPPER_SNAKE_CASE","severity":"LOW|MEDIUM|HIGH|CRITICAL","location":"machine-targetable location from the LOCATION CONTRACT","reason":"specific Master v4.5 compliance reason","repairInstruction":"specific minimal repair that preserves unaffected content"}]}.
@@ -52,7 +50,6 @@ const REPAIR_SYSTEM = `You are a targeted repair editor. Return JSON only. Repai
 const REPAIR_MASTER_ADAPTER = `AUTOMATION MASTER V4.5 TARGETED REPAIR ADAPTER — this adapter overrides any article-writing, platform-selection, questioning, or interactive flow in the preceding master prompt for this server call.
 Treat the entire preceding full integrated Master v4.5 as governing publication constraints. This route selects the targeted Repair role and overrides any conflicting Writer, platform-selection, questioning, or interactive execution flow from the integrated Master. Apply every supplied critic issue, but change only the smallest affected sections necessary. Do not rewrite clean sections merely for style preference. A repair must not introduce a new Master v4.5 violation elsewhere.
 The supplied issue.location values are hard edit boundaries. For HTML locations such as "html p 3" or "html h2 5", change only those exact document-order blocks. Do not reformat, reorder, normalize whitespace, change tags, or rewrite any unflagged HTML block. For field locations such as "title" or "searchDescription", change only that field. Return all unflagged Article fields and all unflagged HTML exactly as received.
-For UNSUPPORTED_SOURCE_ATTRIBUTION, delete the unsupported attribution or the unsupported figure from the flagged block and leave the remaining guidance readable and useful on its own. Do not substitute another source, do not supply one from memory, and do not reword the sentence so that it still implies an authority it cannot support.
 For CORE_INFORMATION_MISSING, use the flagged block to add the specific missing decision rule, step, boundary, trade-off, prerequisite, or example named by the issue. Add concrete useful information, not generic filler or a longer restatement. Stay within the hard edit boundary and use only supplied/verified facts or stable guidance; if the missing fact cannot be supported, state the limitation rather than inventing it.
 When seoBrief is supplied, preserve its applicable search-intent and information-gain goals while making only the flagged repair. Do not use the brief as permission to change unflagged sections or to invent unsupported facts.
 This is Google Blogger / Blogspot: Article.title is rendered outside Article.html, so do not add a duplicate <h1> to the body merely because the body has no <h1>.
@@ -157,86 +154,18 @@ function isCriticContractError(error) {
   return CRITIC_CONTRACT_ERRORS.has(String(error?.message || ''));
 }
 
-// The writer names an organisation, a standard or a statistic and the critic has no way to
-// tell whether the supplied research ever contained it, because the critic never sees the
-// research object. Production shipped an NBA 2K27 game-server document as the source for a
-// LAN packet-loss guide, the EEOC for electrician licensing, Namu Wiki as a technical spec,
-// and an invented "Marketo 2024" figure -- all past a clean critic pass. article.evidence is
-// the writer's own declared basis for each attributed claim, carried across that gap.
-// It is advisory metadata throughout: a missing, malformed, or stale evidence array must
-// never fail an article, or a reporting aid becomes a new way to lose a finished draft.
-const EVIDENCE_BASES = new Set(['research', 'general', 'context', 'unverified']);
-const MAX_EVIDENCE_ENTRIES = 8;
-const MAX_EVIDENCE_CLAIM_LENGTH = 200;
-const MAX_EVIDENCE_SOURCE_LENGTH = 300;
-
-function normalizeEvidenceEntry(entry) {
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-  const basis = String(entry.basis || '').trim().toLowerCase();
-  if (!EVIDENCE_BASES.has(basis)) return null;
-  const claim = String(entry.claim || '').trim().slice(0, MAX_EVIDENCE_CLAIM_LENGTH);
-  if (!claim) return null;
-  const source = String(entry.source || '').trim().slice(0, MAX_EVIDENCE_SOURCE_LENGTH);
-  return source ? { claim, basis, source } : { claim, basis };
-}
-
-export function normalizeArticleEvidence(article) {
-  if (!Array.isArray(article?.evidence)) return null;
-  const entries = [];
-  for (const entry of article.evidence) {
-    const normalized = normalizeEvidenceEntry(entry);
-    if (normalized) entries.push(normalized);
-    if (entries.length >= MAX_EVIDENCE_ENTRIES) break;
-  }
-  return entries.length ? entries : null;
-}
-
-function visibleText(html) {
-  return String(html || '')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-function sourcesHaystack(sources) {
-  return (Array.isArray(sources) ? sources : [])
-    .map((source) => (typeof source === 'string' ? source : JSON.stringify(source ?? '')))
-    .join(' ')
-    .toLowerCase();
-}
-
-// Set comparison is the part a language model is worst at and code is best at, so the URL
-// match and the body lookup happen here and the critic is handed the answer. Requiring the
-// claim to still be present verbatim is what keeps a repaired article from being flagged
-// forever: once repair deletes the offending sentence, its evidence entry stops being
-// reported even though the stale entry is still attached to the article.
-export function auditArticleEvidence(article) {
-  const entries = normalizeArticleEvidence(article);
-  if (!entries) return null;
-  const body = visibleText(article?.html);
-  const haystack = sourcesHaystack(article?.sources);
-  const audit = {
-    declaredEntries: entries.length,
-    claimsNotFoundInBody: 0,
-    researchClaimsMissingFromSources: [],
-    claimsWithoutResearchBasis: []
-  };
-  for (const entry of entries) {
-    if (!body.includes(entry.claim.toLowerCase())) {
-      audit.claimsNotFoundInBody += 1;
-      continue;
-    }
-    if (entry.basis === 'research') {
-      if (!entry.source || !haystack.includes(entry.source.toLowerCase())) {
-        audit.researchClaimsMissingFromSources.push({ claim: entry.claim, source: entry.source || null });
-      }
-      continue;
-    }
-    audit.claimsWithoutResearchBasis.push({ claim: entry.claim, basis: entry.basis });
-  }
-  return audit;
+// Dropped 2026-09-22. The writer declared an evidence array and the critic route compared
+// each declared URL against Article.sources, but those are different sets: a TourAPI job
+// cites apis.data.go.kr in its evidence and lists something else in sources, so jobs 215
+// and 220 had every legitimate claim reported as unbacked and burned all four continuations
+// on UNSUPPORTED_SOURCE_ATTRIBUTION. 217 emitted the same code five times with no evidence
+// at all, and 218 invented MISSING_EVIDENCE_FOR_CLAIM off the new vocabulary -- naming a new
+// issue code in the prompt is enough for the critic to reach for it. The writer keeps the
+// plain attribution rule, which costs no output tokens and feeds the critic nothing.
+function stripEvidence(article) {
+  if (!article || typeof article !== 'object' || !('evidence' in article)) return article;
+  const { evidence: _dropped, ...rest } = article;
+  return rest;
 }
 
 function providerMetadata(result) {
@@ -334,9 +263,7 @@ export async function writer(env, input, aiBinding = env?.AI, fetchImpl = fetch)
     throw Object.assign(new Error('WRITER_JSON_INVALID'), { status: 502, meta: MASTER_V45 });
   }
   const article = validateWriterArticle(parsed, { topic, language });
-  const evidence = normalizeArticleEvidence(article);
-  if (evidence) article.evidence = evidence;
-  else delete article.evidence;
+  delete article.evidence;
   // The attraction's own real photos (from TourAPI's detailImage2) ride along here so a
   // TourAPI-grounded job can use them for body images instead of an AI-generated substitute
   // -- without this, generateSourceImage() has no idea real photos exist and always falls
@@ -368,10 +295,8 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
   }
 
   const systemInstruction = `${rolePrompt.text}\n\n--- MASTER V4.5 CRITIC ADAPTER ---\n${CRITIC_SYSTEM}\n\n${CRITIC_MASTER_ADAPTER}`;
-  const evidenceAudit = auditArticleEvidence(article);
   const userContent = JSON.stringify({
-    article,
-    ...(evidenceAudit ? { evidenceAudit } : {}),
+    article: stripEvidence(article),
     ...(input?.seoBrief && typeof input.seoBrief === 'object' ? { seoBrief: input.seoBrief } : {})
   });
   const messages = [
