@@ -94,3 +94,64 @@ test('guard fails closed on a broad html body target when structured blocks exis
     /TARGETED_REPAIR_HTML_BODY_TARGET_TOO_BROAD/
   );
 });
+
+// The critic numbers locations per tag, not in the shared document-order sequence the
+// LOCATION CONTRACT asks for. On 2026-09-22 that single mismatch accounted for the guard
+// violations on jobs 208, 209, 214, 217, 218, 220 and 223; five of them reached
+// QUALITY_REVIEW_LIMIT_REACHED with repairApplied false, meaning eight repair calls were
+// thrown away without one edit ever landing.
+test('a per-tag location resolves when the shared index does not carry that tag', () => {
+  const before = article('<p>Intro.</p><h2>Heading.</h2><p>Second paragraph.</p>');
+  const candidate = article('<p>Intro.</p><h2>Heading.</h2><p>Second paragraph repaired.</p>');
+  // "html p 2" means the second <p>, which is block 3; block 2 is the heading.
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 2')]);
+  assert.equal(constrained.html, '<p>Intro.</p><h2>Heading.</h2><p>Second paragraph repaired.</p>');
+  assert.equal(assertTargetedRepairPreserved(before, constrained, [issue('html p 2')]), true);
+});
+
+test('the shared document-order reading still wins when it is valid', () => {
+  const before = article('<h2>Heading.</h2><p>First paragraph.</p><p>Second paragraph.</p>');
+  const candidate = article('<h2>Heading.</h2><p>First paragraph repaired.</p><p>Second paragraph.</p>');
+  // Block 2 is a <p>, so "html p 2" resolves there and never falls back to the second <p>.
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 2')]);
+  assert.equal(constrained.html, '<h2>Heading.</h2><p>First paragraph repaired.</p><p>Second paragraph.</p>');
+});
+
+test('a location that matches under neither reading is still rejected', () => {
+  const before = article('<p>One.</p><li>Two.</li><li>Three.</li>');
+  const candidate = article('<p>One changed.</p><li>Two.</li><li>Three.</li>');
+  assert.throws(
+    () => constrainTargetedRepair(before, candidate, [issue('html li 55')]),
+    (error) => error.code === 'TARGETED_REPAIR_TARGET_NOT_FOUND'
+  );
+});
+
+// Job 214: five LOW_QUALITY_SOURCE findings at "html li 55" through "html li 59", pointing at
+// the link list. Shared index 55 is a paragraph there, so every attempt was discarded whole.
+test("a long article's late list item resolves by its own tag count", () => {
+  const paragraphs = Array.from({ length: 50 }, (_, index) => `<p>Paragraph ${index + 1}.</p>`).join('');
+  const items = Array.from({ length: 6 }, (_, index) => `<li>Source ${index + 1}.</li>`).join('');
+  const before = article(paragraphs + items);
+  const repairedItems = items.replace('<li>Source 5.</li>', '<li>Source 5 replaced.</li>');
+  const candidate = article(paragraphs + repairedItems);
+  // Block 55 is a paragraph; the fifth <li> is block 55 only by tag count.
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html li 5')]);
+  assert.match(constrained.html, /Source 5 replaced\./);
+  assert.equal(assertTargetedRepairPreserved(before, constrained, [issue('html li 5')]), true);
+});
+
+test('a fixable finding still lands when another finding in the batch uses per-tag numbering', () => {
+  const before = article('<p>Intro.</p><h2>Heading.</h2><p>Second.</p>');
+  const candidate = article('<p>Intro repaired.</p><h2>Heading.</h2><p>Second repaired.</p>');
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 1'), issue('html p 2')]);
+  assert.equal(constrained.html, '<p>Intro repaired.</p><h2>Heading.</h2><p>Second repaired.</p>');
+});
+
+test('a repair that lands outside the resolved block is dropped, not accepted', () => {
+  const before = article('<p>Intro.</p><h2>Heading.</h2><p>Second.</p>');
+  // The model edited the intro although "html p 2" resolves to the second paragraph.
+  const candidate = article('<p>Intro rewritten.</p><h2>Heading.</h2><p>Second.</p>');
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 2')]);
+  assert.equal(constrained.html, before.html);
+  assert.equal(assertTargetedRepairPreserved(before, constrained, [issue('html p 2')]), true);
+});

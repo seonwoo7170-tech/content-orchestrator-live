@@ -45,6 +45,37 @@ function htmlParts(value) {
   return { blocks, gaps };
 }
 
+// The LOCATION CONTRACT asks the critic for one shared document-order sequence across <p>,
+// <h2>, <h3>, <li> and <blockquote>, and the critic numbers per tag instead: "html li 55"
+// means the 55th list item, not the 55th block. Jobs 208, 209, 214, 217, 218, 220 and 223
+// each burned every repair attempt on TARGETED_REPAIR_TARGET_NOT_FOUND because of it, and
+// five of them never had a single repair applied -- the whole batch is discarded when one
+// location fails to resolve, taking the fixable findings beside it. Reading a location the
+// other way when the shared index does not carry that tag costs nothing in safety: it still
+// names exactly one block, and a repair that lands anywhere else is dropped as before.
+function resolveHtmlTargets(rawTargets, blocks) {
+  const resolved = new Set();
+  const unresolved = [];
+
+  for (const target of rawTargets) {
+    const [tag, indexText] = String(target).split(':');
+    const position = Number(indexText);
+    const shared = blocks[position - 1];
+    if (shared && shared.tag === tag) {
+      resolved.add(shared.index);
+      continue;
+    }
+    const nthOfTag = blocks.filter((block) => block.tag === tag)[position - 1];
+    if (nthOfTag) {
+      resolved.add(nthOfTag.index);
+      continue;
+    }
+    unresolved.push(target);
+  }
+
+  return { resolved, unresolved };
+}
+
 export function targetedRepairScope(issues = []) {
   const allowedFields = new Set();
   const htmlTargets = new Set();
@@ -121,17 +152,13 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
     }
   }
 
-  for (const target of scope.htmlTargets) {
-    const [tag, indexText] = target.split(':');
-    const block = original.blocks[Number(indexText) - 1];
-    if (!block || block.tag !== tag) throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target });
-  }
+  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
+  if (unresolved.length > 0) throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target: unresolved[0] });
 
   let html = original.gaps[0] || '';
   for (let index = 0; index < original.blocks.length; index += 1) {
     const beforeBlock = original.blocks[index];
-    const key = `${beforeBlock.tag}:${beforeBlock.index}`;
-    html += scope.htmlTargets.has(key) ? repaired.blocks[index].raw : beforeBlock.raw;
+    html += htmlTargets.has(beforeBlock.index) ? repaired.blocks[index].raw : beforeBlock.raw;
     html += original.gaps[index + 1] || '';
   }
   constrained.html = html;
@@ -182,6 +209,8 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE');
   }
 
+  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
+
   for (let index = 0; index < original.gaps.length; index += 1) {
     if (original.gaps[index] !== repaired.gaps[index]) {
       throw repairGuardError('TARGETED_REPAIR_CHANGED_UNTARGETED_HTML_GAP', { index });
@@ -199,8 +228,7 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
       });
     }
 
-    const key = `${beforeBlock.tag}:${beforeBlock.index}`;
-    if (scope.htmlTargets.has(key)) continue;
+    if (htmlTargets.has(beforeBlock.index)) continue;
     if (beforeBlock.raw !== afterBlock.raw) {
       throw repairGuardError('TARGETED_REPAIR_CHANGED_UNTARGETED_HTML_BLOCK', {
         location: `html ${beforeBlock.tag} ${beforeBlock.index}`
@@ -208,12 +236,8 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
     }
   }
 
-  for (const target of scope.htmlTargets) {
-    const [tag, indexText] = target.split(':');
-    const block = original.blocks[Number(indexText) - 1];
-    if (!block || block.tag !== tag) {
-      throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target });
-    }
+  if (unresolved.length > 0) {
+    throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target: unresolved[0] });
   }
 
   return true;
