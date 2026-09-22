@@ -28,7 +28,16 @@ function parseResult(value) {
 // article plus its critic verdict -- only reached after the continuation budget ran out. Leaving
 // it off this list sent a manual retry down the destructive branch, which nulls result_json and
 // deletes job_images and their R2 objects: jobs 154, 156 and 157 hold three paid KIE images each.
-const CONTINUATION_RESULT_CODES = new Set(['CRITIC_REVIEW_CONTINUE', 'QUALITY_REVIEW_LIMIT_REACHED']);
+// REPAIR_BLOCKED_BY_GUARD is the same saved state under a more honest name -- the budget ran
+// out with no repair ever applied because the guard rejected them. It must stay on this list
+// and be treated as a quality-limit hold, or naming the failure accurately would silently turn
+// its retry into the destructive branch that nulls result_json and deletes paid images.
+const CONTINUATION_RESULT_CODES = new Set([
+  'CRITIC_REVIEW_CONTINUE',
+  'QUALITY_REVIEW_LIMIT_REACHED',
+  'REPAIR_BLOCKED_BY_GUARD'
+]);
+const CONTINUATION_BUDGET_EXHAUSTED_CODES = new Set(['QUALITY_REVIEW_LIMIT_REACHED', 'REPAIR_BLOCKED_BY_GUARD']);
 
 function hasContinuationResult(row) {
   if (!CONTINUATION_RESULT_CODES.has(String(row?.last_error_code || row?.error || '').toUpperCase())) return false;
@@ -37,7 +46,7 @@ function hasContinuationResult(row) {
 }
 
 function isQualityLimitHold(row) {
-  return String(row?.last_error_code || row?.error || '').toUpperCase() === 'QUALITY_REVIEW_LIMIT_REACHED';
+  return CONTINUATION_BUDGET_EXHAUSTED_CODES.has(String(row?.last_error_code || row?.error || '').toUpperCase());
 }
 
 // A job can fail with API_HUB_403 (BLOGGER_WRITE_TARGET_NOT_ALLOWED) purely because its blog

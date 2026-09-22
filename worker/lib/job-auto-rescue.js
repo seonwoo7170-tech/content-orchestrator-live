@@ -20,6 +20,14 @@ const LEGACY_REVIEW_RETRY_CODE = 'CRITIC_REVIEW_RETRY';
 const STALE_PIPELINE_CODE = 'STALE_PIPELINE_EXECUTION';
 const LEGACY_ROUTE_RECHECK_CODE = 'LEGACY_API_HUB_ROUTE_RECHECK';
 const MAX_REVIEW_CONTINUATIONS = 4;
+// A job whose last pass landed no repair at all because the guard rejected every attempt did
+// not fail review -- the machinery failed. Until 2026-09-22 both outcomes were recorded as
+// QUALITY_REVIEW_LIMIT_REACHED, so jobs 208, 209, 214, 218 and 220 sat for a day looking like
+// articles the critic could not pass, when in fact the critic and the guard disagreed about
+// how to number an HTML location and every repair was thrown away unread. repairApplied was
+// false on all five and nobody could see it. A hold that says which of the two happened is
+// the difference between reading one number and reading a day of job history.
+const REPAIR_BLOCKED_CODE = 'REPAIR_BLOCKED_BY_GUARD';
 const LEGACY_ROUTE_CODES = new Set(['API_HUB_404', 'API_HUB_405']);
 const LEGACY_REVIEW_HOLD_CODES = new Set([LEGACY_REVIEW_RETRY_CODE, STALE_PIPELINE_CODE]);
 
@@ -76,6 +84,13 @@ function reviewContinuationAttempt(row) {
   const result = parseSavedResult(row);
   const value = Number(result?.continuationAttempt || 0);
   return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+}
+
+function repairBlockedByGuard(row) {
+  const result = parseSavedResult(row);
+  if (!result || result.repairApplied !== false) return false;
+  const violations = Array.isArray(result.repairGuardViolations) ? result.repairGuardViolations : [];
+  return violations.length > 0;
 }
 
 function isReviewContinuationRetry(row) {
@@ -262,8 +277,9 @@ async function rescueNeedsReview(db, row, now) {
     return { jobId: Number(row.id), action: held ? 'held' : 'skipped', reason: 'QUALITY_REVIEW_RESULT_MISSING' };
   }
   if (reviewContinuationAttempt(row) >= MAX_REVIEW_CONTINUATIONS) {
-    const held = await holdJob(db, row, 'QUALITY_REVIEW_LIMIT_REACHED', now);
-    return { jobId: Number(row.id), action: held ? 'held' : 'skipped', reason: 'QUALITY_REVIEW_LIMIT_REACHED' };
+    const reason = repairBlockedByGuard(row) ? REPAIR_BLOCKED_CODE : 'QUALITY_REVIEW_LIMIT_REACHED';
+    const held = await holdJob(db, row, reason, now);
+    return { jobId: Number(row.id), action: held ? 'held' : 'skipped', reason };
   }
   if (neverAutoRetry(code) || await hasUnsafePublication(db, row.id)) {
     const reason = neverAutoRetry(code) ? code : 'MANUAL_RETRY_REQUIRES_PUBLICATION_REVIEW';
