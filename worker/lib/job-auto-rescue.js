@@ -290,11 +290,17 @@ async function rescueNeedsReview(db, row, now) {
   const jobId = Number(row.id);
   const status = String(row.status || '');
   const nextRetryAt = now.toISOString();
+  // retry_count is carried, not reset. Resetting it here handed every continuation a fresh
+  // set of MAX_JOB_RETRIES transient retries, so the two budgets multiplied: 4 continuations
+  // x (1 run + 3 stale/timeout retries) = 16 full pipeline runs, each one a paid writer,
+  // critic and repair call. Job 230 did exactly that between 14:55 and 16:56 on 2026-09-22 --
+  // sixteen "first critic" events -- and still ended held. A continuation is a new content
+  // round; it is not evidence that the infrastructure problem went away, and when the
+  // infrastructure is what keeps failing, a fresh budget just pays to learn that again.
   const result = await db.prepare(
     `UPDATE jobs
         SET status = 'failed',
             error = ?,
-            retry_count = 0,
             recovery_state = 'retry_wait',
             next_retry_at = ?,
             hold_reason = NULL,

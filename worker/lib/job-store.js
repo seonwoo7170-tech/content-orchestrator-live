@@ -32,10 +32,18 @@ function parseResult(value) {
 // out with no repair ever applied because the guard rejected them. It must stay on this list
 // and be treated as a quality-limit hold, or naming the failure accurately would silently turn
 // its retry into the destructive branch that nulls result_json and deletes paid images.
+// CRITIC_SCHEMA_INVALID means both critic providers returned a verdict that broke the
+// contract. The article, its images and the prior critic history are all still in
+// result_json -- the review is what failed, not the writing -- so a retry must resume from
+// them rather than rebuild. Jobs 217, 223 and 230 each sat on this code with a finished
+// article and paid images that the destructive branch would have deleted. It is deliberately
+// absent from the budget-exhausted list below: the continuation budget was never spent, so
+// there is nothing to refund.
 const CONTINUATION_RESULT_CODES = new Set([
   'CRITIC_REVIEW_CONTINUE',
   'QUALITY_REVIEW_LIMIT_REACHED',
-  'REPAIR_BLOCKED_BY_GUARD'
+  'REPAIR_BLOCKED_BY_GUARD',
+  'CRITIC_SCHEMA_INVALID'
 ]);
 const CONTINUATION_BUDGET_EXHAUSTED_CODES = new Set(['QUALITY_REVIEW_LIMIT_REACHED', 'REPAIR_BLOCKED_BY_GUARD']);
 

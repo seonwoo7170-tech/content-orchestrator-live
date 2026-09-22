@@ -38,7 +38,8 @@ test('the retry response reports the ready status and preserved images for a pub
 // each hold three paid KIE images.
 test('a quality-limit hold keeps its article and images on a manual retry', async () => {
   const source = await readFile(new URL('../worker/lib/job-store.js', import.meta.url), 'utf8');
-  assert.match(source, /CONTINUATION_RESULT_CODES = new Set\(\[\s*'CRITIC_REVIEW_CONTINUE',\s*'QUALITY_REVIEW_LIMIT_REACHED',\s*'REPAIR_BLOCKED_BY_GUARD'\s*\]\)/);
+  const codes = source.slice(source.indexOf('const CONTINUATION_RESULT_CODES'), source.indexOf('function hasContinuationResult'));
+  assert.match(codes, /'QUALITY_REVIEW_LIMIT_REACHED'/);
   assert.match(source, /if \(!CONTINUATION_RESULT_CODES\.has\(/);
   // The preserving branch is what skips the job_images delete.
   assert.match(source, /const preserveImages = preserveContinuation \|\| preservePublishReady;/);
@@ -82,4 +83,29 @@ test('renaming the hold does not send its retry down the destructive branch', as
   assert.match(codes, /'CRITIC_REVIEW_CONTINUE'/);
   assert.match(codes, /'QUALITY_REVIEW_LIMIT_REACHED'/);
   assert.match(codes, /'REPAIR_BLOCKED_BY_GUARD'/);
+});
+
+// CRITIC_SCHEMA_INVALID is the review failing, not the writing. The article, its paid images
+// and the prior critic history are all still in result_json, so the retry must resume from
+// them. Jobs 217, 223 and 230 each sat on this code on 2026-09-22 with a finished article the
+// destructive branch would have thrown away.
+test('a critic contract failure keeps its article and images on a manual retry', async () => {
+  const source = await readFile(new URL('../worker/lib/job-store.js', import.meta.url), 'utf8');
+  const codes = source.slice(source.indexOf('const CONTINUATION_RESULT_CODES'), source.indexOf('function hasContinuationResult'));
+  assert.match(codes, /'CRITIC_SCHEMA_INVALID'/);
+  // The continuation budget was never spent on a contract failure, so there is nothing to reset.
+  assert.match(source, /CONTINUATION_BUDGET_EXHAUSTED_CODES = new Set\(\['QUALITY_REVIEW_LIMIT_REACHED', 'REPAIR_BLOCKED_BY_GUARD'\]\)/);
+});
+
+// Resetting retry_count on every continuation multiplied the two budgets: 4 continuations x
+// (1 run + 3 transient retries) = 16 full pipeline runs, each a paid writer, critic and repair
+// call. Job 230 logged exactly sixteen "first critic" events between 14:55 and 16:56 on
+// 2026-09-22 and still ended held.
+test('a continuation does not hand the job a fresh transient-retry budget', async () => {
+  const source = await readFile(new URL('../worker/lib/job-auto-rescue.js', import.meta.url), 'utf8');
+  const branch = source.slice(source.indexOf('async function rescueNeedsReview'), source.indexOf('async function rescueOrphanFailure'));
+  assert.doesNotMatch(branch, /retry_count = 0,/);
+  assert.match(branch, /recovery_state = 'retry_wait',/);
+  // The stale/timeout path still stops at MAX_JOB_RETRIES, which now caps the job as a whole.
+  assert.match(source, /if \(retryCount >= MAX_JOB_RETRIES\)/);
 });
