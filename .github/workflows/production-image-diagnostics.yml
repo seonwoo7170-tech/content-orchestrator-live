@@ -1161,3 +1161,51 @@ jobs:
             console.log('GUARDFIX_RETRY_RESULT',jobId,res.status,JSON.stringify(body));
           }
           NODE
+
+      # The thumbnail overlay caption is still unsatisfying after the heading-derived fallback
+      # shipped. buildThumbnailHook prefers the writer's own thumbnailHook over everything else,
+      # so what actually lands on the image is almost always writer-authored -- reading the real
+      # values, next to each title, says whether the problem is the writer's phrasing, the
+      # heading fallback, or the generic filler at the bottom of the chain.
+      - name: Read the actual thumbnail hooks the writer produced (read-only)
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          const GENERIC=new Set([
+            'Fix the Risky Stuff First','Try This First','Don’t Ignore This','What Matters Most','Start Here',
+            '큰돈 들기 전에 먼저','이것부터 확인',
+            '놓치면 안 되는 것','고를 때 핵심은 이것',
+            '핵심부터 확인'
+          ]);
+          for(let jobId=205;jobId<=236;jobId+=1){
+            const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+            if(!r.ok) continue;
+            const j=await r.json().catch(()=>({}));
+            const job=j.job||{};
+            let result=null; try{result=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            const article=result?.article;
+            if(!article) continue;
+            const hook=String(article.thumbnailHook||'');
+            console.log('HOOK',jobId,JSON.stringify({
+              lang:article.language||null,
+              title:String(article.title||'').slice(0,64),
+              writerHook:hook||null,
+              hookLength:hook.length,
+              isGenericFiller:GENERIC.has(hook),
+              echoesTitle:Boolean(hook)&&String(article.title||'').toLowerCase().includes(hook.toLowerCase())
+            }));
+            const imgs=await fetch(`${base}/api/jobs/${jobId}/images`,{headers,cache:'no-store'});
+            if(!imgs.ok) continue;
+            const body=await imgs.json().catch(()=>({}));
+            for(const image of (Array.isArray(body.images)?body.images:[])){
+              if(String(image.role)!=='thumbnail') continue;
+              console.log('HOOK_BAKED',jobId,JSON.stringify({
+                hookText:image.hook_text||null,hookBaked:image.hook_baked??null,status:image.status
+              }));
+            }
+          }
+          NODE
