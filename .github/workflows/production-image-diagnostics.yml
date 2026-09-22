@@ -1112,3 +1112,52 @@ jobs:
             }))));
           }
           NODE
+
+      # ONE-TIME, GUARDED MUTATION. These seven were held at the continuation limit by two
+      # things now fixed: the guard read "html li 55" as the 55th block rather than the 55th
+      # list item and threw TARGET_NOT_FOUND, discarding the whole repair batch (208, 209, 214,
+      # 217, 218, 220, and 215 in two of its rounds), and the critic's evidence pass reported
+      # legitimate TourAPI-sourced claims as fabrications (215, 217, 218, 220) before being
+      # taken back out. 207, 213, 216 and 223 are deliberately absent: the first two need block
+      # insertions no repair can make, 216 needs an HTML restructure the guard rejects by
+      # design, and 223 holds CRITIC_SCHEMA_INVALID, which is not a continuation code -- its
+      # retry would null result_json and delete its images.
+      #
+      # The guard POSTs only while a job is still needs_review AND held AND holding
+      # QUALITY_REVIEW_LIMIT_REACHED AND still carrying an article in result_json, so a re-run
+      # of this workflow is a no-op once a job has moved, and a job that somehow lost its
+      # article is never pushed down the destructive branch. clearedImages in each response
+      # shows whether anything was destroyed.
+      - name: One-time guarded retry of the seven repairable quality-limit jobs (mutating, no-op once cleared)
+        shell: bash
+        env:
+          GUARD_FIX_RETRY_JOB_IDS: '208,209,214,215,217,218,220'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          for(const jobId of String(process.env.GUARD_FIX_RETRY_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+            const j=await r.json().catch(()=>({}));
+            const job=j.job||{};
+            let result=null; try{result=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            const hasArticle=Boolean(result&&result.article&&typeof result.article==='object');
+            const eligible=String(job.status)==='needs_review'
+              && String(job.recovery_state)==='held'
+              && String(job.hold_reason||'')==='QUALITY_REVIEW_LIMIT_REACHED'
+              && String(job.last_error_code||'')==='QUALITY_REVIEW_LIMIT_REACHED'
+              && hasArticle;
+            if(!eligible){
+              console.log('GUARDFIX_RETRY_SKIPPED',jobId,JSON.stringify({
+                status:job.status,recoveryState:job.recovery_state||null,
+                hold:job.hold_reason||null,err:job.last_error_code||null,hasArticle
+              }));
+              continue;
+            }
+            const res=await fetch(`${base}/api/jobs/${jobId}/retry`,{method:'POST',headers,cache:'no-store'});
+            const body=await res.json().catch(()=>({}));
+            console.log('GUARDFIX_RETRY_RESULT',jobId,res.status,JSON.stringify(body));
+          }
+          NODE
