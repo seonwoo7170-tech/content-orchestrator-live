@@ -2005,3 +2005,44 @@ jobs:
           });
           console.log('VERIFICATION_JOB',JSON.stringify(created));
           NODE
+
+      - name: Inspect the verification article for length and internal links (read-only)
+        if: always()
+        shell: bash
+        env:
+          VERIFY_JOB_ID: '251'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          const jobId=String(process.env.VERIFY_JOB_ID||'').trim();
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          if(!jobId){ console.log('NO_VERIFY_JOB_ID'); process.exit(0); }
+          const headers={'x-admin-api-key':admin};
+          const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+          if(!r.ok){ console.log('VERIFY_READ_FAILED',r.status); process.exit(0); }
+          const job=(await r.json()).job||{};
+          let result=null; try{ result=job.result_json?JSON.parse(job.result_json):null; }catch{}
+          const article=result?.article||null;
+          const html=String(article?.html||'');
+          const text=html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
+          const links=[...html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["']/gi)].map((m)=>m[1]);
+          const internal=links.filter((h)=>h.includes('smileinfo.net'));
+          console.log('VERIFY_JOB',JSON.stringify({
+            id:job.id, status:job.status, hold:job.hold_reason||null,
+            lastError:job.last_error_code||null,
+            title:String(article?.title||'').slice(0,80),
+            reviewReason:result?.reviewReason??null,
+            measuredLength:result?.advisoryReview?.measuredLength ?? result?.finalCritic?.measuredLength ?? null,
+            deterministicQa:result?.deterministicQa?.status ?? null,
+            bodyChars:text.length,
+            internalLinks:internal.length,
+            internalLinkSample:internal.slice(0,4),
+            externalLinks:links.length-internal.length,
+            hasRelatedSection:/id="related-articles"/.test(html),
+            publishedLine:(text.match(/Published:[^|]{0,30}/)||[])[0]||null,
+            h2:(html.match(/<h2\b/gi)||[]).length,
+            img:(html.match(/<img\b/gi)||[]).length,
+            updated:job.updated_at
+          }));
+          NODE
