@@ -110,6 +110,14 @@ function structuralReplanRequired(critic) {
   // replaced. The real deadlock fix is keeping unfixable findings out of the repair batch, which
   // REPAIR_INAPPLICABLE_CODES does; one such finding should not also cancel the repair of
   // everything beside it.
+  // A shortfall against the measured length floor must never become a replan. Replanning
+  // rewrites the article from scratch and the rewrite reliably comes back shorter -- job 154
+  // lost 1,604 words that way -- so for the one defect that is "not enough content", a replan
+  // is the single response that cannot work. Repair can insert blocks next to a flagged one
+  // since the append-only guard landed, which is exactly what expanding a thin section needs,
+  // so a below-floor article goes there instead. An explicitly structural code above still
+  // replans; this only governs the count-of-findings path.
+  if (critic?.measuredLength?.belowFloor) return false;
   return codes.filter((code) => code === 'CORE_INFORMATION_MISSING').length >= 2;
 }
 
@@ -192,6 +200,9 @@ function resolveAfterAdvisoryReview(outcome) {
       haltedOn: outcome.reviewReason ?? null,
       criticStatus: critic?.status ?? null,
       criticScore: critic?.score ?? critic?.totalScore ?? null,
+      // Counted in api-hub, not estimated. Carried onto the job record so a published article's
+      // length against the floor it was planned for is visible without re-deriving it.
+      measuredLength: critic?.measuredLength ?? null,
       issues: Array.isArray(critic?.issues) ? critic.issues : [],
       styleLint: outcome.styleLint ?? null
     },

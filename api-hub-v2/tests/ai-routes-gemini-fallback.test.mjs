@@ -116,10 +116,13 @@ test('critic runs on Workers AI with granular audit instructions, regardless of 
   assert.match(systemText, /A distinct repair action must receive a distinct issue/);
   assert.match(systemText, /misleading or overclaiming searchDescription/);
   assert.match(systemText, /ARTICLE LENGTH PASS/);
-  assert.match(systemText, /Standard News\/Explainer ~1,500-2,500 words/);
-  assert.match(systemText, /never as a standalone length defect/);
+  assert.match(systemText, /measuredLength is supplied with the Article and was counted in code, not estimated/);
+  assert.match(systemText, /Never emit a length finding on its own with no missing-content reason/);
   const userText = requestBody.messages[1].content;
-  assert.deepEqual(JSON.parse(userText), { article });
+  const userPayload = JSON.parse(userText);
+  assert.deepEqual(userPayload.article, article);
+  // Counted here rather than left to the model, which is the whole change.
+  assert.equal(typeof userPayload.measuredLength.chars, 'number');
   assert.ok(!userText.includes('initial'));
   assert.ok(!userText.includes('bloggerPostId'));
 });

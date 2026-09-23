@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { critic } from '../src/lib/ai-routes.js';
 
-// Master v4.5 Section 26 (기사 길이) sets editorial length bands (Breaking/Straight News
-// ~800-1,500 words; Standard News/Explainer ~1,500-2,500; Deep-Dive ~2,500-4,000), but the
-// critic rubric never checked them -- a real production test article passed at 96/100 with
-// only 641 words, well under even the shortest band. The critic system prompt now ties a
-// clearly-under-band word count to the existing CONTENT COMPLETENESS PASS instead of adding
-// a bare, unlocatable "too short" issue, so repair still has a concrete block to expand.
+// The critic used to be told to estimate the article's word count itself and compare it to an
+// editorial band. It cannot: smileinfo.net published 33 posts at a median of 873 words against a
+// band asking for 1,500-2,500, and the critic passed them. The length is now counted in code and
+// supplied as measuredLength, and the critic is told not to estimate or dispute it. A shortfall
+// is still tied to CONTENT COMPLETENESS -- it must name the missing content and point at a block
+// to expand -- so repair has something concrete to act on rather than a bare "too short".
 
 const ENV = Object.freeze({ CRITIC_MODEL: '@cf/openai/gpt-oss-120b' });
 
@@ -39,10 +39,17 @@ test('critic system instruction ties under-length articles to CORE_INFORMATION_M
 
   const systemText = requestBody.messages[0].content;
   assert.match(systemText, /ARTICLE LENGTH PASS/);
-  assert.match(systemText, /Breaking\/Straight News ~800-1,500 words/);
-  assert.match(systemText, /Standard News\/Explainer ~1,500-2,500 words/);
-  assert.match(systemText, /Deep-Dive ~2,500-4,000 words/);
-  assert.match(systemText, /emit CORE_INFORMATION_MISSING pointing at the block\(s\) that should be expanded/);
+  assert.match(systemText, /measuredLength is supplied with the Article and was counted in code, not estimated/);
+  assert.match(systemText, /Do not estimate the length yourself and do not dispute these numbers/);
+  assert.match(systemText, /emit CORE_INFORMATION_MISSING against the block or blocks that should be expanded/);
   assert.match(systemText, /Never emit a length finding on its own with no missing-content reason/);
-  assert.match(systemText, /never as a standalone length defect/);
+  // Asking the critic to estimate is the defect being removed, so it must not come back.
+  assert.doesNotMatch(systemText, /Estimate the Article's total word count/);
+
+  // And the number itself has to actually reach the model.
+  const userPayload = JSON.parse(requestBody.messages[1].content);
+  assert.equal(typeof userPayload.measuredLength?.chars, 'number');
+  assert.equal(userPayload.measuredLength.chars, 'Body.'.length);
+  assert.equal(userPayload.measuredLength.belowFloor, true);
+  assert.ok(userPayload.measuredLength.floorChars > 0);
 });

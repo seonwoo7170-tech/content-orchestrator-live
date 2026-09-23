@@ -161,7 +161,12 @@ test('AI routes use the full integrated Master v4.5 with role adapters, critic n
   assert.equal(writerResult.rolePrompt.sha256, '0df7c83bb3874c4802ca7c02306beee7cd7032366930d66abfc7fa1bdb6cda66');
 
   const criticUserText = workersSeen[2].body.messages[1].content;
-  assert.deepEqual(JSON.parse(criticUserText), { article: { title: 'Test' } });
+  const criticPayload = JSON.parse(criticUserText);
+  assert.deepEqual(criticPayload.article, { title: 'Test' });
+  // The critic is handed the length rather than asked to estimate it; an article with no body
+  // measures zero and is below any floor, which is the correct reading of an empty article.
+  assert.equal(criticPayload.measuredLength.chars, 0);
+  assert.equal(criticPayload.measuredLength.belowFloor, true);
   assert.ok(!criticUserText.includes('initial'));
   assert.ok(!criticUserText.includes('bloggerPostId'));
   assert.match(workersSeen[2].body.messages[0].content, /MASTER V4\.5 COMPLIANCE CRITIC ADAPTER/);
@@ -202,7 +207,12 @@ test('critic model-facing input is identical across initial/final stage labels f
 
   assert.equal(modelInputs.length, 2);
   assert.equal(modelInputs[0], modelInputs[1]);
-  assert.deepEqual(JSON.parse(modelInputs[0]), { article });
+  // measuredLength is derived from the article alone, so it cannot differ between the stages
+  // either -- which is exactly the property this test protects.
+  const payload = JSON.parse(modelInputs[0]);
+  assert.deepEqual(payload.article, article);
+  assert.equal(payload.measuredLength.chars, 'Same body.'.length);
+  assert.deepEqual(Object.keys(payload).sort(), ['article', 'measuredLength']);
 });
 
 test('critic normalizes PASS with issues into FAIL so repair can run', async () => {
@@ -342,21 +352,29 @@ test('runWorkersAi rejects invalid provider controls before provider use', async
   assert.equal(called, false);
 });
 
-// The writer was told "never force ... fixed word count" and was never shown the band at all,
-// while the critic measured the finished article against that exact band and emitted
-// CORE_INFORMATION_MISSING when it fell short. The writer was obeying its instructions and
-// failing a gate it had no knowledge of: four fresh articles on 2026-09-21 came in at 814,
-// 976, 1,085 and 1,492 words against a 1,500-2,500 band.
-test('the writer is shown the depth band as a coverage check, not a padding target', async () => {
+// The writer was first shown no band at all, then shown one and asked to estimate its own draft
+// against it. Neither worked: four fresh articles on 2026-09-21 came in at 814, 976, 1,085 and
+// 1,492 words against a 1,500-2,500 band, and smileinfo.net went on to publish 33 posts at a
+// median of 873. A model cannot count its own output, so it is no longer asked to -- the target
+// arrives as a character count computed in code, and the finished article is measured the same
+// way.
+test('the writer is given a counted length target, not asked to estimate one', async () => {
   const source = await readFile(new URL('../src/lib/ai-routes.js', import.meta.url), 'utf8');
   const writerAdapter = source.slice(source.indexOf('CONTENT COMPLETENESS GATE'), source.indexOf('ARTICLE LENGTH PASS'));
-  assert.match(writerAdapter, /seoBrief\.planning\.recommendedWordRange/);
-  assert.match(writerAdapter, /the same band is applied when the finished article is reviewed/);
+  assert.match(writerAdapter, /lengthContract gives you the length this article is planned for, already counted for you in characters/);
+  assert.match(writerAdapter, /floorChars is the minimum the finished body must reach/);
+  assert.match(writerAdapter, /The same count is measured in code after you return/);
+  assert.doesNotMatch(writerAdapter, /estimate your draft's visible word count/i);
   // Padding must still be forbidden, in both prompts.
-  assert.match(writerAdapter, /never pad, repeat or restate to reach it/);
+  assert.match(writerAdapter, /[Nn]ever pad, repeat or restate to reach it/);
   assert.match(writerAdapter, /Do not pad to reach a word count/);
-  // A genuinely complete short draft must survive.
-  assert.match(writerAdapter, /genuinely covers every applicable dimension is correct and must be returned as is/);
+  // The "a genuinely complete short draft is correct, return it as is" escape is deliberately
+  // gone. It was the clause the 873-word median lived in: every short draft claims completeness,
+  // and nothing could check the claim. Padding is still forbidden and still called the worse
+  // failure, so the writer's way out is to add real substance, not filler -- and if it truly
+  // cannot, the critic flags it, repair tries, and the article publishes anyway. Nothing holds.
+  assert.doesNotMatch(writerAdapter, /must be returned as is/);
+  assert.match(writerAdapter, /reaching the floor with filler is a worse failure than falling short/);
   // The contradictory clause is gone: the writer is no longer told to ignore word count outright.
   assert.doesNotMatch(writerAdapter, /Never force keyword density, fixed word count/);
 });

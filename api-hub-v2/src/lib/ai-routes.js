@@ -6,6 +6,7 @@ import { loadMasterV45RolePrompt } from './master-v45-role-prompts.js';
 import { collectWriterResearch } from './tavily-search.js';
 import { buildTourApiResearch, getAttractionDetail } from './tour-api.js';
 import { freeAiConfigured, freeAiFallbackEnabled, freeAiModel, runFreeAi, shouldFallbackFromFreeAi } from './free-ai.js';
+import { lengthContract, lengthVerdict } from './article-length.js';
 
 const WRITER_ADAPTER = `AUTOMATION WRITER ADAPTER — this adapter overrides any interactive/questioning flow in the master prompt for this server call.
 Platform is Google Blogger / Blogspot. Do not ask questions. Do not wait for user selection. Produce one complete publication-ready Article from the supplied topic and language.
@@ -17,7 +18,7 @@ CONTENT COMPLETENESS GATE — before producing the final JSON, silently identify
 When a research object is supplied, treat it as the only web research performed for this request. Ground time-sensitive/current claims in those records, prefer primary or official sources when present, and never invent a source beyond the supplied research URLs. The Article.sources field must contain only sources actually used. When research was requested but unavailable, do not present unverifiable information as current fact; reframe the article around stable guidance or explicitly bounded information.
 SOURCE ATTRIBUTION — name an external organisation, publication, standard, statute, or study, or state an attributed statistic, only when a supplied research record actually supports it. Where no supplied record supports it, write the guidance without the attribution or leave the claim out. Never reach for a plausible-sounding authority, a remembered study, a regulator whose remit does not cover the topic, or a wiki to make a sentence look sourced: naming a source that was not supplied is a fabrication even when the underlying fact happens to be true.
 When seoBrief is supplied, use it as planning and search-intent context: follow its searchIntent, intentGoal, answerFirst, information-gain, freshness, internal-link and cannibalization guidance where applicable. SEO brief metrics are evidence for planning, not article facts to quote or invent. Never force keyword density or unsupported claims merely to satisfy the brief.
-DEPTH EXPECTATION — seoBrief.planning.recommendedWordRange states the editorial band this article is planned for, and the same band is applied when the finished article is reviewed. It is not a padding target and you must never pad, repeat or restate to reach it. Treat it as a coverage check instead: before returning, estimate your draft's visible word count, and if it lands clearly below the low end of that range, that is evidence you have skipped or compressed dimensions the CONTENT COMPLETENESS GATE above requires. Go back and add real substance -- the missing decision criteria, the trade-offs, the concrete example or numbers, the failure modes, the exceptions and the cases where the advice does not apply -- rather than lengthening what is already there. A short draft that genuinely covers every applicable dimension is correct and must be returned as is; a short draft that is short because it stayed shallow is not.
+DEPTH EXPECTATION — lengthContract gives you the length this article is planned for, already counted for you in characters of visible text with HTML tags excluded. It is not a word estimate and you must not re-estimate it: floorChars is the minimum the finished body must reach and targetChars is where it should land. The same count is measured in code after you return and again when the article is reviewed, so a draft below floorChars is short as a matter of fact, not opinion. Treat that as a coverage test rather than a quota: a body below the floor means you skipped or compressed dimensions the CONTENT COMPLETENESS GATE requires, so go back and add the missing decision criteria, trade-offs, concrete examples and numbers, failure modes, exceptions and the cases where the advice does not apply. Never pad, repeat or restate to reach it -- reaching the floor with filler is a worse failure than falling short, and is treated as one. Korean runs roughly 2.4 characters per 어절 and English roughly 6.3 per word, if you want a familiar check on your own draft.
 When rewriteExisting is true, this is an in-place modernization of an existing Blogger post, not a patch and not a new post. Use rewriteSource only to preserve the same core subject, primary search intent, language, and important title terms. Rewrite the entire body from scratch under the current Master v4.5 and CONTENT COMPLETENESS GATE instead of imitating or lightly editing the old prose. The title may be improved modestly for clarity, natural wording, and search intent, but must remain recognizably about the same subject; do not pivot to a different angle merely to make it sound new. Do not copy old boilerplate. Do not output, alter, or invent Blogger identity fields, URLs, or post IDs; the caller preserves the existing post identity and will update that same post.
 If candidateAttempt is greater than 1, this is a last-resort fresh candidate after targeted repairs were exhausted. Preserve the same topic and search intent, but produce a genuinely fresh candidate instead of echoing the failed wording. Use retryReason only as a failure signal to avoid repeating the same defect; do not mention retry mechanics in the article.`;
 
@@ -32,7 +33,7 @@ Perform a strict compliance pass across all applicable areas, including article 
 
 CONTENT COMPLETENESS PASS — independently derive the reader's primary decision/action and the essential subquestions implied by the Article.title, topic, and seoBrief when supplied. Do not PASS an article merely because its headings and structure look complete. Verify that the body actually supplies enough concrete information for a reader to act or decide: the direct answer; applicable reasoning or cause; decision criteria/trade-offs; executable steps; relevant prerequisites/cost/time/material considerations; exceptions/safety/boundaries; common failure modes; and concrete examples/checkpoints where they materially improve the answer. Only require dimensions that are genuinely relevant to the topic. If a materially necessary core answer is missing or too vague to support action, emit code CORE_INFORMATION_MISSING. Point that issue to the single existing machine-targetable HTML block that should be expanded or replaced to supply the missing information, preferably the nearest relevant paragraph or heading block. Never use "article body" or another coarse location. The repair instruction must name the missing decision/action information, not ask for generic length or filler.
 
-ARTICLE LENGTH PASS — Master v4.5 Section 26 (기사 길이) sets editorial reference bands, not a ranking formula: Breaking/Straight News ~800-1,500 words; Standard News/Explainer ~1,500-2,500 words; Deep-Dive ~2,500-4,000 words. Determine which band applies from seoBrief.planning.recommendedDepth when supplied; otherwise infer it from the Article's own topic and apparent search intent. A practical how-to, explainer, comparison, troubleshooting, buying-advice or guide topic is Standard News/Explainer: it is neither Breaking/Straight News nor Deep-Dive. Deep-Dive applies only when the Article itself is an investigation, a multi-product tested review, or a long analytical report, which almost none of these articles are -- do not reach for it merely because the topic is technical, and never treat 2,500 words as a general minimum. Judging an ordinary 1,600-word comparison guide against the Deep-Dive band is a misclassification, not a length defect. Estimate the Article's total word count from Article.html's visible text. If that estimate falls clearly below the low end of the applicable band, treat this as strong evidence that the CONTENT COMPLETENESS PASS above is not actually satisfied even though the structure may look complete: identify which specific core decision/action dimension is thin or missing as a result, and emit CORE_INFORMATION_MISSING pointing at the block(s) that should be expanded with concrete additional substance. Never emit a length finding on its own with no missing-content reason, and never instruct padding, filler, or restatement merely to reach a word count — Section 26 itself forbids forcing length once the necessary content is covered, so only flag length when it is evidence of a real information gap.
+ARTICLE LENGTH PASS — measuredLength is supplied with the Article and was counted in code, not estimated: chars is the visible text with HTML tags excluded, floorChars is the minimum this article was planned for, and belowFloor and shortfallChars state whether and by how much it falls short. Do not estimate the length yourself and do not dispute these numbers; they are measurements. When belowFloor is false the article has the planned depth and length is not a finding -- say nothing about it. When belowFloor is true the article is missing content, because the floor is set at the length the necessary coverage takes: identify which specific core decision or action dimension is thin or missing as a result and emit CORE_INFORMATION_MISSING against the block or blocks that should be expanded with concrete additional substance, naming what to add. Never emit a length finding on its own with no missing-content reason, and never instruct padding, filler or restatement to reach a number -- an article that reaches the floor by repeating itself has a worse defect than a short one, and that is the finding to emit instead.
 
 When seoBrief is supplied, also audit the Article against applicable brief constraints such as search intent, answer-first usefulness, information gain, freshness/source requirements, internal-link intent and cannibalization avoidance. Treat brief metrics as planning evidence only, never as facts the Article was required to repeat. Do not invent a violation when the brief requirement is not applicable to the specific Article.
 
@@ -288,6 +289,8 @@ export async function writer(env, input, aiBinding = env?.AI, fetchImpl = fetch)
     candidateAttempt: Number(input?.candidateAttempt || 1),
     retryReason: input?.retryReason ? String(input.retryReason) : null,
     rewriteExisting: input?.rewriteExisting === true,
+    // Counted in code so the writer is given the target rather than asked to estimate it.
+    lengthContract: lengthContract(language, input?.seoBrief?.planning?.recommendedDepth),
     ...(input?.rewriteExisting === true && input?.rewriteSource && typeof input.rewriteSource === 'object' ? { rewriteSource: input.rewriteSource } : {}),
     ...(input?.seoBrief && typeof input.seoBrief === 'object' ? { seoBrief: input.seoBrief } : {}),
     research: research.used ? {
@@ -355,8 +358,16 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
   }
 
   const systemInstruction = `${rolePrompt.text}\n\n--- MASTER V4.5 CRITIC ADAPTER ---\n${CRITIC_SYSTEM}\n\n${CRITIC_MASTER_ADAPTER}`;
+  // Measured here, from the article in hand. Until now both the writer and the critic were asked
+  // to estimate this, and between them they let a 1,500-2,500 word band publish at a median of 873.
+  const measuredLength = lengthVerdict(
+    article,
+    article?.language,
+    input?.seoBrief?.planning?.recommendedDepth
+  );
   const userContent = JSON.stringify({
     article: stripEvidence(article),
+    measuredLength,
     ...(input?.seoBrief && typeof input.seoBrief === 'object' ? { seoBrief: input.seoBrief } : {})
   });
   const messages = [
@@ -401,6 +412,7 @@ export async function critic(env, input, aiBinding = env?.AI, fetchImpl = fetch)
 
   return {
     ...parsed,
+    measuredLength,
     ...providerMetadata(result),
     masterV45: MASTER_V45,
     rolePrompt: rolePrompt.meta,
@@ -413,7 +425,14 @@ export async function repair(env, input, aiBinding = env?.AI, fetchImpl = fetch)
   const cloudflareModel = env.REPAIR_MODEL || '@cf/openai/gpt-oss-120b';
   const geminiModel = env.GEMINI_REPAIR_MODEL || GEMINI_DEFAULT_MODEL;
   const systemInstruction = `${rolePrompt.text}\n\n--- MASTER V4.5 REPAIR ADAPTER ---\n${REPAIR_SYSTEM}\n\n${REPAIR_MASTER_ADAPTER}`;
-  const userContent = JSON.stringify({ ...input, strategy: 'targeted_sections_only' });
+  const repairArticle = input?.article && typeof input.article === 'object' ? input.article : null;
+  const userContent = JSON.stringify({
+    ...input,
+    strategy: 'targeted_sections_only',
+    ...(repairArticle ? {
+      measuredLength: lengthVerdict(repairArticle, repairArticle.language, input?.seoBrief?.planning?.recommendedDepth)
+    } : {})
+  });
   const result = await runPrimaryWithGeminiFallback(env, {
     cloudflare: {
       model: cloudflareModel,
