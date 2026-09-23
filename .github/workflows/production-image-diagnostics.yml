@@ -2165,11 +2165,87 @@ jobs:
           console.log('PLAN_TODAY',JSON.stringify(plan).slice(0,600));
           NODE
 
+      - name: Retry the jobs the transition regression killed, and enable one verification article
+        if: always()
+        shell: bash
+        env:
+          TARGET_BLOG_HOST: 'smileinfo.net'
+          RETRY_JOB_IDS: '157,234,236,241,246,251'
+          ENABLE_FOR_ONE_ARTICLE: 'true'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          async function api(path,init){
+            const r=await fetch(base+path,{headers,cache:'no-store',...init});
+            const j=await r.json().catch(()=>({}));
+            return {ok:r.ok,status:r.status,body:j};
+          }
+          // The execution lane is global: claimStoredJobExecution refuses while any job anywhere is
+          // active. Retrying into a busy lane just queues work behind it, so this waits instead.
+          const ACTIVE=['writing','critic_review','repairing','final_critic'];
+          const active=[];
+          for(const status of ACTIVE){
+            const r=await api(`/api/jobs?status=${status}&limit=20`);
+            for(const j of (Array.isArray(r.body.jobs)?r.body.jobs:[])) active.push({id:j.id,status,updated:j.updated_at});
+          }
+          console.log('EXECUTION_LANE',JSON.stringify({blocked:active.length>0,active}));
+
+          const targetHost=String(process.env.TARGET_BLOG_HOST||'').toLowerCase();
+          const blogsResp=await api('/api/blogs');
+          const blog=(Array.isArray(blogsResp.body.blogs)?blogsResp.body.blogs:[]).find((b)=>{
+            try{ return new URL(String(b.url||'')).hostname.toLowerCase().replace(/^www\./,'')===targetHost; }catch{ return false; }
+          });
+          if(!blog){ console.log('TARGET_BLOG_NOT_FOUND'); process.exit(1); }
+          const blogId=String(blog.blogId);
+
+          if(String(process.env.ENABLE_FOR_ONE_ARTICLE)==='true'){
+            const before=await api('/api/automation/settings');
+            const row=(before.body.blogs||[]).find((b)=>String(b.blogId)===blogId)||null;
+            if(row?.effective?.enabled===true){
+              console.log('ALREADY_ENABLED',JSON.stringify({newArticlesPerDay:row.effective.newArticlesPerDay,maxPublishesPerDay:row.effective.maxPublishesPerDay}));
+            } else {
+              // One article, one publication, no repairs. Enough to verify the length contract,
+              // the internal links and the publish-time date fill together, and no more.
+              const settings={
+                ...(row?.override || before.body.global),
+                enabled:true,
+                newArticlesEnabled:true, newArticlesPerDay:1,
+                repairsEnabled:false, repairsPerDay:0,
+                fixedDailyTargets:true,
+                autoPublishEnabled:true, maxPublishesPerDay:1,
+                approvalMode:'auto'
+              };
+              const saved=await api(`/api/automation/settings/blogs/${encodeURIComponent(blogId)}`,{
+                method:'PUT', body:JSON.stringify({inheritGlobal:false, settings})
+              });
+              console.log('ENABLED_FOR_ONE',saved.status,JSON.stringify(saved.body?.settings||saved.body));
+              const plan=await api('/api/operations/plan-today',{method:'POST',body:JSON.stringify({})});
+              console.log('PLAN_TODAY',plan.status,JSON.stringify(plan.body).slice(0,400));
+            }
+          }
+
+          // 252 carries the same topic as 251 and is deliberately left failed, so the verification
+          // cannot publish the same article twice.
+          for(const id of String(process.env.RETRY_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const read=await api(`/api/jobs/${id}`);
+            const job=read.body?.job||{};
+            if(!['failed','needs_review'].includes(String(job.status||''))){
+              console.log('RETRY_SKIPPED',id,JSON.stringify({status:job.status,reason:'NOT_RETRYABLE'}));
+              continue;
+            }
+            const r=await api(`/api/jobs/${id}/retry`,{method:'POST',body:JSON.stringify({})});
+            console.log('RETRY',id,r.status,JSON.stringify(r.body).slice(0,220));
+          }
+          NODE
+
       - name: Final summary of the verification articles (read-only, kept last so it lands in the log tail)
         if: always()
         shell: bash
         env:
-          SUMMARY_JOB_IDS: '251,252'
+          SUMMARY_JOB_IDS: '157,234,236,241,246,251,252'
         run: |
           node - <<'NODE'
           const base=process.env.BASE_URL;
