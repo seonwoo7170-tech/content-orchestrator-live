@@ -2245,7 +2245,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          SUMMARY_JOB_IDS: '157,234,236,241,246,251,252'
+          SUMMARY_JOB_IDS: '157'
         run: |
           node - <<'NODE'
           const base=process.env.BASE_URL;
@@ -2282,7 +2282,14 @@ jobs:
               hasRelatedSection:/id="related-articles"/.test(html),
               publishedLineInBody:(text.match(/Published:[^.]{0,26}/)||[])[0]||null,
               h2:(html.match(/<h2\b/gi)||[]).length,
-              img:(html.match(/<img\b/gi)||[]).length
+              img:(html.match(/<img\b/gi)||[]).length,
+              repairAttempts:result?.repairAttempts ?? null,
+              repairApplied:result?.repairApplied ?? null,
+              totalRepairAttempts:result?.totalRepairAttempts ?? null,
+              continuationAttempt:result?.continuationAttempt ?? null,
+              guardCodes:(Array.isArray(result?.repairGuardViolations)?result.repairGuardViolations:[]).map((v)=>v&&v.code),
+              issueCodes:(Array.isArray(result?.advisoryReview?.issues)?result.advisoryReview.issues:[]).map((i)=>i&&i.code),
+              issueInstructions:(Array.isArray(result?.advisoryReview?.issues)?result.advisoryReview.issues:[]).slice(0,3).map((i)=>String(i?.repairInstruction||'').slice(0,150))
             }));
           }
           NODE
