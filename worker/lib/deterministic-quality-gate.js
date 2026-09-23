@@ -2,7 +2,6 @@ const BLOCK_PATTERNS = Object.freeze([
   { code: 'PLACEHOLDER_TODO', pattern: /\b(?:TODO|TBD|FIXME)\b/i, message: '작성 중 표식이 본문에 남아 있습니다.' },
   { code: 'PLACEHOLDER_LOREM', pattern: /\blorem\s+ipsum\b/i, message: '샘플 문구가 본문에 남아 있습니다.' },
   { code: 'PLACEHOLDER_INSERT', pattern: /\[(?:insert|add|replace|작성|삽입|추가)[^\]]{0,80}\]/i, message: '치환되지 않은 자리표시자가 남아 있습니다.' },
-  { code: 'PLACEHOLDER_DATE_TOKEN', pattern: /(?:\[(?:current[_\s-]*)?date\]|\{\{\s*(?:current[_\s-]*)?date\s*\}\})/i, message: '치환되지 않은 날짜 자리표시자가 남아 있습니다.' },
   { code: 'CITATION_PLACEHOLDER', pattern: /\[(?:citation needed|source needed|출처 필요|근거 필요)\]/i, message: '확인되지 않은 출처 자리표시자가 남아 있습니다.' },
   { code: 'UNSAFE_JAVASCRIPT_URL', pattern: /(?:href|src)\s*=\s*["']\s*javascript:/i, message: '실행형 javascript URL이 포함되어 있습니다.' },
   { code: 'UNSAFE_DATA_URL', pattern: /href\s*=\s*["']\s*data:/i, message: '링크에 data URL이 포함되어 있습니다.' }
@@ -12,6 +11,9 @@ const WARN_PATTERNS = Object.freeze([
   { code: 'EMPTY_LINK', pattern: /href\s*=\s*["']\s*["']/i, message: '비어 있는 링크가 있습니다.' },
   { code: 'PLACEHOLDER_EXAMPLE_DOMAIN', pattern: /https?:\/\/(?:www\.)?example\.(?:com|org|net)\b/i, message: '예시용 도메인이 남아 있을 수 있습니다.' }
 ]);
+
+const DATE_PLACEHOLDER_RE = /(?:\[(?:current[_\s-]*)?date\]|\{\{\s*(?:current[_\s-]*)?date\s*\}\})/i;
+const PUBLICATION_DATE_SLOT_RE = /(?:Published|게시일|작성일|Last\s+updated|Updated|Reviewed|최종\s*수정)\s*:\s*\[DATE\]/gi;
 
 function text(value) {
   return String(value ?? '').trim();
@@ -52,6 +54,15 @@ function articleContractIssues(article) {
   return issues;
 }
 
+function datePlaceholderResidue(value) {
+  const source = String(value || '');
+  // [DATE] is intentional only in the publication metadata labels that applyPublicationDate()
+  // rewrites immediately before Blogger publication. Strip those exact slots, then reject any
+  // remaining date-shaped token by content rather than by whatever issue code a model invented.
+  const withoutServerSlots = source.replace(PUBLICATION_DATE_SLOT_RE, '');
+  return DATE_PLACEHOLDER_RE.test(withoutServerSlots);
+}
+
 export function runDeterministicQualityGate(article) {
   const issues = articleContractIssues(article);
   if (!article || typeof article !== 'object') {
@@ -63,6 +74,9 @@ export function runDeterministicQualityGate(article) {
 
   for (const rule of BLOCK_PATTERNS) {
     if (rule.pattern.test(combined)) issues.push(issue(rule.code, 'block', rule.message, 'content'));
+  }
+  if (datePlaceholderResidue(combined)) {
+    issues.push(issue('PLACEHOLDER_DATE_TOKEN', 'block', '발행 시점 메타데이터 영역 밖에 날짜 자리표시자가 남아 있습니다.', 'content'));
   }
   for (const rule of WARN_PATTERNS) {
     if (rule.pattern.test(combined)) issues.push(issue(rule.code, 'warn', rule.message, 'content'));
