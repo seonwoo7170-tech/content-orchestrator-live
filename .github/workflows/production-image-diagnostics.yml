@@ -1227,3 +1227,56 @@ jobs:
             "SELECT 'HELD | ' || COALESCE(hold_reason,'(none)') || ' | ' || status || ' | n=' || COUNT(*) AS row_text FROM jobs WHERE archived_at IS NULL AND recovery_state = 'held' GROUP BY hold_reason, status ORDER BY COUNT(*) DESC;"
           npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
             "SELECT 'HELDJOB | ' || id || ' | ' || status || ' | ' || COALESCE(hold_reason,'-') || ' | created=' || substr(created_at,1,16) AS row_text FROM jobs WHERE archived_at IS NULL AND recovery_state = 'held' ORDER BY id;"
+
+      # The four oldest quality-limit holds -- 154, 156, 157 and 165 -- have been cycling since
+      # 2026-09-12. They were retried once with their articles and paid images intact and came
+      # straight back, so a retry is not what they need. What the critic keeps asking of them,
+      # and whether repair was ever able to act on it, decides whether there is a code fix here
+      # at all or whether they are genuinely finished work that needs a human verdict.
+      - name: What do the oldest quality-limit holds actually need? (read-only)
+        shell: bash
+        env:
+          OLDEST_HOLD_JOB_IDS: '154,156,157,165,207,213,216'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin};
+          function words(html){
+            const text=String(html||'').replace(/<[^>]*>/g,' ').replace(/&[a-z#0-9]+;/gi,' ').replace(/\s+/g,' ').trim();
+            if(!text) return 0;
+            const hangul=(text.match(/[가-힣]/g)||[]).length;
+            const latin=(text.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g)||[]).length;
+            return hangul ? Math.round(hangul/2)+latin : latin;
+          }
+          for(const jobId of String(process.env.OLDEST_HOLD_JOB_IDS||'').split(',').map((s)=>s.trim()).filter(Boolean)){
+            const r=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+            if(!r.ok){ console.log('OLD_READ_FAILED',jobId,r.status); continue; }
+            const j=await r.json().catch(()=>({}));
+            const job=j.job||{};
+            let result=null; try{result=job.result_json?JSON.parse(job.result_json):null;}catch{}
+            const critic=result?.finalCritic||null;
+            const issues=Array.isArray(critic?.issues)?critic.issues:[];
+            const violations=Array.isArray(result?.repairGuardViolations)?result.repairGuardViolations:[];
+            console.log('OLD_JOB',jobId,JSON.stringify({
+              status:job.status,hold:job.hold_reason||null,
+              lang:result?.article?.language||null,
+              title:String(result?.article?.title||'').slice(0,58),
+              words:words(result?.article?.html),
+              criticScore:critic?.score??null,
+              reviewReason:result?.reviewReason||null,
+              repairApplied:result?.repairApplied??null,
+              repairAttempts:result?.repairAttempts??null,
+              guardCodes:violations.map((v)=>v&&v.code),
+              issueCodes:issues.map((i)=>i.code)
+            }));
+            for(const issue of issues.slice(0,4)){
+              console.log('OLD_ISSUE',jobId,JSON.stringify({
+                code:issue.code,severity:issue.severity,
+                location:String(issue.location||'').slice(0,30),
+                repairInstruction:String(issue.repairInstruction||'').slice(0,130)
+              }));
+            }
+          }
+          NODE
