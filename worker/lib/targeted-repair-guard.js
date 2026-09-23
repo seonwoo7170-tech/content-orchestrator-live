@@ -10,6 +10,9 @@ const ARTICLE_FIELDS = Object.freeze([
 
 const HTML_BLOCK_RE = /<(p|h2|h3|li|blockquote)\b[^>]*>[\s\S]*?<\/\1>/gi;
 const EXACT_HTML_LOCATION_RE = /html\s+(p|h2|h3|li|blockquote)\s+(\d+)/gi;
+const INTERNAL_LINK_MARKER_RE = /data-smileseon-internal-links\s*=\s*["']1["']/i;
+const SOURCE_AUTHORITY_RE = /\b(?:source|sources|citation|citations|reference|references|authority|authoritative|verified|credible|trusted|evidence)\b|출처|인용|근거|검증|신뢰/i;
+const SOURCE_REPAIR_RE = /\b(?:remove|replace|delete|drop|swap|use|cite|citation|source)\b|제거|교체|삭제|대체|출처|인용/i;
 
 function equalValue(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -45,6 +48,66 @@ function htmlParts(value) {
   return { blocks, gaps };
 }
 
+function exactHtmlTargetsFromLocation(location) {
+  const targets = [];
+  const re = new RegExp(EXACT_HTML_LOCATION_RE.source, EXACT_HTML_LOCATION_RE.flags);
+  let match;
+  while ((match = re.exec(String(location || '')))) {
+    targets.push(`${match[1].toLowerCase()}:${Number(match[2])}`);
+  }
+  return targets;
+}
+
+function issueText(issue) {
+  return [issue?.code, issue?.location, issue?.reason, issue?.message, issue?.repairInstruction]
+    .map((value) => String(value || ''))
+    .join(' ');
+}
+
+function isSourceAuthorityRepairIssue(issue) {
+  const value = issueText(issue);
+  return SOURCE_AUTHORITY_RE.test(value) && SOURCE_REPAIR_RE.test(value);
+}
+
+function resolvableHtmlTargets(parts, targets) {
+  const valid = new Set();
+  const invalid = [];
+  for (const target of targets) {
+    const [tag, indexText] = target.split(':');
+    const index = Number(indexText);
+    const block = parts.blocks[index - 1];
+    if (block && block.tag === tag) valid.add(target);
+    else invalid.push({ target, actualTag: block?.tag ?? null, blockCount: parts.blocks.length });
+  }
+  return { valid, invalid };
+}
+
+function protectedInternalNavigationTargets(parts, issues = []) {
+  const protectedTargets = new Set();
+  for (const issue of Array.isArray(issues) ? issues : []) {
+    if (!isSourceAuthorityRepairIssue(issue)) continue;
+    for (const target of exactHtmlTargetsFromLocation(issue?.location)) {
+      const [tag, indexText] = target.split(':');
+      const block = parts.blocks[Number(indexText) - 1];
+      if (!block || block.tag !== tag) continue;
+      if (INTERNAL_LINK_MARKER_RE.test(block.raw)) protectedTargets.add(target);
+    }
+  }
+  return protectedTargets;
+}
+
+export function inspectTargetedRepairTargets(article, issues = []) {
+  const parts = htmlParts(article?.html);
+  const scope = targetedRepairScope(issues);
+  const resolved = resolvableHtmlTargets(parts, scope.htmlTargets);
+  const protectedTargets = protectedInternalNavigationTargets(parts, issues);
+  return {
+    validTargets: [...resolved.valid],
+    invalidTargets: resolved.invalid,
+    protectedInternalNavigationTargets: [...protectedTargets]
+  };
+}
+
 export function targetedRepairScope(issues = []) {
   const allowedFields = new Set();
   const htmlTargets = new Set();
@@ -65,11 +128,9 @@ export function targetedRepairScope(issues = []) {
     if (/\bhtml\b/i.test(location)) htmlMentioned = true;
     if (/\bhtml\s+body\b/i.test(location)) htmlBody = true;
 
-    const re = new RegExp(EXACT_HTML_LOCATION_RE.source, EXACT_HTML_LOCATION_RE.flags);
-    let match;
-    while ((match = re.exec(location))) {
+    for (const target of exactHtmlTargetsFromLocation(location)) {
       htmlMentioned = true;
-      htmlTargets.add(`${match[1].toLowerCase()}:${Number(match[2])}`);
+      htmlTargets.add(target);
     }
   }
 
@@ -100,6 +161,14 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
   if (scope.htmlTargets.size === 0) throw repairGuardError('TARGETED_REPAIR_HTML_LOCATION_UNSAFE');
 
   const original = htmlParts(before.html);
+  const resolved = resolvableHtmlTargets(original, scope.htmlTargets);
+  const protectedTargets = protectedInternalNavigationTargets(original, issues);
+  const editableTargets = new Set([...resolved.valid].filter((target) => !protectedTargets.has(target)));
+
+  // A stale/nonexistent critic locator must never poison otherwise valid repairs.
+  // If every HTML target is stale or protected internal navigation, preserve HTML byte-for-byte.
+  if (editableTargets.size === 0) return constrained;
+
   const repaired = htmlParts(candidate.html);
   if (original.blocks.length !== repaired.blocks.length) {
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
@@ -121,17 +190,11 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
     }
   }
 
-  for (const target of scope.htmlTargets) {
-    const [tag, indexText] = target.split(':');
-    const block = original.blocks[Number(indexText) - 1];
-    if (!block || block.tag !== tag) throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target });
-  }
-
   let html = original.gaps[0] || '';
   for (let index = 0; index < original.blocks.length; index += 1) {
     const beforeBlock = original.blocks[index];
     const key = `${beforeBlock.tag}:${beforeBlock.index}`;
-    html += scope.htmlTargets.has(key) ? repaired.blocks[index].raw : beforeBlock.raw;
+    html += editableTargets.has(key) ? repaired.blocks[index].raw : beforeBlock.raw;
     html += original.gaps[index + 1] || '';
   }
   constrained.html = html;
@@ -171,6 +234,15 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
     throw repairGuardError('TARGETED_REPAIR_HTML_LOCATION_UNSAFE');
   }
 
+  const resolved = resolvableHtmlTargets(original, scope.htmlTargets);
+  const protectedTargets = protectedInternalNavigationTargets(original, issues);
+  const editableTargets = new Set([...resolved.valid].filter((target) => !protectedTargets.has(target)));
+
+  if (editableTargets.size === 0) {
+    if (String(before.html || '') === String(after.html || '')) return true;
+    throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_WITHOUT_RESOLVABLE_TARGET');
+  }
+
   if (original.blocks.length !== repaired.blocks.length) {
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
       beforeBlocks: original.blocks.length,
@@ -200,19 +272,11 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
     }
 
     const key = `${beforeBlock.tag}:${beforeBlock.index}`;
-    if (scope.htmlTargets.has(key)) continue;
+    if (editableTargets.has(key)) continue;
     if (beforeBlock.raw !== afterBlock.raw) {
       throw repairGuardError('TARGETED_REPAIR_CHANGED_UNTARGETED_HTML_BLOCK', {
         location: `html ${beforeBlock.tag} ${beforeBlock.index}`
       });
-    }
-  }
-
-  for (const target of scope.htmlTargets) {
-    const [tag, indexText] = target.split(':');
-    const block = original.blocks[Number(indexText) - 1];
-    if (!block || block.tag !== tag) {
-      throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target });
     }
   }
 
