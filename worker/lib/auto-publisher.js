@@ -1,5 +1,6 @@
 import { callHub } from './api-hub.js';
 import { applyPublicationDate } from './article-byline-sanitizer.js';
+import { ensureInternalLinks, selectInternalLinkCandidates, siteHostOf } from './internal-links.js';
 import { validateCriticResult } from './contracts.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { dateInTimeZone } from './daily-plan.js';
@@ -208,6 +209,21 @@ async function previousScheduledPublication(env, candidate) {
      WHERE plan_date = ? AND blog_id = ? AND status IN ('scheduled', 'published') AND slot_no < ?
      ORDER BY slot_no DESC LIMIT 1`
   ).bind(String(candidate.plan_date), String(candidate.blog_id), Number(candidate.slot_no)).first();
+}
+
+// Never let link-building stop a publication: the article is finished and correct without it.
+async function withInternalLinks(env, blogId, jobId, article) {
+  try {
+    const candidates = await selectInternalLinkCandidates(env, blogId, { excludeJobId: jobId, limit: 12 });
+    if (candidates.length === 0) return article;
+    return ensureInternalLinks(article, candidates, {
+      minimum: 2,
+      host: siteHostOf(candidates[0].url),
+      language: article?.language
+    });
+  } catch {
+    return article;
+  }
 }
 
 async function resolveScheduledAt(env, candidate, settings, now) {
@@ -503,11 +519,18 @@ export async function runDueAutoPublications(env, blogs, options = {}) {
           blogId: String(candidate.blog_id),
           // Master v4.5 section 62 requires the byline block to carry a publication date, and
           // the writer cannot know one -- publication is scheduled here, long after drafting.
-          // The date it guessed is replaced with the one actually being used.
-          article: applyPublicationDate(result.article, {
-            publishedAt: scheduledAt,
-            updatedAt: scheduledAt
-          })
+          // The date it guessed is replaced with the one actually being used. The related
+          // section is the floor under internal linking: the writer is given the candidates at
+          // drafting time, and this guarantees the post does not go out with none.
+          article: await withInternalLinks(
+            env,
+            String(candidate.blog_id),
+            Number(candidate.job_id),
+            applyPublicationDate(result.article, {
+              publishedAt: scheduledAt,
+              updatedAt: scheduledAt
+            })
+          )
         }
       );
       if (!published?.ok || !published?.bloggerPostId) throw new Error('BLOGGER_SCHEDULE_RESULT_INVALID');

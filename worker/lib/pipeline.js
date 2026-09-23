@@ -4,6 +4,7 @@ import { lintNaturalWriting } from './natural-writing-linter.js';
 import { assertTargetedRepairPreserved, constrainTargetedRepair } from './targeted-repair-guard.js';
 import { liftBlocksOutOfParagraphs, stripWriterOwnedImages } from './article-image-sanitizer.js';
 import { deterministicQaAllowsPublish, runDeterministicQualityGate } from './deterministic-quality-gate.js';
+import { selectInternalLinkCandidates } from './internal-links.js';
 
 const DEFAULT_MAX_TARGETED_REPAIRS = 2;
 const DEFAULT_MAX_NEW_ARTICLE_CANDIDATES = 2;
@@ -62,6 +63,17 @@ export function requiresNewBlock(issue) {
 // rewrite really is the last resort.
 function repairableIssues(issues) {
   return Array.isArray(issues) ? issues : [];
+}
+
+// Internal links are an improvement, not a precondition: if this cannot be read the article is
+// still written, and the publish-time section below is the second chance.
+async function resolveInternalLinkCandidates(env, blogId) {
+  if (!blogId) return [];
+  try {
+    return await selectInternalLinkCandidates(env, blogId, { limit: 12 });
+  } catch {
+    return [];
+  }
 }
 
 async function emitStage(hooks, stage, meta) {
@@ -475,6 +487,10 @@ export async function runNewArticlePipeline(env, request, fetchImpl = fetch, hoo
   const candidateHistory = [];
   let lastEvaluation = null;
   const seoBrief = request?.seoBrief || null;
+  // Master v4.5 forbids inventing an internal URL and has the writer leave an HTML comment
+  // instead, which is why 32 of smileinfo.net's 33 posts have no internal link at all. The
+  // URLs exist here; handing them over is all the rule ever needed.
+  const internalLinkCandidates = await resolveInternalLinkCandidates(env, request?.blogId);
 
   for (let candidateAttempt = 1; candidateAttempt <= maxCandidates; candidateAttempt += 1) {
     if (candidateAttempt > 1) await emitStage(hooks, 'candidate_regenerating');
@@ -485,6 +501,7 @@ export async function runNewArticlePipeline(env, request, fetchImpl = fetch, hoo
       {
         ...request,
         candidateAttempt,
+        ...(internalLinkCandidates.length ? { internalLinkCandidates } : {}),
         ...(lastEvaluation ? { retryReason: retryReasonForEvaluation(lastEvaluation) } : {})
       },
       fetchImpl
@@ -573,6 +590,7 @@ async function rewriteExistingArticle(env, sourcePost, seoBrief, fetchImpl, hook
     labels: sourceArticle.labels,
     language: sourceArticle.language
   };
+  const internalLinkCandidates = await resolveInternalLinkCandidates(env, identity.blogId);
   const writer = await callHub(
     env,
     env.HUB_WRITER_PATH || '/api/hub/ai/writer',
@@ -582,6 +600,7 @@ async function rewriteExistingArticle(env, sourcePost, seoBrief, fetchImpl, hook
       language: sourceArticle.language,
       rewriteExisting: true,
       rewriteSource,
+      ...(internalLinkCandidates.length ? { internalLinkCandidates } : {}),
       ...(seoBrief ? { seoBrief } : {})
     },
     fetchImpl

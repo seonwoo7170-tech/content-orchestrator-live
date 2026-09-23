@@ -82,7 +82,9 @@ test('it runs at publication, not at drafting', async () => {
   const pipeline = await readFile(new URL('../worker/lib/pipeline.js', import.meta.url), 'utf8');
   assert.doesNotMatch(pipeline, /PublicationDate/);
   const publisher = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
-  assert.match(publisher, /article: applyPublicationDate\(result\.article, \{\s*publishedAt: scheduledAt,/);
+  // The date fill now sits inside the internal-link wrapper; what matters is that it runs here
+  // and that the date it uses is the one publication is actually scheduled for.
+  assert.match(publisher, /applyPublicationDate\(result\.article, \{\s*publishedAt: scheduledAt,\s*updatedAt: scheduledAt\s*\}\)/);
   const updater = await readFile(new URL('../worker/lib/auto-repair-updater.js', import.meta.url), 'utf8');
   assert.match(updater, /applyPublicationDate\(result\.article, \{ updatedAt: new Date\(\)\.toISOString\(\) \}\)/);
 });
