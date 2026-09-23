@@ -1965,7 +1965,7 @@ jobs:
         env:
           TARGET_BLOG_HOST: 'smileinfo.net'
           VERIFY_TOPIC: 'How to Test and Reset a GFCI Outlet That Keeps Tripping'
-          CREATE_VERIFICATION_JOB: 'true'
+          CREATE_VERIFICATION_JOB: 'false'
         run: |
           node - <<'NODE'
           const base=process.env.BASE_URL;
@@ -2074,8 +2074,14 @@ jobs:
           }
           NODE
 
+      # RETIRED. /api/jobs/{id}/run hands the pipeline to ctx.waitUntil, which does not survive a
+      # full writer/critic/repair chain: job 251 died after its first event and sat at 'writing'.
+      # claimStoredJobExecution is a global lane -- NOT EXISTS over every job in writing,
+      # critic_review, repairing or final_critic -- so that one stuck row blocked job execution for
+      # every blog until the 20-minute stale sweeper freed it. Re-running this step would simply
+      # do it again the moment the sweeper returns the job to 'queued'.
       - name: Run the verification article directly, since it has no daily-plan slot
-        if: always()
+        if: false
         shell: bash
         env:
           VERIFY_JOB_ID: '251'
@@ -2095,4 +2101,66 @@ jobs:
           if(String(job.status||'')!=='queued'){ console.log('NOT_QUEUED_SKIPPING'); process.exit(0); }
           const r=await fetch(`${base}/api/jobs/${jobId}/run`,{method:'POST',headers});
           console.log('RUN',r.status,JSON.stringify(await r.json().catch(()=>({}))));
+          NODE
+
+      - name: Confirm the execution lane is free, then enable smileinfo.net for one article
+        if: always()
+        shell: bash
+        env:
+          TARGET_BLOG_HOST: 'smileinfo.net'
+          ENABLE_FOR_ONE_ARTICLE: 'true'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          async function api(path,init){
+            const r=await fetch(base+path,{headers,cache:'no-store',...init});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`API_FAILED:${path}:${r.status}:${String(j.error||'unknown').slice(0,160)}`);
+            return j;
+          }
+          // claimStoredJobExecution refuses while ANY job anywhere is in one of these states, so
+          // nothing runs until job 251 is out of 'writing'.
+          const ACTIVE=['writing','critic_review','repairing','final_critic'];
+          const active=[];
+          for(const status of ACTIVE){
+            const r=await api(`/api/jobs?status=${status}&limit=20`);
+            for(const j of (Array.isArray(r.jobs)?r.jobs:[])) active.push({id:j.id,status,blog:j.blog_id,updated:j.updated_at});
+          }
+          console.log('EXECUTION_LANE',JSON.stringify({blocked:active.length>0,active}));
+          if(active.length>0){ console.log('LANE_STILL_BLOCKED_NOT_ENABLING'); process.exit(0); }
+          if(String(process.env.ENABLE_FOR_ONE_ARTICLE)!=='true'){ console.log('ENABLE_SKIPPED'); process.exit(0); }
+
+          const targetHost=String(process.env.TARGET_BLOG_HOST||'').toLowerCase();
+          const blogs=await api('/api/blogs');
+          const blog=(Array.isArray(blogs.blogs)?blogs.blogs:[]).find((b)=>{
+            try{ return new URL(String(b.url||'')).hostname.toLowerCase().replace(/^www\./,'')===targetHost; }catch{ return false; }
+          });
+          if(!blog){ console.log('TARGET_BLOG_NOT_FOUND'); process.exit(1); }
+          const blogId=String(blog.blogId);
+
+          const before=await api('/api/automation/settings');
+          const row=(before.blogs||[]).find((b)=>String(b.blogId)===blogId)||null;
+          if(row?.effective?.enabled===true){ console.log('ALREADY_ENABLED',JSON.stringify(row.effective)); process.exit(0); }
+
+          // Narrowed to exactly one article and one publication: the daily planner is the only
+          // path that actually executes a job, and this is the smallest slice of it that verifies
+          // the length contract, the internal links and the publish-time date fill together.
+          const settings={
+            ...(row?.override || before.global),
+            enabled:true,
+            newArticlesEnabled:true, newArticlesPerDay:1,
+            repairsEnabled:false, repairsPerDay:0,
+            fixedDailyTargets:true,
+            autoPublishEnabled:true, maxPublishesPerDay:1,
+            approvalMode:'auto'
+          };
+          const saved=await api(`/api/automation/settings/blogs/${encodeURIComponent(blogId)}`,{
+            method:'PUT', body:JSON.stringify({inheritGlobal:false, settings})
+          });
+          console.log('ENABLED_FOR_ONE',JSON.stringify(saved.settings));
+          const plan=await api('/api/operations/plan-today',{method:'POST',body:JSON.stringify({})});
+          console.log('PLAN_TODAY',JSON.stringify(plan).slice(0,600));
           NODE
