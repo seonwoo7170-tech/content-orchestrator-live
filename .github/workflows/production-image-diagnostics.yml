@@ -1643,3 +1643,33 @@ jobs:
             }
           }
           NODE
+
+      - name: Read smileinfo.net's policy pages and post template the way an AdSense reviewer would
+        if: always()
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const origin='https://www.smileinfo.net';
+          const UA={'user-agent':'Mozilla/5.0 (compatible; smileseon-content-audit/1.0)'};
+          async function get(url){ const r=await fetch(url,{headers:UA,cache:'no-store',redirect:'follow'}); return {status:r.status,text:r.ok?await r.text():''}; }
+          function strip(v){ return String(v||'').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim(); }
+          for(const p of ['/p/about.html','/p/about-smile-homefix.html','/p/contact.html','/p/privacy-policy.html','/p/disclaimer.html']){
+            const r=await get(origin+p);
+            const body=(r.text.match(/<div[^>]+class=["'][^"']*post-body[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)||[])[1]||r.text;
+            console.log('PAGE_TEXT',p,r.status,JSON.stringify(strip(body).slice(0,900)));
+          }
+          const post=await get(origin+'/2026/09/why-your-home-has-cold-spots-and-how-to.html');
+          console.log('POST_TEMPLATE',JSON.stringify({
+            status:post.status,
+            authorNames:[...new Set([...post.text.matchAll(/class=["'][^"']*fn[^"']*["'][^>]*>\s*([^<]{1,40})/gi)].map((m)=>m[1].trim()))].slice(0,5),
+            hasAuthorMeta:/<meta[^>]+name=["']author["']/i.test(post.text),
+            hasArticleSchema:/"@type"\s*:\s*"(?:Article|BlogPosting|NewsArticle)"/i.test(post.text),
+            hasDatePublishedSchema:/"datePublished"/i.test(post.text),
+            hasBreadcrumb:/"BreadcrumbList"/i.test(post.text),
+            imgSrcHosts:[...new Set([...post.text.matchAll(/<img[^>]+src=["'](https?:\/\/[^"'\/]+)/gi)].map((m)=>m[1]))].slice(0,6),
+            imgAltSamples:[...post.text.matchAll(/<img[^>]+alt=["']([^"']{0,90})["']/gi)].map((m)=>m[1]).slice(0,5),
+            relatedPostsWidget:/related[-_ ]?post/i.test(post.text),
+            labelLinksInPost:(post.text.match(/\/search\/label\//g)||[]).length,
+            commentsEnabled:!/comments are (closed|disabled)/i.test(post.text) && /comment/i.test(post.text)
+          }));
+          NODE
