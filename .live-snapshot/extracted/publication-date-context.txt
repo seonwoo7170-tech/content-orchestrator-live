@@ -1,0 +1,111 @@
+=== function applyPublicationDate @ 35482 ===
+035452: var LEAF_BLOCK_RE = /<(div|p)\b[^>]*>((?:(?!<(?:div|p|section|article|ul|ol|table|blockquote|h[1-6])\b)[\s\S])*?)<\/\1>/gi;
+035453: var PUBLISHED_RE = /(<br\s*\/?>)?\s*(Published|게시일|작성일)\s*:[^<]*/gi;
+035454: var UPDATED_RE = /(<br\s*\/?>)?\s*(Last\s+updated|Updated|Reviewed|최종\s*수정)\s*:[^<]*/gi;
+035455: var METADATA_TEXT_LIMIT = 200;
+035456: function textOf2(html) {
+035457:   return String(html || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim();
+035458: }
+035459: __name(textOf2, "textOf");
+035460: function formatPublicationDate(value, language = "en") {
+035461:   const date = value instanceof Date ? value : new Date(String(value || ""));
+035462:   if (Number.isNaN(date.getTime())) return null;
+035463:   if (String(language || "").trim() === "ko") {
+035464:     return `${date.getUTCFullYear()}\uB144 ${date.getUTCMonth() + 1}\uC6D4 ${date.getUTCDate()}\uC77C`;
+035465:   }
+035466:   const month = date.toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+035467:   return `${month} ${date.getUTCDate()}, ${date.getUTCFullYear()}`;
+035468: }
+035469: __name(formatPublicationDate, "formatPublicationDate");
+035470: function rewriteSegment(inner, pattern2, formatted) {
+035471:   const probe = new RegExp(pattern2.source, pattern2.flags);
+035472:   if (!probe.test(inner)) return inner;
+035473:   const replacer = new RegExp(pattern2.source, pattern2.flags);
+035474:   let first = true;
+035475:   return inner.replace(replacer, (match, lineBreak, label) => {
+035476:     if (!formatted || !first) return "";
+035477:     first = false;
+035478:     return `${lineBreak || ""}${label}: ${formatted}`;
+035479:   });
+035480: }
+035481: __name(rewriteSegment, "rewriteSegment");
+035482: function applyPublicationDate(article, options = {}) {
+035483:   if (!article || typeof article !== "object" || Array.isArray(article)) {
+035484:     throw new Error("ARTICLE_REQUIRED");
+035485:   }
+035486:   const html = String(article.html || "");
+035487:   if (!html) return article;
+035488:   const language = options.language ?? article.language ?? "en";
+035489:   const published = formatPublicationDate(options.publishedAt, language);
+035490:   const updated = formatPublicationDate(options.updatedAt, language);
+035491:   const blocks = new RegExp(LEAF_BLOCK_RE.source, LEAF_BLOCK_RE.flags);
+035492:   const next = html.replace(blocks, (whole, tag, inner) => {
+035493:     const text4 = textOf2(inner);
+035494:     if (!text4 || text4.length > METADATA_TEXT_LIMIT) return whole;
+035495:     let rewritten = inner;
+035496:     rewritten = rewriteSegment(rewritten, PUBLISHED_RE, published);
+035497:     rewritten = rewriteSegment(rewritten, UPDATED_RE, updated);
+035498:     if (rewritten === inner) return whole;
+035499:     if (!textOf2(rewritten)) return "";
+035500:     return whole.replace(inner, rewritten);
+035501:   });
+035502:   if (next === html) return article;
+035503:   return { ...article, html: next.replace(/\n{3,}/g, "\n\n") };
+035504: }
+035505: __name(applyPublicationDate, "applyPublicationDate");
+035506: 
+035507: // worker/lib/internal-link-injector.js
+035508: function escapeHtml3(value) {
+035509:   return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+035510: }
+035511: __name(escapeHtml3, "escapeHtml");
+035512: function canonicalHttpUrl2(value) {
+035513:   try {
+035514:     const url = new URL(String(value || "").trim());
+035515:     if (!["http:", "https:"].includes(url.protocol)) return null;
+035516:     url.hash = "";
+035517:     return url.toString();
+035518:   } catch {
+035519:     return null;
+035520:   }
+035521: }
+035522: __name(canonicalHttpUrl2, "canonicalHttpUrl");
+035523: function normalizedLinks(links = []) {
+035524:   const seen = /* @__PURE__ */ new Set();
+035525:   const rows = [];
+035526:   for (const item of Array.isArray(links) ? links : []) {
+035527:     const url = canonicalHttpUrl2(item?.url || item?.targetUrl || item?.target_url);
+035528:     const label = String(item?.query || item?.anchorText || item?.anchor_text || "").replace(/\s+/g, " ").trim().slice(0, 120);
+035529:     if (!url || !label || seen.has(url)) continue;
+035530:     seen.add(url);
+035531:     rows.push({ url, label });
+035532:     if (rows.length >= 3) break;
+035533:   }
+035534:   return rows;
+035535: }
+035536: __name(normalizedLinks, "normalizedLinks");
+035537: function applyInternalLinksToArticle(article, links = []) {
+035538:   if (!article || typeof article !== "object") throw new Error("ARTICLE_REQUIRED");
+035539:   const html = String(article.html || "");
+035540:   if (!html || html.includes('data-smileseon-internal-links="1"')) {
+035541:     return { article, appliedCount: 0, alreadyApplied: html.includes('data-smileseon-internal-links="1"') };
+035542:   }
+035543:   const rows = normalizedLinks(links);
+035544:   if (!rows.length) return { article, appliedCount: 0, alreadyApplied: false };
+035545:   const korean = String(article.language || "").toLowerCase() === "ko" || /[가-힣]/.test(`${article.title || ""} ${html}`);
+035546:   const lead = korean ? "\uD568\uAED8 \uC77D\uC73C\uBA74 \uC88B\uC740 \uAE00" : "Related guides";
+035547:   const anchors = rows.map((row) => `<a href="${escapeHtml3(row.url)}" rel="noopener">${escapeHtml3(row.label)}</a>`).join(" \xB7 ");
+035548:   const block = `<p data-smileseon-internal-links="1"><strong>${lead}</strong><br>${anchors}</p>`;
+035549:   const nextHtml = /<\/article>\s*$/i.test(html) ? html.replace(/<\/article>\s*$/i, `${block}</article>`) : `${html}
+035550: ${block}`;
+035551:   return {
+035552:     article: { ...article, html: nextHtml },
+035553:     appliedCount: rows.length,
+035554:     alreadyApplied: false
+035555:   };
+035556: }
+035557: __name(applyInternalLinksToArticle, "applyInternalLinksToArticle");
+035558: 
+035559: // worker/lib/delivery-evidence.js
+035560: function gate(id2, label, passed, evidence = null, required = true) {
+035561:   return { id: id2, label, required, passed: Boolean(passed), evidence };
