@@ -1,3 +1,5 @@
+import { acceptInsertions } from './expansion-acceptance.js';
+
 const ARTICLE_FIELDS = Object.freeze([
   'title',
   'html',
@@ -59,6 +61,29 @@ function exactHtmlTargetsFromLocation(location) {
   return targets;
 }
 
+function resolveHtmlTargets(rawTargets, blocks) {
+  const resolved = new Set();
+  const unresolved = [];
+  for (const target of rawTargets) {
+    const [tag, indexText] = String(target).split(':');
+    const position = Number(indexText);
+    const shared = blocks[position - 1];
+    if (shared && shared.tag === tag) {
+      resolved.add(shared.index);
+      continue;
+    }
+    // Compatibility only: older critic runs sometimes counted per tag rather than shared order.
+    // This fallback is never allowed to turn a truly nonexistent locator into a batch failure.
+    const nthOfTag = blocks.filter((block) => block.tag === tag)[position - 1];
+    if (nthOfTag) {
+      resolved.add(nthOfTag.index);
+      continue;
+    }
+    unresolved.push(target);
+  }
+  return { resolved, unresolved };
+}
+
 function issueText(issue) {
   return [issue?.code, issue?.location, issue?.reason, issue?.message, issue?.repairInstruction]
     .map((value) => String(value || ''))
@@ -71,28 +96,15 @@ function isSourceAuthorityRepairIssue(issue) {
   return SOURCE_AUTHORITY_RE.test(value) && SOURCE_REPAIR_RE.test(value);
 }
 
-function resolvableHtmlTargets(parts, targets) {
-  const valid = new Set();
-  const invalid = [];
-  for (const target of targets) {
-    const [tag, indexText] = target.split(':');
-    const index = Number(indexText);
-    const block = parts.blocks[index - 1];
-    if (block && block.tag === tag) valid.add(target);
-    else invalid.push({ target, actualTag: block?.tag ?? null, blockCount: parts.blocks.length });
-  }
-  return { valid, invalid };
-}
-
 function protectedInternalNavigationTargets(parts, issues = []) {
   const protectedTargets = new Set();
   for (const issue of Array.isArray(issues) ? issues : []) {
     if (!isSourceAuthorityRepairIssue(issue)) continue;
-    for (const target of exactHtmlTargetsFromLocation(issue?.location)) {
-      const [tag, indexText] = target.split(':');
-      const block = parts.blocks[Number(indexText) - 1];
-      if (!block || block.tag !== tag) continue;
-      if (INTERNAL_LINK_MARKER_RE.test(block.raw)) protectedTargets.add(target);
+    const rawTargets = new Set(exactHtmlTargetsFromLocation(issue?.location));
+    const { resolved } = resolveHtmlTargets(rawTargets, parts.blocks);
+    for (const index of resolved) {
+      const block = parts.blocks[index - 1];
+      if (block && INTERNAL_LINK_MARKER_RE.test(block.raw)) protectedTargets.add(index);
     }
   }
   return protectedTargets;
@@ -101,12 +113,21 @@ function protectedInternalNavigationTargets(parts, issues = []) {
 export function inspectTargetedRepairTargets(article, issues = []) {
   const parts = htmlParts(article?.html);
   const scope = targetedRepairScope(issues);
-  const resolved = resolvableHtmlTargets(parts, scope.htmlTargets);
-  const protectedTargets = protectedInternalNavigationTargets(parts, issues);
+  const validTargets = [];
+  const invalidTargets = [];
+  for (const target of scope.htmlTargets) {
+    const single = resolveHtmlTargets(new Set([target]), parts.blocks);
+    if (single.resolved.size > 0) validTargets.push(target);
+    else invalidTargets.push({ target, blockCount: parts.blocks.length });
+  }
+  const protectedIndexes = protectedInternalNavigationTargets(parts, issues);
   return {
-    validTargets: [...resolved.valid],
-    invalidTargets: resolved.invalid,
-    protectedInternalNavigationTargets: [...protectedTargets]
+    validTargets,
+    invalidTargets,
+    protectedInternalNavigationTargets: [...protectedIndexes].map((index) => {
+      const block = parts.blocks[index - 1];
+      return block ? `${block.tag}:${block.index}` : String(index);
+    })
   };
 }
 
@@ -136,12 +157,33 @@ export function targetedRepairScope(issues = []) {
     }
   }
 
-  return {
-    allowedFields,
-    htmlTargets,
-    htmlMentioned,
-    htmlBody
-  };
+  return { allowedFields, htmlTargets, htmlMentioned, htmlBody };
+}
+
+function appendOnlyInsertions(original, repaired) {
+  if (repaired.length <= original.length) return null;
+  const insertions = new Map();
+  let matched = 0;
+  for (const block of repaired) {
+    if (matched < original.length && block.raw === original[matched].raw) {
+      matched += 1;
+      continue;
+    }
+    if (!insertions.has(matched)) insertions.set(matched, []);
+    insertions.get(matched).push(block.raw);
+  }
+  return matched === original.length ? insertions : null;
+}
+
+function rebuildWithInsertions(parts, insertions) {
+  let html = parts.gaps[0] || '';
+  for (const raw of insertions.get(0) || []) html += raw;
+  for (let index = 0; index < parts.blocks.length; index += 1) {
+    html += parts.blocks[index].raw;
+    for (const raw of insertions.get(index + 1) || []) html += raw;
+    html += parts.gaps[index + 1] || '';
+  }
+  return html;
 }
 
 export function constrainTargetedRepair(before, candidate, issues = []) {
@@ -163,21 +205,36 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
   if (scope.htmlTargets.size === 0) throw repairGuardError('TARGETED_REPAIR_HTML_LOCATION_UNSAFE');
 
   const original = htmlParts(before.html);
-  const resolved = resolvableHtmlTargets(original, scope.htmlTargets);
-  const protectedTargets = protectedInternalNavigationTargets(original, issues);
-  const editableTargets = new Set([...resolved.valid].filter((target) => !protectedTargets.has(target)));
-
-  // A stale/nonexistent critic locator must never poison otherwise valid repairs.
-  // If every HTML target is stale or protected internal navigation, preserve HTML byte-for-byte.
-  if (editableTargets.size === 0) return constrained;
-
   const repaired = htmlParts(candidate.html);
+  const { resolved: htmlTargets } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
+  const protectedTargets = protectedInternalNavigationTargets(original, issues);
+  for (const index of protectedTargets) htmlTargets.delete(index);
+
+  // A stale/nonexistent locator or a false source-authority finding on internal navigation
+  // must not poison valid sibling repairs. With no safe HTML target left, preserve HTML exactly.
+  if (htmlTargets.size === 0) return constrained;
+
   if (original.blocks.length !== repaired.blocks.length) {
-    throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
-      beforeBlocks: original.blocks.length,
-      afterBlocks: repaired.blocks.length
-    });
+    const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);
+    if (!insertions) {
+      throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
+        beforeBlocks: original.blocks.length,
+        afterBlocks: repaired.blocks.length,
+        cause: 'ORIGINAL_BLOCK_NOT_PRESERVED'
+      });
+    }
+    const { accepted, rejected, keptBlocks } = acceptInsertions(before.html, insertions, { sources: before.sources });
+    if (keptBlocks === 0) {
+      throw repairGuardError('TARGETED_REPAIR_INSERTION_REJECTED', {
+        beforeBlocks: original.blocks.length,
+        afterBlocks: repaired.blocks.length,
+        rejected: rejected.slice(0, 6)
+      });
+    }
+    constrained.html = rebuildWithInsertions(original, accepted);
+    return constrained;
   }
+
   if (original.gaps.length !== repaired.gaps.length) {
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE');
   }
@@ -195,8 +252,7 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
   let html = original.gaps[0] || '';
   for (let index = 0; index < original.blocks.length; index += 1) {
     const beforeBlock = original.blocks[index];
-    const key = `${beforeBlock.tag}:${beforeBlock.index}`;
-    html += editableTargets.has(key) ? repaired.blocks[index].raw : beforeBlock.raw;
+    html += htmlTargets.has(beforeBlock.index) ? repaired.blocks[index].raw : beforeBlock.raw;
     html += original.gaps[index + 1] || '';
   }
   constrained.html = html;
@@ -209,7 +265,6 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
   }
 
   const scope = targetedRepairScope(issues);
-
   for (const field of ARTICLE_FIELDS) {
     if (field === 'html') continue;
     if (equalValue(before[field], after[field])) continue;
@@ -219,10 +274,7 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
   }
 
   if (String(before.html || '') === String(after.html || '')) return true;
-
-  if (!scope.htmlMentioned) {
-    throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_WITHOUT_HTML_TARGET');
-  }
+  if (!scope.htmlMentioned) throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_WITHOUT_HTML_TARGET');
 
   const original = htmlParts(before.html);
   const repaired = htmlParts(after.html);
@@ -231,21 +283,19 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
     if (original.blocks.length === 0 && repaired.blocks.length === 0) return true;
     throw repairGuardError('TARGETED_REPAIR_HTML_BODY_TARGET_TOO_BROAD');
   }
+  if (scope.htmlTargets.size === 0) throw repairGuardError('TARGETED_REPAIR_HTML_LOCATION_UNSAFE');
 
-  if (scope.htmlTargets.size === 0) {
-    throw repairGuardError('TARGETED_REPAIR_HTML_LOCATION_UNSAFE');
-  }
-
-  const resolved = resolvableHtmlTargets(original, scope.htmlTargets);
+  const { resolved: htmlTargets } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
   const protectedTargets = protectedInternalNavigationTargets(original, issues);
-  const editableTargets = new Set([...resolved.valid].filter((target) => !protectedTargets.has(target)));
+  for (const index of protectedTargets) htmlTargets.delete(index);
 
-  if (editableTargets.size === 0) {
-    if (String(before.html || '') === String(after.html || '')) return true;
+  if (htmlTargets.size === 0) {
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_WITHOUT_RESOLVABLE_TARGET');
   }
 
   if (original.blocks.length !== repaired.blocks.length) {
+    const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);
+    if (insertions) return true;
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
       beforeBlocks: original.blocks.length,
       afterBlocks: repaired.blocks.length
@@ -272,9 +322,7 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
         afterTag: afterBlock.tag
       });
     }
-
-    const key = `${beforeBlock.tag}:${beforeBlock.index}`;
-    if (editableTargets.has(key)) continue;
+    if (htmlTargets.has(beforeBlock.index)) continue;
     if (beforeBlock.raw !== afterBlock.raw) {
       throw repairGuardError('TARGETED_REPAIR_CHANGED_UNTARGETED_HTML_BLOCK', {
         location: `html ${beforeBlock.tag} ${beforeBlock.index}`
