@@ -1740,3 +1740,86 @@ jobs:
             }));
           }
           NODE
+
+      - name: Verify the second-opinion audit's claims about smileinfo.net (read-only)
+        if: always()
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const origin='https://www.smileinfo.net';
+          const UA={'user-agent':'Mozilla/5.0 (compatible; smileseon-content-audit/1.0)'};
+          async function get(url){
+            try{ const r=await fetch(url,{headers:UA,cache:'no-store',redirect:'follow'});
+              return {status:r.status,ok:r.ok,url:r.url,text:r.ok?await r.text():''}; }
+            catch(e){ return {status:0,ok:false,url,text:'',err:String(e.message||e)}; }
+          }
+          function strip(v){ return String(v||'').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/&#8209;/g,'-').replace(/\s+/g,' ').trim(); }
+
+          // CLAIM 1: PC/AI posts are still on this domain.
+          const sm=await get(origin+'/sitemap.xml');
+          const smUrls=[...sm.text.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m)=>m[1]);
+          const byMonth={};
+          for(const u of smUrls){ const m=u.match(/\/(\d{4})\/(\d{2})\//); if(m) byMonth[`${m[1]}-${m[2]}`]=(byMonth[`${m[1]}-${m[2]}`]||0)+1; }
+          console.log('SITEMAP',JSON.stringify({status:sm.status,locs:smUrls.length,byMonth,
+            nested:smUrls.filter((u)=>/sitemap/i.test(u)).slice(0,5)}));
+          for(const nested of smUrls.filter((u)=>/sitemap/i.test(u)).slice(0,5)){
+            const n=await get(nested);
+            const nu=[...n.text.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m)=>m[1]);
+            const nb={}; for(const u of nu){ const m=u.match(/\/(\d{4})\/(\d{2})\//); if(m) nb[`${m[1]}-${m[2]}`]=(nb[`${m[1]}-${m[2]}`]||0)+1; }
+            console.log('SITEMAP_NESTED',nested,JSON.stringify({locs:nu.length,byMonth:nb}));
+          }
+          for(const ym of ['2026/03','2026/04','2026/05','2026/06','2026/07','2025/12']){
+            const a=await get(`${origin}/${ym}/`);
+            console.log('ARCHIVE',ym,a.status,(a.text.match(/class=["'][^"']*post-outer[^"']*["']/gi)||[]).length);
+          }
+          for(const q of ['v0.dev','Zen','SSD','NPU','overclocking','laptop','PSU']){
+            const s=await get(`${origin}/search?q=${encodeURIComponent(q)}`);
+            const titles=[...s.text.matchAll(/<h3[^>]*class=["'][^"']*post-title[^"']*["'][^>]*>\s*<a[^>]*>([\s\S]*?)<\/a>/gi)].map((m)=>strip(m[1])).slice(0,4);
+            console.log('BLOGGER_SEARCH',q,s.status,JSON.stringify(titles));
+          }
+          const feedAll=await get(`${origin}/feeds/posts/default?alt=json&max-results=500&start-index=1`);
+          let parsed=null; try{ parsed=JSON.parse(feedAll.text); }catch{}
+          console.log('FEED_TOTAL',JSON.stringify({
+            total:parsed?.feed?.['openSearch$totalResults']?.$t||null,
+            oldest:(Array.isArray(parsed?.feed?.entry)?parsed.feed.entry:[]).map((e)=>String(e.published?.$t||'').slice(0,10)).sort()[0]||null,
+            blogTitle:strip(parsed?.feed?.title?.$t||'')
+          }));
+
+          // CLAIM 2: in-body dates contradict the real publish date; CLAIM 3: bare "Editorial Team"
+          // byline; CLAIM 4: source lists that look like citations but are unlinkable prose.
+          const entries=Array.isArray(parsed?.feed?.entry)?parsed.feed.entry:[];
+          let dateMismatch=0, hasInBodyDate=0, editorialTeam=0, methodologySection=0;
+          const bareSourceSamples=[];
+          let linkedSourceTotal=0, bareSourceTotal=0;
+          for(const e of entries){
+            const html=String(e.content?.$t||'');
+            const text=strip(html);
+            const pub=String(e.published?.$t||'').slice(0,10);
+            const m=text.match(/Published:\s*([A-Za-z]+\s+\d{4}|[^|<]{0,30})/i);
+            if(m){
+              hasInBodyDate+=1;
+              const claimed=m[1].trim();
+              const month=new Date(pub).toLocaleString('en-US',{month:'long',timeZone:'UTC'});
+              const year=pub.slice(0,4);
+              if(!new RegExp(`${month}\\s+${year}`,'i').test(claimed)) {
+                dateMismatch+=1;
+                if(dateMismatch<=6) console.log('DATE_MISMATCH',JSON.stringify({feedPublished:pub,inBody:claimed.slice(0,40),title:strip(e.title?.$t||'').slice(0,60)}));
+              }
+            }
+            if(/Editorial Team/i.test(text)) editorialTeam+=1;
+            if(/Sources and Methodology|Sources & Methodology/i.test(text)) methodologySection+=1;
+            const secIdx=html.search(/Sources (?:and|&amp;|&) Methodology/i);
+            if(secIdx>=0){
+              const tail=html.slice(secIdx);
+              const items=[...tail.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((x)=>x[1]).slice(0,10);
+              for(const it of items){
+                if(/<a\b[^>]*href/i.test(it)) linkedSourceTotal+=1;
+                else { bareSourceTotal+=1; if(bareSourceSamples.length<8) bareSourceSamples.push(strip(it).slice(0,70)); }
+              }
+            }
+          }
+          console.log('BODY_CLAIMS',JSON.stringify({
+            posts:entries.length, hasInBodyDate, dateMismatch, editorialTeam, methodologySection,
+            linkedSourceItems:linkedSourceTotal, bareSourceItems:bareSourceTotal, bareSourceSamples
+          }));
+          NODE
