@@ -1,3 +1,5 @@
+import { acceptInsertions } from './expansion-acceptance.js';
+
 const ARTICLE_FIELDS = Object.freeze([
   'title',
   'html',
@@ -142,14 +144,18 @@ function appendOnlyInsertions(original, repaired) {
   return matched === original.length ? insertions : null;
 }
 
-function insertionAnchorsAllowed(insertions, htmlTargets) {
-  for (const anchor of insertions.keys()) {
-    // Immediately after a flagged block, or immediately before one.
-    if (htmlTargets.has(anchor) || htmlTargets.has(anchor + 1)) continue;
-    return false;
-  }
-  return true;
-}
+// Adjacency was the wrong rule for an expansion. "Clarify this paragraph" has a location;
+// "add a subsection on choosing an electrician" does not, and the right place for it is wherever
+// the section belongs. Job 157 proved the cost: repair added blocks on both attempts (69 -> 74,
+// 69 -> 77) against findings located at html p 19, h2 8 and p 1, and the whole batch was thrown
+// away both times because the new blocks were not beside those locations. The article stayed
+// 1,941 characters under its floor with nothing applied.
+//
+// Adjacency was never what made this safe. What makes it safe is that every original block has to
+// come back byte-identical and in order, and that the result is rebuilt here from the ORIGINAL
+// parts -- so existing content cannot be altered, reordered or dropped no matter where a new block
+// goes. That guarantee is untouched. What an insertion may CONTAIN is now checked instead, which
+// is the thing adjacency never checked at all: see expansion-acceptance.js.
 
 function rebuildWithInsertions(parts, insertions) {
   let html = parts.gaps[0] || '';
@@ -189,14 +195,23 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
 
   if (original.blocks.length !== repaired.blocks.length) {
     const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);
-    if (insertions && insertionAnchorsAllowed(insertions, htmlTargets)) {
-      constrained.html = rebuildWithInsertions(original, insertions);
-      return constrained;
+    if (!insertions) {
+      throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
+        beforeBlocks: original.blocks.length,
+        afterBlocks: repaired.blocks.length,
+        cause: 'ORIGINAL_BLOCK_NOT_PRESERVED'
+      });
     }
-    throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
-      beforeBlocks: original.blocks.length,
-      afterBlocks: repaired.blocks.length
-    });
+    const { accepted, rejected, keptBlocks } = acceptInsertions(before.html, insertions, { sources: before.sources });
+    if (keptBlocks === 0) {
+      throw repairGuardError('TARGETED_REPAIR_INSERTION_REJECTED', {
+        beforeBlocks: original.blocks.length,
+        afterBlocks: repaired.blocks.length,
+        rejected: rejected.slice(0, 6)
+      });
+    }
+    constrained.html = rebuildWithInsertions(original, accepted);
+    return constrained;
   }
   if (original.gaps.length !== repaired.gaps.length) {
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE');
@@ -261,7 +276,7 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
   // still holds every original block byte-identical -- that is exactly what this re-checks.
   if (original.blocks.length !== repaired.blocks.length) {
     const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);
-    if (insertions && insertionAnchorsAllowed(insertions, htmlTargets) && unresolved.length === 0) {
+    if (insertions && unresolved.length === 0) {
       return true;
     }
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {

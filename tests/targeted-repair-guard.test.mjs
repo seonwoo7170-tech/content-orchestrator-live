@@ -191,34 +191,50 @@ test('text on both sides of a lifted block is preserved as its own paragraphs', 
 // CHANGED_HTML_STRUCTURE. Insertion is now allowed, and only insertion.
 test('a new block may be inserted next to a flagged block', () => {
   const before = article('<p>One.</p><p>Two.</p><p>Three.</p>');
-  const candidate = article('<p>One.</p><p>Two.</p><li>added a</li><li>added b</li><p>Three.</p>');
+  const added = '<li>Aluminium branch wiring from 1965 to 1973 needs pigtailing with listed connectors before panel work.</li><li>Aluminium conductors expand under load, so terminations loosen and overheat over decades of service.</li>';
+  const candidate = article(`<p>One.</p><p>Two.</p>${added}<p>Three.</p>`);
   const constrained = constrainTargetedRepair(before, candidate, [issue('html p 2')]);
-  assert.equal(constrained.html, '<p>One.</p><p>Two.</p><li>added a</li><li>added b</li><p>Three.</p>');
+  assert.equal(constrained.html, `<p>One.</p><p>Two.</p>${added}<p>Three.</p>`);
   assert.equal(assertTargetedRepairPreserved(before, constrained, [issue('html p 2')]), true);
 });
 
 test('a lead block may be inserted immediately before the flagged block', () => {
   const before = article('<p>One.</p><p>Two.</p>');
-  const candidate = article('<p>Lead answer.</p><p>One.</p><p>Two.</p>');
+  const lead = '<p>Replace the panel when the bus bar is scorched or the service is under 100 amps; repair when only a breaker has failed.</p>';
+  const candidate = article(`${lead}<p>One.</p><p>Two.</p>`);
   const constrained = constrainTargetedRepair(before, candidate, [issue('html p 1')]);
-  assert.equal(constrained.html, '<p>Lead answer.</p><p>One.</p><p>Two.</p>');
+  assert.equal(constrained.html, `${lead}<p>One.</p><p>Two.</p>`);
 });
 
 test('an insertion may not come with an edit to an existing block', () => {
   const before = article('<p>One.</p><p>Two.</p><p>Three.</p>');
-  const candidate = article('<p>One rewritten.</p><p>Two.</p><li>added</li><p>Three.</p>');
+  const candidate = article(`<p>One rewritten.</p><p>Two.</p><li>Aluminium branch wiring from 1965 to 1973 needs pigtailing with listed connectors before panel work.</li><p>Three.</p>`);
   assert.throws(
     () => constrainTargetedRepair(before, candidate, [issue('html p 2')]),
     (error) => error.code === 'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE'
   );
 });
 
-test('an insertion nowhere near a flagged block is rejected', () => {
+// Adjacency used to decide this, and it was the wrong rule. "Clarify this paragraph" has a
+// location; "add a subsection on choosing an electrician" does not. Job 157 lost both of its
+// repair attempts to it (69 -> 74 and 69 -> 77 blocks, findings at html p 19, h2 8 and p 1) and
+// stayed 1,941 characters under its floor with nothing applied. What kept this safe was never
+// adjacency -- it is that every original block must return byte-identical and the result is
+// rebuilt from the original parts. What an insertion CONTAINS is judged instead.
+test('an insertion away from the flagged block is allowed, and judged on its content', () => {
   const before = article('<p>One.</p><p>Two.</p><p>Three.</p>');
-  const candidate = article('<p>One.</p><li>added</li><p>Two.</p><p>Three.</p>');
+  const added = '<li>Aluminium branch wiring from 1965 to 1973 needs pigtailing with listed connectors before panel work.</li>';
+  const candidate = article(`<p>One.</p>${added}<p>Two.</p><p>Three.</p>`);
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 3')]);
+  assert.equal(constrained.html, `<p>One.</p>${added}<p>Two.</p><p>Three.</p>`);
+});
+
+test('an insertion that only repeats the article is refused wherever it sits', () => {
+  const before = article('<p>Aluminium branch wiring from 1965 to 1973 needs pigtailing with listed connectors.</p><p>Two.</p>');
+  const candidate = article('<p>Aluminium branch wiring from 1965 to 1973 needs pigtailing with listed connectors.</p><p>Aluminium branch wiring from 1965 to 1973 needs pigtailing with listed connectors today.</p><p>Two.</p>');
   assert.throws(
-    () => constrainTargetedRepair(before, candidate, [issue('html p 3')]),
-    (error) => error.code === 'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE'
+    () => constrainTargetedRepair(before, candidate, [issue('html p 1')]),
+    (error) => error.code === 'TARGETED_REPAIR_INSERTION_REJECTED'
   );
 });
 
@@ -226,10 +242,10 @@ test('an insertion nowhere near a flagged block is rejected', () => {
 // Rebuilding from the original parts rather than trusting the model's html is what keeps them.
 test('content between blocks, which the block list never sees, survives an insertion', () => {
   const before = article('<p>One.</p><table><tr><td>keep me</td></tr></table><p>Two.</p>');
-  const candidate = article('<p>One.</p><p>Two.</p><li>added</li>');
+  const candidate = article('<p>One.</p><p>Two.</p><li>Aluminium branch wiring from 1965 to 1973 needs pigtailing with listed connectors before panel work.</li>');
   const constrained = constrainTargetedRepair(before, candidate, [issue('html p 2')]);
   assert.match(constrained.html, /<table><tr><td>keep me<\/td><\/tr><\/table>/);
-  assert.match(constrained.html, /<li>added<\/li>/);
+  assert.match(constrained.html, /pigtailing with listed connectors/);
 });
 
 test('a repair that deletes an existing block is still rejected', () => {
