@@ -112,6 +112,56 @@ export function targetedRepairScope(issues = []) {
   };
 }
 
+// The guard forbade any change in block count, and most of what the critic asks for adds one:
+// "insert a decision checklist here", "add a numbered installation procedure", "move the <ul>
+// outside the <p>". Repair was being asked for something the guard would always reject, and
+// once the per-tag location fix landed this became the single remaining wall -- 154 and 216
+// both went straight from TARGETED_REPAIR_TARGET_NOT_FOUND to
+// TARGETED_REPAIR_CHANGED_HTML_STRUCTURE.
+//
+// Insertion is now allowed, and only insertion. Every original block must come back
+// byte-identical and in order, new blocks may sit only immediately before or after a flagged
+// block, and the result is rebuilt here from the original parts rather than taken from the
+// model -- so original blocks, and everything between them including tables and figures the
+// block list never sees, cannot be touched at all. A repair that alters or drops any existing
+// block still fails exactly as before.
+function appendOnlyInsertions(original, repaired) {
+  if (repaired.length <= original.length) return null;
+
+  const insertions = new Map();
+  let matched = 0;
+  for (const block of repaired) {
+    if (matched < original.length && block.raw === original[matched].raw) {
+      matched += 1;
+      continue;
+    }
+    if (!insertions.has(matched)) insertions.set(matched, []);
+    insertions.get(matched).push(block.raw);
+  }
+  // Every original block has to have been found, in order and untouched.
+  return matched === original.length ? insertions : null;
+}
+
+function insertionAnchorsAllowed(insertions, htmlTargets) {
+  for (const anchor of insertions.keys()) {
+    // Immediately after a flagged block, or immediately before one.
+    if (htmlTargets.has(anchor) || htmlTargets.has(anchor + 1)) continue;
+    return false;
+  }
+  return true;
+}
+
+function rebuildWithInsertions(parts, insertions) {
+  let html = parts.gaps[0] || '';
+  for (const raw of insertions.get(0) || []) html += raw;
+  for (let index = 0; index < parts.blocks.length; index += 1) {
+    html += parts.blocks[index].raw;
+    for (const raw of insertions.get(index + 1) || []) html += raw;
+    html += parts.gaps[index + 1] || '';
+  }
+  return html;
+}
+
 export function constrainTargetedRepair(before, candidate, issues = []) {
   if (!before || !candidate || typeof before !== 'object' || typeof candidate !== 'object') {
     throw repairGuardError('TARGETED_REPAIR_ARTICLE_INVALID');
@@ -132,7 +182,17 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
 
   const original = htmlParts(before.html);
   const repaired = htmlParts(candidate.html);
+  // Resolved before the structure check, because the insertion path below needs to know which
+  // blocks were flagged in order to decide where a new block is allowed to go.
+  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
+  if (unresolved.length > 0) throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target: unresolved[0] });
+
   if (original.blocks.length !== repaired.blocks.length) {
+    const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);
+    if (insertions && insertionAnchorsAllowed(insertions, htmlTargets)) {
+      constrained.html = rebuildWithInsertions(original, insertions);
+      return constrained;
+    }
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
       beforeBlocks: original.blocks.length,
       afterBlocks: repaired.blocks.length
@@ -151,9 +211,6 @@ export function constrainTargetedRepair(before, candidate, issues = []) {
       });
     }
   }
-
-  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
-  if (unresolved.length > 0) throw repairGuardError('TARGETED_REPAIR_TARGET_NOT_FOUND', { target: unresolved[0] });
 
   let html = original.gaps[0] || '';
   for (let index = 0; index < original.blocks.length; index += 1) {
@@ -198,7 +255,15 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
     throw repairGuardError('TARGETED_REPAIR_HTML_LOCATION_UNSAFE');
   }
 
+  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
+
+  // constrainTargetedRepair rebuilds an insertion from the original parts, so what arrives here
+  // still holds every original block byte-identical -- that is exactly what this re-checks.
   if (original.blocks.length !== repaired.blocks.length) {
+    const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);
+    if (insertions && insertionAnchorsAllowed(insertions, htmlTargets) && unresolved.length === 0) {
+      return true;
+    }
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE', {
       beforeBlocks: original.blocks.length,
       afterBlocks: repaired.blocks.length
@@ -209,7 +274,6 @@ export function assertTargetedRepairPreserved(before, after, issues = []) {
     throw repairGuardError('TARGETED_REPAIR_CHANGED_HTML_STRUCTURE');
   }
 
-  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);
 
   for (let index = 0; index < original.gaps.length; index += 1) {
     if (original.gaps[index] !== repaired.gaps[index]) {

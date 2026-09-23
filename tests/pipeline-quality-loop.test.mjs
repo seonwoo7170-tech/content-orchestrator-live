@@ -73,3 +73,25 @@ test('an edit inside an existing block still goes to repair', async () => {
     assert.equal(requiresNewBlock(issue), false, `${issue.code} is an in-block edit and must still be repaired`);
   }
 });
+
+// The filter that kept expansion findings out of the repair batch existed only because the
+// guard rejected any change in block count. Now that an insertion next to a flagged block is
+// accepted, those findings are applicable and repair should get them -- keeping them out would
+// leave replan as the only answer, and replan is worse: job 154 came back from one 1,604 words
+// shorter than it went in.
+test('an expansion finding now reaches repair instead of being filtered out', async () => {
+  const source = await readFile(new URL('../worker/lib/pipeline.js', import.meta.url), 'utf8');
+  const fn = source.slice(source.indexOf('function repairableIssues'), source.indexOf('function escalatedRepairIssues'));
+  assert.doesNotMatch(fn, /requiresNewBlock/);
+  assert.match(fn, /return Array\.isArray\(issues\) \? issues : \[\];/);
+});
+
+// requiresNewBlock itself stays: structuralReplanRequired still uses it to decide when a
+// rewrite genuinely is the last resort.
+test('requiresNewBlock is still what decides a structural replan', async () => {
+  const { requiresNewBlock } = await import('../worker/lib/pipeline.js');
+  assert.equal(requiresNewBlock({ code: 'CORE_INFORMATION_MISSING', repairInstruction: 'Insert a checklist.' }), true);
+  assert.equal(requiresNewBlock({ code: 'UNSUPPORTED_CLAIM', repairInstruction: 'Qualify the statement.' }), false);
+  const source = await readFile(new URL('../worker/lib/pipeline.js', import.meta.url), 'utf8');
+  assert.match(source, /function structuralReplanRequired\(critic\)/);
+});

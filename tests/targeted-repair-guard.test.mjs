@@ -183,3 +183,60 @@ test('text on both sides of a lifted block is preserved as its own paragraphs', 
   const inline = '<p>Nested <strong>inline</strong> only.</p>';
   assert.equal(liftBlocksOutOfParagraphs({ html: inline }).html, inline);
 });
+
+// The guard forbade any change in block count, and most of what the critic asks for adds one:
+// "insert a decision checklist here", "add a numbered installation procedure". Repair was being
+// asked for something the guard would always reject, and once the per-tag location fix landed
+// this was the only wall left -- 154 and 216 went straight from TARGET_NOT_FOUND to
+// CHANGED_HTML_STRUCTURE. Insertion is now allowed, and only insertion.
+test('a new block may be inserted next to a flagged block', () => {
+  const before = article('<p>One.</p><p>Two.</p><p>Three.</p>');
+  const candidate = article('<p>One.</p><p>Two.</p><li>added a</li><li>added b</li><p>Three.</p>');
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 2')]);
+  assert.equal(constrained.html, '<p>One.</p><p>Two.</p><li>added a</li><li>added b</li><p>Three.</p>');
+  assert.equal(assertTargetedRepairPreserved(before, constrained, [issue('html p 2')]), true);
+});
+
+test('a lead block may be inserted immediately before the flagged block', () => {
+  const before = article('<p>One.</p><p>Two.</p>');
+  const candidate = article('<p>Lead answer.</p><p>One.</p><p>Two.</p>');
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 1')]);
+  assert.equal(constrained.html, '<p>Lead answer.</p><p>One.</p><p>Two.</p>');
+});
+
+test('an insertion may not come with an edit to an existing block', () => {
+  const before = article('<p>One.</p><p>Two.</p><p>Three.</p>');
+  const candidate = article('<p>One rewritten.</p><p>Two.</p><li>added</li><p>Three.</p>');
+  assert.throws(
+    () => constrainTargetedRepair(before, candidate, [issue('html p 2')]),
+    (error) => error.code === 'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE'
+  );
+});
+
+test('an insertion nowhere near a flagged block is rejected', () => {
+  const before = article('<p>One.</p><p>Two.</p><p>Three.</p>');
+  const candidate = article('<p>One.</p><li>added</li><p>Two.</p><p>Three.</p>');
+  assert.throws(
+    () => constrainTargetedRepair(before, candidate, [issue('html p 3')]),
+    (error) => error.code === 'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE'
+  );
+});
+
+// The block list never sees a <table> or a <figure> -- they live in the gaps between blocks.
+// Rebuilding from the original parts rather than trusting the model's html is what keeps them.
+test('content between blocks, which the block list never sees, survives an insertion', () => {
+  const before = article('<p>One.</p><table><tr><td>keep me</td></tr></table><p>Two.</p>');
+  const candidate = article('<p>One.</p><p>Two.</p><li>added</li>');
+  const constrained = constrainTargetedRepair(before, candidate, [issue('html p 2')]);
+  assert.match(constrained.html, /<table><tr><td>keep me<\/td><\/tr><\/table>/);
+  assert.match(constrained.html, /<li>added<\/li>/);
+});
+
+test('a repair that deletes an existing block is still rejected', () => {
+  const before = article('<p>One.</p><p>Two.</p><p>Three.</p>');
+  const candidate = article('<p>One.</p><p>Three.</p>');
+  assert.throws(
+    () => constrainTargetedRepair(before, candidate, [issue('html p 2')]),
+    (error) => error.code === 'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE'
+  );
+});

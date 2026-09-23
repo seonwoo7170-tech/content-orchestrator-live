@@ -52,8 +52,15 @@ export function requiresNewBlock(issue) {
   return EXPANSION_INSTRUCTION_RE.test(String(issue?.repairInstruction || ''));
 }
 
+// This used to drop every finding that asked for a new block, because the guard rejected any
+// change in block count and one such finding discarded the whole batch with it. The guard now
+// accepts an insertion next to a flagged block, so those findings are applicable again and
+// repair gets them. Keeping them out would leave the replan path as the only answer, and
+// replanning is worse than repairing: job 154 came back from a replan 1,604 words shorter.
+// requiresNewBlock stays, because structuralReplanRequired still uses it to decide when a
+// rewrite really is the last resort.
 function repairableIssues(issues) {
-  return (Array.isArray(issues) ? issues : []).filter((issue) => !requiresNewBlock(issue));
+  return Array.isArray(issues) ? issues : [];
 }
 
 async function emitStage(hooks, stage, meta) {
