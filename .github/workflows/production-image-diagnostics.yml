@@ -2262,7 +2262,11 @@ jobs:
             const text=html.replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
             const links=[...html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["']/gi)].map((m)=>m[1]);
             const internal=links.filter((h)=>h.includes('smileinfo.net'));
+            const im=await fetch(`${base}/api/jobs/${id}/images`,{headers,cache:'no-store'});
+            const imgs=im.ok?((await im.json()).images||[]):[];
             console.log('SUMMARY',id,JSON.stringify({
+              imageRows:imgs.length,
+              imageStates:[...new Set(imgs.map((x)=>x.status||x.state||'?'))],
               status:job.status, mode:job.mode, hold:job.hold_reason||null, lastError:job.last_error_code||null,
               topic:String(job.topic||'').slice(0,70),
               created:job.created_at, updated:job.updated_at,
