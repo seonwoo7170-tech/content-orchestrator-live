@@ -107,6 +107,22 @@ function repairBlockedByGuard(row) {
   return violations.length > 0;
 }
 
+// The hold reason is a label, and jobs held before REPAIR_BLOCKED_BY_GUARD existed carry the
+// old one: 154, 157, 165 and 216 all read QUALITY_REVIEW_LIMIT_REACHED while their saved
+// result says the budget ran out on TARGETED_REPAIR_SCOPE_VIOLATION with the guard rejecting
+// the work. 154 has been cycling since 2026-09-12 on a location the guard now resolves. The
+// evidence in result_json is what decides, not the string, or every fix would still need a
+// person to go and retry the jobs it already repaired.
+//
+// repairApplied is deliberately not required here. 216 landed one repair and then lost its
+// remaining attempts to the guard, which is still the machinery blocking finished work.
+function guardExhaustedTheBudget(row) {
+  const result = parseSavedResult(row);
+  if (String(result?.reviewReason || '') !== 'TARGETED_REPAIR_SCOPE_VIOLATION') return false;
+  const violations = Array.isArray(result?.repairGuardViolations) ? result.repairGuardViolations : [];
+  return violations.length > 0;
+}
+
 // A machine fault can strike at any point, so the saved result is not always the NEEDS_REVIEW
 // shape hasSavedReviewContinuation looks for -- job 223 held on CRITIC_SCHEMA_INVALID with a
 // reviewReason of TARGETED_REPAIR_SCOPE_VIOLATION. What re-entry actually needs is the article,
@@ -123,7 +139,10 @@ function machineFaultRevivals(row) {
 
 function isMachineFaultHold(row, now) {
   if (String(row?.recovery_state || '') !== 'held') return false;
-  if (!MACHINE_FAULT_HOLD_CODES.has(String(row?.hold_reason || ''))) return false;
+  const holdReason = String(row?.hold_reason || '');
+  const machineFault = MACHINE_FAULT_HOLD_CODES.has(holdReason)
+    || (holdReason === 'QUALITY_REVIEW_LIMIT_REACHED' && guardExhaustedTheBudget(row));
+  if (!machineFault) return false;
   if (!hasSavedArticle(row)) return false;
   if (machineFaultRevivals(row) >= MAX_MACHINE_FAULT_REVIVALS) return false;
   const failedAt = Date.parse(row?.last_failure_at || row?.updated_at || '');
@@ -441,7 +460,7 @@ export async function primeAutomaticJobRescue(env, options = {}) {
           )
           OR (
             recovery_state = 'held'
-            AND hold_reason IN ('CRITIC_SCHEMA_INVALID', 'REPAIR_BLOCKED_BY_GUARD')
+            AND hold_reason IN ('CRITIC_SCHEMA_INVALID', 'REPAIR_BLOCKED_BY_GUARD', 'QUALITY_REVIEW_LIMIT_REACHED')
             AND result_json IS NOT NULL
           )
           OR (

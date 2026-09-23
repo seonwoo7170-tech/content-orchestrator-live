@@ -135,3 +135,28 @@ test('the self-revival is bounded by a lifetime count, a delay, an article and p
   // It re-enters as a continuation, which is the branch that keeps the article and its images.
   assert.match(reviver, /last_error_code = \?,/);
 });
+
+// A hold reason is a label, and jobs held before REPAIR_BLOCKED_BY_GUARD existed carry the old
+// one. 154, 157, 165 and 216 all read QUALITY_REVIEW_LIMIT_REACHED while their saved result
+// says the budget ran out on TARGETED_REPAIR_SCOPE_VIOLATION with the guard rejecting the work
+// -- 154 has been cycling since 2026-09-12 on a location the guard now resolves. Deciding by
+// the label alone would leave every such job needing a person, which is the whole problem.
+test('a guard-exhausted hold is recognised even under the old quality-limit label', async () => {
+  const source = await readFile(new URL('../worker/lib/job-auto-rescue.js', import.meta.url), 'utf8');
+  assert.match(source, /function guardExhaustedTheBudget\(row\) \{/);
+  // Both halves of the evidence are required, so a genuine content verdict does not match.
+  assert.match(source, /reviewReason \|\| ''\) !== 'TARGETED_REPAIR_SCOPE_VIOLATION'\) return false;/);
+  assert.match(source, /holdReason === 'QUALITY_REVIEW_LIMIT_REACHED' && guardExhaustedTheBudget\(row\)/);
+});
+
+// 156, 207 and 213 are the other half: no guard violation at all, the critic simply asking for
+// material the article does not have. Reviving those would only repeat the same verdict, so
+// the reviewReason half of the test is what keeps them out.
+test('a content verdict with no guard violation is still left for a person', async () => {
+  const source = await readFile(new URL('../worker/lib/job-auto-rescue.js', import.meta.url), 'utf8');
+  const detector = source.slice(source.indexOf('function guardExhaustedTheBudget'), source.indexOf('function machineFaultRevivals'));
+  assert.match(detector, /violations\.length > 0;/);
+  // STRUCTURAL_REPLAN_REQUIRED and CRITIC_FAILED_AFTER_MAX_TARGETED_REPAIRS are not the
+  // reviewReason this looks for, so 156, 207 and 213 never reach the revival path.
+  assert.doesNotMatch(detector, /STRUCTURAL_REPLAN_REQUIRED|CRITIC_FAILED_AFTER_MAX_TARGETED_REPAIRS/);
+});
