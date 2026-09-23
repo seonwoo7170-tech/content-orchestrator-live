@@ -2245,7 +2245,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          SUMMARY_JOB_IDS: '157'
+          SUMMARY_JOB_IDS: '157,234,236,241,246,251'
         run: |
           node - <<'NODE'
           const base=process.env.BASE_URL;
