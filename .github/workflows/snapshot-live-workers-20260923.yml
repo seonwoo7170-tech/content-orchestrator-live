@@ -1,0 +1,161 @@
+name: snapshot-live-workers-20260923
+
+on:
+  push:
+    branches:
+      - ops/live-runtime-snapshot-20260923
+    paths:
+      - '.github/workflows/snapshot-live-workers-20260923.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ops/live-runtime-snapshot-20260923
+          fetch-depth: 0
+
+      - name: Validate credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+
+      - name: Download current live Worker content
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .live-snapshot
+          mkdir -p .live-snapshot/raw
+          for worker in content-orchestrator api-hub-v2; do
+            echo "Fetching deployed content for ${worker}"
+            curl --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -D ".live-snapshot/raw/${worker}.headers" \
+              -o ".live-snapshot/raw/${worker}.body" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${worker}/content"
+          done
+
+      - name: Extract source modules without bindings metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          from email import policy
+          from email.parser import BytesParser
+          import hashlib, json, re
+
+          root = Path('.live-snapshot')
+          out = root / 'modules'
+          out.mkdir(parents=True, exist_ok=True)
+          manifest = {'workers': {}}
+
+          def safe_name(value):
+              value = (value or '').replace('\\', '/').split('/')[-1]
+              value = re.sub(r'[^A-Za-z0-9._-]+', '_', value)
+              return value or 'module.txt'
+
+          for worker in ('content-orchestrator', 'api-hub-v2'):
+              headers = (root / 'raw' / f'{worker}.headers').read_text('utf-8', errors='replace')
+              body = (root / 'raw' / f'{worker}.body').read_bytes()
+              ctype_match = re.findall(r'^content-type:\s*(.+)$', headers, flags=re.I|re.M)
+              ctype = ctype_match[-1].strip() if ctype_match else 'application/javascript'
+              worker_dir = out / worker
+              worker_dir.mkdir(parents=True, exist_ok=True)
+              saved = []
+
+              if 'multipart/' in ctype.lower():
+                  synthetic = (f'Content-Type: {ctype}\r\nMIME-Version: 1.0\r\n\r\n').encode() + body
+                  msg = BytesParser(policy=policy.default).parsebytes(synthetic)
+                  for idx, part in enumerate(msg.iter_parts(), 1):
+                      filename = part.get_filename()
+                      name = part.get_param('name', header='content-disposition')
+                      candidate = filename or name or f'part-{idx}.txt'
+                      content_type = part.get_content_type()
+                      # Cloudflare multipart metadata contains runtime bindings/config. Do not persist it.
+                      if str(candidate).lower() in {'metadata', 'metadata.json'} or content_type == 'application/json':
+                          continue
+                      payload = part.get_payload(decode=True) or b''
+                      if not payload:
+                          continue
+                      fn = safe_name(candidate)
+                      path = worker_dir / fn
+                      if path.exists():
+                          path = worker_dir / f'{idx:03d}-{fn}'
+                      path.write_bytes(payload)
+                      saved.append(path)
+              else:
+                  path = worker_dir / 'worker.js'
+                  path.write_bytes(body)
+                  saved.append(path)
+
+              combined = b'\n'.join(p.read_bytes() for p in saved)
+              markers = {}
+              for marker in [
+                  b'TARGETED_REPAIR_INSERTION_REJECTED',
+                  b'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE',
+                  b'CHANGED_HTML_STRUCTURE',
+                  b'TARGET_NOT_FOUND',
+                  b'data-smileseon-internal-links',
+                  b'PLACEHOLDER_DATE',
+                  b'8000'
+              ]:
+                  markers[marker.decode()] = combined.count(marker)
+              files = []
+              for p in saved:
+                  data = p.read_bytes()
+                  files.append({
+                      'path': str(p.relative_to(root)),
+                      'size': len(data),
+                      'sha256': hashlib.sha256(data).hexdigest()
+                  })
+              manifest['workers'][worker] = {
+                  'contentType': ctype,
+                  'files': files,
+                  'markers': markers,
+                  'combinedSha256': hashlib.sha256(combined).hexdigest()
+              }
+
+          (root / 'manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+          print(json.dumps(manifest, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Remove raw response and headers
+        run: rm -rf .live-snapshot/raw
+
+      - name: Commit sanitized live source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .live-snapshot
+          if git diff --cached --quiet; then
+            echo 'No snapshot changes to commit.'
+            exit 0
+          fi
+          git commit -m 'ops: capture sanitized live worker source snapshot 2026-09-23'
+          git push origin HEAD:ops/live-runtime-snapshot-20260923
+
+      - name: Upload sanitized snapshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-worker-snapshot-20260923
+          path: |
+            .live-snapshot/manifest.json
+            .live-snapshot/modules
+          if-no-files-found: warn
+          retention-days: 3
