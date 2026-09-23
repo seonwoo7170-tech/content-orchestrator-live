@@ -2,6 +2,7 @@ const BLOCK_PATTERNS = Object.freeze([
   { code: 'PLACEHOLDER_TODO', pattern: /\b(?:TODO|TBD|FIXME)\b/i, message: '작성 중 표식이 본문에 남아 있습니다.' },
   { code: 'PLACEHOLDER_LOREM', pattern: /\blorem\s+ipsum\b/i, message: '샘플 문구가 본문에 남아 있습니다.' },
   { code: 'PLACEHOLDER_INSERT', pattern: /\[(?:insert|add|replace|작성|삽입|추가)[^\]]{0,80}\]/i, message: '치환되지 않은 자리표시자가 남아 있습니다.' },
+  { code: 'PLACEHOLDER_DATE_TOKEN', pattern: /(?:\[(?:current[_\s-]*)?date\]|\{\{\s*(?:current[_\s-]*)?date\s*\}\})/i, message: '치환되지 않은 날짜 자리표시자가 남아 있습니다.' },
   { code: 'CITATION_PLACEHOLDER', pattern: /\[(?:citation needed|source needed|출처 필요|근거 필요)\]/i, message: '확인되지 않은 출처 자리표시자가 남아 있습니다.' },
   { code: 'UNSAFE_JAVASCRIPT_URL', pattern: /(?:href|src)\s*=\s*["']\s*javascript:/i, message: '실행형 javascript URL이 포함되어 있습니다.' },
   { code: 'UNSAFE_DATA_URL', pattern: /href\s*=\s*["']\s*data:/i, message: '링크에 data URL이 포함되어 있습니다.' }
