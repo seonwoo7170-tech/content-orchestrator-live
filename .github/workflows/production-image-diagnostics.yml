@@ -1823,3 +1823,46 @@ jobs:
             linkedSourceItems:linkedSourceTotal, bareSourceItems:bareSourceTotal, bareSourceSamples
           }));
           NODE
+
+      - name: Re-measure smileinfo.net source sections correctly and check the quoted citation names
+        if: always()
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const origin='https://www.smileinfo.net';
+          const UA={'user-agent':'Mozilla/5.0 (compatible; smileseon-content-audit/1.0)'};
+          const r=await fetch(`${origin}/feeds/posts/default?alt=json&max-results=500`,{headers:UA,cache:'no-store'});
+          const feed=await r.json();
+          const entries=Array.isArray(feed.feed?.entry)?feed.feed.entry:[];
+          function strip(v){ return String(v||'').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim(); }
+
+          // The earlier count sliced from the FIRST match, which is the "In This Article" table of
+          // contents, so it swallowed the whole body. Take the LAST occurrence instead.
+          let linked=0, bare=0, withSection=0;
+          const bareSamples=[];
+          const quoted=[
+            'Standard Plumbing Maintenance Guidelines','Appliance Maintenance Guidelines',
+            'Standard Residential Carpentry and Hardware Maintenance Guidelines',
+            'Wood Moisture Dynamics','Editorial Archive','Standard Guide'
+          ];
+          const quotedHits={}; for(const q of quoted) quotedHits[q]=0;
+          let anyByline=0;
+          for(const e of entries){
+            const html=String(e.content?.$t||'');
+            const text=strip(html);
+            for(const q of quoted) if(text.includes(q)) quotedHits[q]+=1;
+            if(/Editorial Team|By\s+[A-Z][a-z]+\s+[A-Z][a-z]+/.test(text)) anyByline+=1;
+            const idx=html.toLowerCase().lastIndexOf('sources and methodology');
+            if(idx<0) continue;
+            withSection+=1;
+            const tail=html.slice(idx);
+            const items=[...tail.matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((m)=>m[1]);
+            for(const it of items){
+              if(/<a\b[^>]*href\s*=\s*["']https?:/i.test(it)) linked+=1;
+              else { bare+=1; if(bareSamples.length<10) bareSamples.push(strip(it).slice(0,80)); }
+            }
+          }
+          console.log('SOURCE_SECTIONS',JSON.stringify({posts:entries.length,withSection,linkedItems:linked,bareItems:bare,bareSamples}));
+          console.log('QUOTED_CITATION_NAMES',JSON.stringify(quotedHits));
+          console.log('BYLINE',JSON.stringify({postsWithAnyByline:anyByline,postsWithout:entries.length-anyByline}));
+          NODE
