@@ -2287,7 +2287,8 @@ jobs:
               repairApplied:result?.repairApplied ?? null,
               totalRepairAttempts:result?.totalRepairAttempts ?? null,
               continuationAttempt:result?.continuationAttempt ?? null,
-              guardCodes:(Array.isArray(result?.repairGuardViolations)?result.repairGuardViolations:[]).map((v)=>v&&v.code),
+              guardViolations:(Array.isArray(result?.repairGuardViolations)?result.repairGuardViolations:[]).map((v)=>({code:v&&v.code,meta:v&&v.meta})),
+              issueLocations:(Array.isArray(result?.advisoryReview?.issues)?result.advisoryReview.issues:[]).map((i)=>String(i?.location||'')),
               issueCodes:(Array.isArray(result?.advisoryReview?.issues)?result.advisoryReview.issues:[]).map((i)=>i&&i.code),
               issueInstructions:(Array.isArray(result?.advisoryReview?.issues)?result.advisoryReview.issues:[]).slice(0,3).map((i)=>String(i?.repairInstruction||'').slice(0,150))
             }));
