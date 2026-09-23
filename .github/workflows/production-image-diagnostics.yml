@@ -1866,3 +1866,39 @@ jobs:
           console.log('QUOTED_CITATION_NAMES',JSON.stringify(quotedHits));
           console.log('BYLINE',JSON.stringify({postsWithAnyByline:anyByline,postsWithout:entries.length-anyByline}));
           NODE
+
+      - name: Dump the exact markup carrying the in-body date and byline on smileinfo.net
+        if: always()
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const origin='https://www.smileinfo.net';
+          const r=await fetch(`${origin}/feeds/posts/default?alt=json&max-results=500`,{headers:{'user-agent':'Mozilla/5.0 (compatible; smileseon-content-audit/1.0)'},cache:'no-store'});
+          const feed=await r.json();
+          const entries=Array.isArray(feed.feed?.entry)?feed.feed.entry:[];
+          let shown=0;
+          for(const e of entries){
+            const html=String(e.content?.$t||'');
+            const idx=html.search(/Published\s*:/i);
+            const byline=html.search(/Editorial Team/i);
+            if(idx<0 && byline<0) continue;
+            const at=Math.max(0,Math.min(...[idx,byline].filter((n)=>n>=0))-260);
+            console.log('MARKUP',JSON.stringify({
+              title:String(e.title?.$t||'').slice(0,50),
+              published:String(e.published?.$t||'').slice(0,10),
+              snippet:html.slice(at,at+700)
+            }));
+            shown+=1;
+            if(shown>=3) break;
+          }
+          // Also: where does the Sources section sit and what does an unlinked entry look like?
+          for(const e of entries){
+            const html=String(e.content?.$t||'');
+            const idx=html.toLowerCase().lastIndexOf('sources and methodology');
+            if(idx<0) continue;
+            const items=[...html.slice(idx).matchAll(/<li\b[^>]*>([\s\S]*?)<\/li>/gi)].map((m)=>m[1]);
+            if(!items.some((it)=>!/<a\b[^>]*href\s*=\s*["']https?:/i.test(it))) continue;
+            console.log('SOURCES_MARKUP',JSON.stringify({title:String(e.title?.$t||'').slice(0,50),snippet:html.slice(idx,idx+700)}));
+            break;
+          }
+          NODE
