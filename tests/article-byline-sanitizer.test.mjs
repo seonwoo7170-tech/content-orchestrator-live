@@ -1,82 +1,96 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { stripInBodyPublicationDate } from '../worker/lib/article-byline-sanitizer.js';
+import { applyPublicationDate, formatPublicationDate } from '../worker/lib/article-byline-sanitizer.js';
 
-// The exact markup published on smileinfo.net, from the live feed on 2026-09-23.
-const REAL_INLINE = '<figure><img src="x"></figure>\n<div style="margin-bottom:20px;"><strong>Editorial Team</strong><br>Published: September 11, 2026</div>\n<p>Body.</p>';
-const REAL_WRAPPED = '<div class="article-container">\n  <div style="margin-bottom:20px;font-size:14px;color:#555;">\n    <strong>Editorial Team</strong><br>\n    Published: September 18, 2026\n  </div>\n\n  <p>Deciding whether your roof needs a targeted repair.</p>\n</div>';
+// Master v4.5 section 62 requires this block. The writer emits it correctly and then has to
+// invent [DATE], because publication is scheduled long after drafting. The block stays; the
+// value is filled at publication from the date actually being used.
+const REAL = '<div class="article-container">\n  <div style="margin-bottom:20px;">\n    <strong>Editorial Team</strong><br>\n    Published: September 11, 2026\n  </div>\n  <p>Body prose that must survive untouched.</p>\n  <p>Last updated: March 2026</p>\n</div>';
 
-test('an invented publication date is removed from the body', () => {
-  const out = stripInBodyPublicationDate({ html: REAL_INLINE }).html;
-  assert.doesNotMatch(out, /Published:/);
+test('the guessed publication date is replaced with the real one', () => {
+  const out = applyPublicationDate({ html: REAL, language: 'en' }, { publishedAt: '2026-09-21T00:00:00Z', updatedAt: '2026-09-21T00:00:00Z' }).html;
+  assert.match(out, /Published: September 21, 2026/);
   assert.doesNotMatch(out, /September 11, 2026/);
+  assert.match(out, /Last updated: September 21, 2026/);
+  assert.doesNotMatch(out, /March 2026/);
 });
 
-// The byline is an editorial call, not this module's business -- only the date goes.
-test('the byline beside the date is left alone', () => {
-  const out = stripInBodyPublicationDate({ html: REAL_INLINE }).html;
-  assert.match(out, /<strong>Editorial Team<\/strong>/);
-});
-
-// The whole article sits inside <div class="article-container">. A non-greedy div match would
-// have started there and swallowed the wrapper instead of the byline block.
-test('the article wrapper is never the block that matches', () => {
-  const out = stripInBodyPublicationDate({ html: REAL_WRAPPED }).html;
+// The whole point of the correction: the spec requires the block, so it must not be removed.
+test('the byline block the spec requires is kept', () => {
+  const out = applyPublicationDate({ html: REAL, language: 'en' }, { publishedAt: '2026-09-21T00:00:00Z' }).html;
   assert.match(out, /<div class="article-container">/);
-  assert.match(out, /<p>Deciding whether your roof needs a targeted repair\.<\/p>/);
-  assert.doesNotMatch(out, /Published:/);
+  assert.match(out, /<strong>Editorial Team<\/strong>/);
+  assert.match(out, /<p>Body prose that must survive untouched\.<\/p>/);
 });
 
 // One post had "Published: Standard Guide" where the date should be.
-test('a non-date value in the date slot is removed too', () => {
-  const out = stripInBodyPublicationDate({ html: '<div><strong>Editorial Team</strong><br>Published: Standard Guide</div><p>Body.</p>' }).html;
+test('a non-date value in the date slot is overwritten, not left', () => {
+  const out = applyPublicationDate(
+    { html: '<div><strong>Editorial Team</strong><br>Published: Standard Guide</div>', language: 'en' },
+    { publishedAt: '2026-09-05T00:00:00Z' }
+  ).html;
+  assert.match(out, /Published: September 5, 2026/);
   assert.doesNotMatch(out, /Standard Guide/);
-  assert.match(out, /<p>Body\.<\/p>/);
 });
 
-test('a block holding nothing but the date is removed entirely', () => {
-  const out = stripInBodyPublicationDate({ html: '<p>Last updated: April 2026</p><p>Real content here.</p>' }).html;
-  assert.equal(out, '<p>Real content here.</p>');
+// Updating an existing post: this side does not hold its original publication date, so the line
+// is removed rather than restamped with today -- restamping a date without changing the content
+// is exactly what Google names as a search-first signal.
+test('an update fills only what it honestly knows', () => {
+  const out = applyPublicationDate({ html: REAL, language: 'en' }, { updatedAt: '2026-09-23T09:00:00Z' }).html;
+  assert.doesNotMatch(out, /Published:/);
+  assert.match(out, /Last updated: September 23, 2026/);
+  assert.match(out, /<strong>Editorial Team<\/strong>/);
 });
 
-// The costly failure mode is deleting article text, so prose is what the guard protects.
+test('a Korean article keeps its own label', () => {
+  const out = applyPublicationDate(
+    { html: '<div><strong>편집팀</strong><br>게시일: 2026년 3월</div>', language: 'ko' },
+    { publishedAt: '2026-09-23T00:00:00Z' }
+  ).html;
+  assert.match(out, /게시일: 2026년 9월 23일/);
+  assert.doesNotMatch(out, /Published/);
+});
+
+// The costly failure mode is damaging article text, so prose and citations are what this protects.
 test('prose that mentions publishing survives untouched', () => {
-  const html = '<p>The manufacturer published a revised torque table in 2024, and the older figure is still printed on many boxes, so check the date stamped on the housing before you trust it.</p>';
-  assert.equal(stripInBodyPublicationDate({ html }).html, html);
+  const html = '<p>The manufacturer published a revised torque table in 2024, so check the date stamped on the housing before you trust it.</p>';
+  assert.equal(applyPublicationDate({ html }, { publishedAt: '2026-09-23T00:00:00Z' }).html, html);
 });
 
 test('a citation carrying its own publication year is untouched', () => {
   const html = '<ul><li><a href="https://epa.gov/x">EPA WaterSense</a> Published: 2024</li></ul>';
-  assert.equal(stripInBodyPublicationDate({ html }).html, html);
+  assert.equal(applyPublicationDate({ html }, { publishedAt: '2026-09-23T00:00:00Z' }).html, html);
 });
 
-test('the Korean forms are covered', () => {
-  const out = stripInBodyPublicationDate({ html: '<div><strong>편집팀</strong><br>게시일: 2026년 3월</div><p>본문.</p>' }).html;
-  assert.doesNotMatch(out, /게시일/);
-  assert.match(out, /<p>본문\.<\/p>/);
-});
-
-test('an article with no such metadata is returned as the same object', () => {
-  const article = { html: '<p>Plain article.</p><h2>Heading</h2><p>More.</p>' };
-  assert.equal(stripInBodyPublicationDate(article), article);
+test('an unusable date is not written into the article', () => {
+  const out = applyPublicationDate({ html: REAL, language: 'en' }, { publishedAt: 'not-a-date' }).html;
+  assert.doesNotMatch(out, /Published:/);
+  assert.equal(formatPublicationDate('not-a-date'), null);
 });
 
 test('a missing article is rejected rather than silently passed through', () => {
-  assert.throws(() => stripInBodyPublicationDate(null), /ARTICLE_REQUIRED/);
-  assert.throws(() => stripInBodyPublicationDate([]), /ARTICLE_REQUIRED/);
+  assert.throws(() => applyPublicationDate(null, {}), /ARTICLE_REQUIRED/);
+  assert.throws(() => applyPublicationDate([], {}), /ARTICLE_REQUIRED/);
 });
 
-// Every path that produces an article body has to be covered, or the defect comes back through
-// whichever one was missed -- the repair path is how the existing 33 posts would be corrected.
-test('all four article paths run the stripper', async () => {
-  const source = await readFile(new URL('../worker/lib/pipeline.js', import.meta.url), 'utf8');
-  assert.match(source, /import \{ stripInBodyPublicationDate \} from '\.\/article-byline-sanitizer\.js';/);
-  assert.equal((source.match(/stripInBodyPublicationDate\(/g) || []).length, 4);
+// The date only exists at publication, so that is the only place this can run. Running it at
+// drafting time -- where it was first wired -- would strip the block before publication ever
+// saw it, breaking the spec.
+test('it runs at publication, not at drafting', async () => {
+  const pipeline = await readFile(new URL('../worker/lib/pipeline.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(pipeline, /PublicationDate/);
+  const publisher = await readFile(new URL('../worker/lib/auto-publisher.js', import.meta.url), 'utf8');
+  assert.match(publisher, /article: applyPublicationDate\(result\.article, \{\s*publishedAt: scheduledAt,/);
+  const updater = await readFile(new URL('../worker/lib/auto-repair-updater.js', import.meta.url), 'utf8');
+  assert.match(updater, /applyPublicationDate\(result\.article, \{ updatedAt: new Date\(\)\.toISOString\(\) \}\)/);
 });
 
-test('the writer is also told not to emit one', async () => {
+test('the writer is told to leave the date as the placeholder the server fills', async () => {
   const source = await readFile(new URL('../api-hub-v2/src/lib/ai-routes.js', import.meta.url), 'utf8');
-  assert.match(source, /PUBLICATION METADATA/);
-  assert.match(source, /Blogger renders the real publication date from the post record itself/);
+  assert.match(source, /leave every date in them as the literal token \[DATE\]/);
+  assert.match(source, /the server substitutes the real date into those blocks before publishing/);
+  // It must no longer tell the writer to drop the block Master v4.5 requires.
+  assert.doesNotMatch(source, /never write a publication date, an update date, a review date or a byline/);
 });

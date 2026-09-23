@@ -1,4 +1,5 @@
 import { callHub } from './api-hub.js';
+import { applyPublicationDate } from './article-byline-sanitizer.js';
 import { validateCriticResult } from './contracts.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { dateInTimeZone } from './daily-plan.js';
@@ -500,7 +501,13 @@ export async function runDueAutoPublications(env, blogs, options = {}) {
           publishMode: 'scheduled',
           publishDate: scheduledAt,
           blogId: String(candidate.blog_id),
-          article: result.article
+          // Master v4.5 section 62 requires the byline block to carry a publication date, and
+          // the writer cannot know one -- publication is scheduled here, long after drafting.
+          // The date it guessed is replaced with the one actually being used.
+          article: applyPublicationDate(result.article, {
+            publishedAt: scheduledAt,
+            updatedAt: scheduledAt
+          })
         }
       );
       if (!published?.ok || !published?.bloggerPostId) throw new Error('BLOGGER_SCHEDULE_RESULT_INVALID');

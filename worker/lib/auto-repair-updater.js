@@ -1,4 +1,5 @@
 import { callHub } from './api-hub.js';
+import { applyPublicationDate } from './article-byline-sanitizer.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { dateInTimeZone } from './daily-plan.js';
 import { deterministicPublishJitter, readAutomationSettings, scheduledMinuteForPublish } from './automation-settings.js';
@@ -386,7 +387,10 @@ async function executeScheduledUpdate(env, action, settings, now, callHubFn, rea
       publishMode: 'published',
       blogId: String(action.blog_id),
       bloggerPostId: String(action.blogger_post_id),
-      article: result.article
+      // This side does not hold the post's original publication date, so a Published line is
+      // removed rather than guessed at; Blogger keeps rendering the real one. Last updated is
+      // the field this operation can honestly fill.
+      article: applyPublicationDate(result.article, { updatedAt: new Date().toISOString() })
     });
     if (!updated?.ok || String(updated.bloggerPostId || '') !== String(action.blogger_post_id)) {
       throw new Error('BLOGGER_REPAIR_UPDATE_RESULT_INVALID');
