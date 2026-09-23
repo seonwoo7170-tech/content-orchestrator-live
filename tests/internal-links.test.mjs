@@ -93,3 +93,14 @@ test('publication applies the floor, excluding the post being published', async 
   const helper = publisher.slice(publisher.indexOf('async function withInternalLinks'), publisher.indexOf('async function resolveScheduledAt'));
   assert.match(helper, /catch \{\s*return article;\s*\}/);
 });
+
+// Repair is the path the already-published posts are corrected through, and every one of them
+// was written before the writer had any internal URL to link to. Leaving the floor off this path
+// would mean the 33 existing posts could never gain one.
+test('the repair path applies the floor as well', async () => {
+  const updater = await readFile(new URL('../worker/lib/auto-repair-updater.js', import.meta.url), 'utf8');
+  assert.match(updater, /article: await withInternalLinks\(/);
+  assert.match(updater, /excludeJobId: jobId/);
+  const helper = updater.slice(updater.indexOf('async function withInternalLinks'));
+  assert.match(helper, /catch \{\s*return article;\s*\}/);
+});

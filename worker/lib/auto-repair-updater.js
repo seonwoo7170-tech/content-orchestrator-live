@@ -1,5 +1,6 @@
 import { callHub } from './api-hub.js';
 import { applyPublicationDate } from './article-byline-sanitizer.js';
+import { ensureInternalLinks, selectInternalLinkCandidates, siteHostOf } from './internal-links.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { dateInTimeZone } from './daily-plan.js';
 import { deterministicPublishJitter, readAutomationSettings, scheduledMinuteForPublish } from './automation-settings.js';
@@ -389,8 +390,15 @@ async function executeScheduledUpdate(env, action, settings, now, callHubFn, rea
       bloggerPostId: String(action.blogger_post_id),
       // This side does not hold the post's original publication date, so a Published line is
       // removed rather than guessed at; Blogger keeps rendering the real one. Last updated is
-      // the field this operation can honestly fill.
-      article: applyPublicationDate(result.article, { updatedAt: new Date().toISOString() })
+      // the field this operation can honestly fill. The internal-link floor applies here too:
+      // repair is the path the already-published posts are corrected through, and every one of
+      // them was written before the writer was given any internal URL to link to.
+      article: await withInternalLinks(
+        env,
+        String(action.blog_id),
+        Number(action.job_id),
+        applyPublicationDate(result.article, { updatedAt: new Date().toISOString() })
+      )
     });
     if (!updated?.ok || String(updated.bloggerPostId || '') !== String(action.blogger_post_id)) {
       throw new Error('BLOGGER_REPAIR_UPDATE_RESULT_INVALID');
@@ -449,6 +457,21 @@ async function executeScheduledUpdate(env, action, settings, now, callHubFn, rea
     await markFailed(env, action.job_id, error?.message || 'AUTO_REPAIR_UPDATE_FAILED');
     try { await persistJobTransition(env, action.job_id, 'failed', { error: error?.message || 'AUTO_REPAIR_UPDATE_FAILED' }); } catch { /* preserve primary failure */ }
     return { jobId: Number(action.job_id), status: 'failed', reason: String(error?.message || 'AUTO_REPAIR_UPDATE_FAILED') };
+  }
+}
+
+// Never let link-building stop a repair publication: the article is finished without it.
+async function withInternalLinks(env, blogId, jobId, article) {
+  try {
+    const candidates = await selectInternalLinkCandidates(env, blogId, { excludeJobId: jobId, limit: 12 });
+    if (candidates.length === 0) return article;
+    return ensureInternalLinks(article, candidates, {
+      minimum: 2,
+      host: siteHostOf(candidates[0].url),
+      language: article?.language
+    });
+  } catch {
+    return article;
   }
 }
 
