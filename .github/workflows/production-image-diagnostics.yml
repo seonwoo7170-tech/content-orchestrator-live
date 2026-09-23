@@ -1280,3 +1280,225 @@ jobs:
             }
           }
           NODE
+
+      - name: Audit every live post on smileinfo.net from the Blogger feed (read-only, no D1)
+        if: always()
+        shell: bash
+        env:
+          SITE_ORIGIN: 'https://www.smileinfo.net'
+        run: |
+          node - <<'NODE'
+          const origin=String(process.env.SITE_ORIGIN||'').replace(/\/+$/,'');
+          const UA={'user-agent':'Mozilla/5.0 (compatible; smileseon-content-audit/1.0)'};
+          async function getText(url){
+            const r=await fetch(url,{headers:UA,cache:'no-store',redirect:'follow'});
+            return {status:r.status,ok:r.ok,text:r.ok?await r.text():''};
+          }
+          async function getJson(url){
+            const r=await getText(url);
+            if(!r.ok) throw new Error('FETCH_FAILED:'+url+':'+r.status);
+            try{ return JSON.parse(r.text); }catch(e){ throw new Error('FEED_NOT_JSON:'+url); }
+          }
+          function stripHtml(v){
+            return String(v||'')
+              .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ')
+              .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ')
+              .replace(/<[^>]+>/g,' ')
+              .replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>')
+              .replace(/&quot;/gi,'"').replace(/&#39;/gi,"'")
+              .replace(/\s+/g,' ').trim();
+          }
+          // Same length heuristic the repo already uses, so numbers here line up with job-side numbers.
+          function words(text){
+            if(!text) return 0;
+            const hangul=(text.match(/[가-힣]/g)||[]).length;
+            const latin=(text.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g)||[]).length;
+            return hangul ? Math.round(hangul/2)+latin : latin;
+          }
+          function fnv(s){ let h=0x811c9dc5; for(let i=0;i<s.length;i+=1){ h^=s.charCodeAt(i); h=Math.imul(h,0x01000193)>>>0; } return h>>>0; }
+          function normalizeForShingles(t){ return String(t||'').toLowerCase().replace(/[^0-9a-z가-힣]/g,''); }
+          const SIG=96, K=16, STEP=4;
+          function signature(text){
+            const n=normalizeForShingles(text);
+            const mins=new Array(SIG).fill(0xffffffff);
+            for(let i=0;i+K<=n.length;i+=STEP){
+              const h=fnv(n.slice(i,i+K));
+              for(let s=0;s<SIG;s+=1){ const v=(h ^ Math.imul(s+1,0x9e3779b1))>>>0; if(v<mins[s]) mins[s]=v; }
+            }
+            return mins;
+          }
+          function similarity(a,b){ let same=0; for(let i=0;i<SIG;i+=1) if(a[i]===b[i]) same+=1; return same/SIG; }
+          function sentences(text){
+            return String(text||'').split(/(?<=[.!?])\s+|(?<=다\.)\s*|(?<=요\.)\s*/)
+              .map((s)=>s.trim()).filter((s)=>s.length>=18 && s.length<=220);
+          }
+
+          // ---- 1. every post, paged out of the Blogger feed
+          const posts=[];
+          let start=1, total=null;
+          for(let page=0;page<20;page+=1){
+            const feed=await getJson(`${origin}/feeds/posts/default?alt=json&max-results=150&start-index=${start}`);
+            const f=feed.feed||{};
+            if(total===null) total=Number(f['openSearch$totalResults']?.$t||0);
+            const entries=Array.isArray(f.entry)?f.entry:[];
+            if(entries.length===0) break;
+            for(const e of entries){
+              const html=String(e.content?.$t||'');
+              const text=stripHtml(html);
+              const link=(Array.isArray(e.link)?e.link:[]).find((l)=>l.rel==='alternate');
+              const links=[...html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["']/gi)].map((m)=>m[1]);
+              const hangul=(text.match(/[가-힣]/g)||[]).length;
+              posts.push({
+                title:stripHtml(e.title?.$t||''),
+                url:String(link?.href||''),
+                published:String(e.published?.$t||'').slice(0,10),
+                updated:String(e.updated?.$t||'').slice(0,10),
+                labels:(Array.isArray(e.category)?e.category:[]).map((c)=>c.term),
+                chars:text.length,
+                words:words(text),
+                lang:hangul>text.length*0.15?'ko':'en',
+                h2:(html.match(/<h2\b/gi)||[]).length,
+                h3:(html.match(/<h3\b/gi)||[]).length,
+                img:(html.match(/<img\b/gi)||[]).length,
+                table:(html.match(/<table\b/gi)||[]).length,
+                list:(html.match(/<(?:ul|ol)\b/gi)||[]).length,
+                internalLinks:links.filter((h)=>h.includes('smileinfo.net')).length,
+                externalLinks:links.filter((h)=>/^https?:\/\//i.test(h)&&!h.includes('smileinfo.net')).length,
+                externalHosts:[...new Set(links.filter((h)=>/^https?:\/\//i.test(h)&&!h.includes('smileinfo.net')).map((h)=>{try{return new URL(h).hostname.replace(/^www\./,'');}catch{return 'bad';}}))],
+                text
+              });
+            }
+            start+=entries.length;
+            if(total && start>total) break;
+          }
+          console.log('SITE_TOTALS',JSON.stringify({
+            feedTotalResults:total, fetched:posts.length,
+            ko:posts.filter((p)=>p.lang==='ko').length,
+            en:posts.filter((p)=>p.lang==='en').length,
+            firstPublished:posts.map((p)=>p.published).sort()[0]||null,
+            lastPublished:posts.map((p)=>p.published).sort().slice(-1)[0]||null
+          }));
+
+          // ---- 2. length distribution, split by language
+          function stats(rows,key){
+            const v=rows.map((r)=>r[key]).sort((a,b)=>a-b);
+            if(v.length===0) return null;
+            const at=(q)=>v[Math.min(v.length-1,Math.floor(v.length*q))];
+            return {n:v.length,min:v[0],p25:at(0.25),median:at(0.5),p75:at(0.75),max:v[v.length-1],mean:Math.round(v.reduce((s,x)=>s+x,0)/v.length)};
+          }
+          console.log('LENGTH_KO_CHARS',JSON.stringify(stats(posts.filter((p)=>p.lang==='ko'),'chars')));
+          console.log('LENGTH_EN_CHARS',JSON.stringify(stats(posts.filter((p)=>p.lang==='en'),'chars')));
+          console.log('LENGTH_KO_WORDS',JSON.stringify(stats(posts.filter((p)=>p.lang==='ko'),'words')));
+          console.log('LENGTH_EN_WORDS',JSON.stringify(stats(posts.filter((p)=>p.lang==='en'),'words')));
+          console.log('STRUCTURE_MEANS',JSON.stringify({
+            h2:+(posts.reduce((s,p)=>s+p.h2,0)/Math.max(1,posts.length)).toFixed(1),
+            img:+(posts.reduce((s,p)=>s+p.img,0)/Math.max(1,posts.length)).toFixed(1),
+            table:+(posts.reduce((s,p)=>s+p.table,0)/Math.max(1,posts.length)).toFixed(1),
+            internalLinks:+(posts.reduce((s,p)=>s+p.internalLinks,0)/Math.max(1,posts.length)).toFixed(1),
+            externalLinks:+(posts.reduce((s,p)=>s+p.externalLinks,0)/Math.max(1,posts.length)).toFixed(1),
+            postsWithZeroInternalLinks:posts.filter((p)=>p.internalLinks===0).length,
+            postsWithZeroExternalLinks:posts.filter((p)=>p.externalLinks===0).length,
+            postsWithZeroImages:posts.filter((p)=>p.img===0).length,
+            thinUnder2000Chars:posts.filter((p)=>p.chars<2000).length,
+            thinUnder3000Chars:posts.filter((p)=>p.chars<3000).length
+          }));
+
+          // ---- 3. publishing cadence (AdSense reads a burst of same-day posts as mass production)
+          const byDay={};
+          for(const p of posts) byDay[p.published]=(byDay[p.published]||0)+1;
+          const days=Object.entries(byDay).sort();
+          console.log('CADENCE',JSON.stringify({
+            distinctDays:days.length,
+            maxPostsInOneDay:Math.max(0,...days.map(([,n])=>n)),
+            busiestDays:days.sort((a,b)=>b[1]-a[1]).slice(0,10)
+          }));
+
+          // ---- 4. near-duplicate posts
+          const sigs=posts.map((p)=>signature(p.text));
+          const pairs=[];
+          for(let i=0;i<posts.length;i+=1){
+            for(let j=i+1;j<posts.length;j+=1){
+              const s=similarity(sigs[i],sigs[j]);
+              if(s>=0.35) pairs.push({s:+s.toFixed(2),a:posts[i].title.slice(0,50),b:posts[j].title.slice(0,50),aUrl:posts[i].url,bUrl:posts[j].url});
+            }
+          }
+          pairs.sort((x,y)=>y.s-x.s);
+          console.log('NEAR_DUPLICATE_PAIRS',JSON.stringify({count:pairs.length,top:pairs.slice(0,25)}));
+
+          // ---- 5. boilerplate: the same sentence appearing across many different posts
+          const sentPosts=new Map();
+          posts.forEach((p,idx)=>{
+            for(const s of new Set(sentences(p.text))){
+              const key=normalizeForShingles(s);
+              if(key.length<14) continue;
+              if(!sentPosts.has(key)) sentPosts.set(key,{sample:s,posts:new Set()});
+              sentPosts.get(key).posts.add(idx);
+            }
+          });
+          const boiler=[...sentPosts.values()].filter((v)=>v.posts.size>=3)
+            .map((v)=>({inPosts:v.posts.size,sample:v.sample.slice(0,140)}))
+            .sort((a,b)=>b.inPosts-a.inPosts);
+          console.log('REPEATED_SENTENCES',JSON.stringify({distinct:boiler.length,top:boiler.slice(0,25)}));
+
+          // ---- 6. title templates
+          const titleHeads={};
+          const titleTails={};
+          for(const p of posts){
+            const t=p.title.trim();
+            const head=t.split(/[\s:·\-–—|]+/).slice(0,2).join(' ');
+            const tail=t.split(/[\s:·\-–—|]+/).slice(-2).join(' ');
+            if(head) titleHeads[head]=(titleHeads[head]||0)+1;
+            if(tail) titleTails[tail]=(titleTails[tail]||0)+1;
+          }
+          const topOf=(o)=>Object.entries(o).filter(([,n])=>n>1).sort((a,b)=>b[1]-a[1]).slice(0,15);
+          console.log('TITLE_PATTERNS',JSON.stringify({repeatedHeads:topOf(titleHeads),repeatedTails:topOf(titleTails)}));
+
+          // ---- 7. labels
+          const labelCounts={};
+          for(const p of posts) for(const l of p.labels) labelCounts[l]=(labelCounts[l]||0)+1;
+          console.log('LABELS',JSON.stringify(Object.entries(labelCounts).sort((a,b)=>b[1]-a[1])));
+
+          // ---- 8. the pages AdSense explicitly looks for
+          let pages=[];
+          try{
+            const pf=await getJson(`${origin}/feeds/pages/default?alt=json&max-results=50`);
+            pages=(Array.isArray(pf.feed?.entry)?pf.feed.entry:[]).map((e)=>({
+              title:stripHtml(e.title?.$t||''),
+              url:String((Array.isArray(e.link)?e.link:[]).find((l)=>l.rel==='alternate')?.href||''),
+              chars:stripHtml(e.content?.$t||'').length
+            }));
+          }catch(e){ console.log('PAGES_FEED_FAILED',String(e.message||e)); }
+          const pageText=pages.map((p)=>p.title).join(' | ');
+          console.log('STATIC_PAGES',JSON.stringify({count:pages.length,pages}));
+          console.log('POLICY_PAGE_PRESENCE',JSON.stringify({
+            privacy:/privacy|개인정보/i.test(pageText),
+            about:/about|소개|누구/i.test(pageText),
+            contact:/contact|문의|연락/i.test(pageText),
+            terms:/terms|이용약관|약관/i.test(pageText)
+          }));
+
+          // ---- 9. site-level files and the homepage shell
+          for(const path of ['/robots.txt','/ads.txt']){
+            const r=await getText(origin+path);
+            console.log('SITE_FILE',path,r.status,JSON.stringify(r.text.slice(0,300)));
+          }
+          const home=await getText(origin+'/');
+          console.log('HOMEPAGE',JSON.stringify({
+            status:home.status,
+            bytes:home.text.length,
+            hasDescriptionMeta:/<meta[^>]+name=["']description["']/i.test(home.text),
+            title:(home.text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]?.trim().slice(0,120)||null,
+            navLinkCount:(home.text.match(/<a\b[^>]*class=["'][^"']*(?:nav|menu)[^"']*["']/gi)||[]).length,
+            postsOnHomepage:(home.text.match(/class=["'][^"']*post-outer[^"']*["']/gi)||[]).length
+          }));
+
+          // ---- 10. every post, one line each, shortest first
+          for(const p of [...posts].sort((a,b)=>a.chars-b.chars)){
+            console.log('POST',JSON.stringify({
+              published:p.published,lang:p.lang,chars:p.chars,words:p.words,
+              h2:p.h2,h3:p.h3,img:p.img,table:p.table,list:p.list,
+              inLinks:p.internalLinks,exLinks:p.externalLinks,exHosts:p.externalHosts.slice(0,4),
+              labels:p.labels,title:p.title.slice(0,70),url:p.url
+            }));
+          }
+          NODE
