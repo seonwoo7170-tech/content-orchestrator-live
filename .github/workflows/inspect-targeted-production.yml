@@ -19,62 +19,41 @@ jobs:
         with:
           ref: ops/live-runtime-snapshot-20260923
           fetch-depth: 0
-      - name: Extract selected live source sections
+      - name: Extract remaining live source sections
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
-          import re, shutil
-
-          root=Path('.live-snapshot')
-          out=root/'extracted'
-          if out.exists(): shutil.rmtree(out)
-          out.mkdir(parents=True,exist_ok=True)
-
-          bundles={
-            'orchestrator': root/'modules/content-orchestrator/mcp-entry.js',
-            'hub': root/'modules/api-hub-v2/index.js',
+          import re
+          root=Path('.live-snapshot'); out=root/'extracted'; out.mkdir(parents=True,exist_ok=True)
+          specs={
+            'orchestrator': (root/'modules/content-orchestrator/mcp-entry.js', {
+              'worker/lib/expansion-acceptance.js',
+              'worker/lib/internal-links.js',
+              'worker/lib/publisher.js',
+              'worker/lib/job-runner.js',
+            }),
+            'hub': (root/'modules/api-hub-v2/index.js', {
+              'src/lib/master-v45-role-prompts.js',
+              'src/lib/ai-routes.js',
+              'src/lib/article-length.js',
+              'src/lib/blogger-posts.js',
+              'src/lib/write-policy.js',
+            }),
           }
-          wanted={
-            'orchestrator': {
-              'worker/lib/targeted-repair-guard.js',
-              'worker/lib/pipeline.js',
-              'worker/lib/deterministic-quality-gate.js',
-              'worker/lib/internal-link-injector.js',
-              'worker/lib/auto-publisher.js',
-              'worker/lib/state-machine.js',
-              'worker/lib/stored-job-executor.js',
-            },
-            'hub': {
-              'api-hub-v2/src/lib/master-v45-role-prompts.js',
-              'api-hub-v2/src/lib/ai-routes.js',
-            },
-          }
-          term_re=re.compile(r'(TARGETED_REPAIR|TARGET_NOT_FOUND|Related Articles|\[DATE\]|body.{0,20}(?:floor|length)|(?:floor|minimum|minBody).{0,30}(?:8000|body)|8000)',re.I)
-
-          for kind,path in bundles.items():
+          for kind,(path,wanted) in specs.items():
             text=path.read_text('utf-8',errors='replace')
-            markers=[]
-            for m in re.finditer(r'^// ([^\n]+\.js)\s*$',text,re.M):
-              markers.append((m.start(),m.end(),m.group(1).strip()))
-            (out/f'{kind}-module-index.txt').write_text('\n'.join(name for _,_,name in markers)+'\n',encoding='utf-8')
-            for idx,(start,end,name) in enumerate(markers):
-              if name not in wanted[kind]: continue
+            markers=[(m.start(),m.group(1).strip()) for m in re.finditer(r'^// ([^\n]+\.js)\s*$',text,re.M)]
+            for idx,(start,name) in enumerate(markers):
+              if name not in wanted: continue
               finish=markers[idx+1][0] if idx+1<len(markers) else len(text)
               section=text[start:finish].rstrip()+'\n'
-              safe=name.replace('/','__')
-              (out/f'{kind}__{safe}').write_text(section,encoding='utf-8')
-            lines=text.splitlines()
-            hits=[]
-            for i,line in enumerate(lines):
-              if term_re.search(line):
-                lo=max(0,i-4); hi=min(len(lines),i+5)
-                hits.append(f'@@ {kind} line {i+1} @@\n'+'\n'.join(f'{j+1:06d}: {lines[j]}' for j in range(lo,hi)))
-            (out/f'{kind}-term-contexts.txt').write_text('\n\n'.join(hits)+'\n',encoding='utf-8')
-          print('EXTRACTED', *sorted(p.name for p in out.iterdir()), sep='\n')
+              target=out/f'{kind}__{name.replace("/","__")}'
+              target.write_text(section,encoding='utf-8')
+              print(target.name, len(section))
           PY
-      - name: Commit extracted live source to ops branch
+      - name: Commit extraction to snapshot branch
         shell: bash
         run: |
           set -euo pipefail
@@ -82,5 +61,5 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .live-snapshot/extracted
           if git diff --cached --quiet; then echo 'EXTRACTION_UNCHANGED'; exit 0; fi
-          git commit -m 'ops: extract live Sep 23 source sections'
+          git commit -m 'ops: extract remaining live Sep 23 modules'
           git push origin HEAD:ops/live-runtime-snapshot-20260923
