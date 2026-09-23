@@ -8,46 +8,214 @@ on:
       - '.github/workflows/inspect-targeted-production.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ops/live-runtime-snapshot-20260923
-          fetch-depth: 0
-      - name: Locate publication-date substitution
+
+      - name: Patch current deployed bundles in place
         shell: bash
         run: |
           set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          mkdir -p /tmp/live-patch
+
+          fetch_worker() {
+            local worker="$1"
+            curl --fail-with-body --silent --show-error \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -D "/tmp/live-patch/${worker}.headers" \
+              -o "/tmp/live-patch/${worker}.before" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${worker}/content/v2"
+          }
+
+          fetch_worker api-hub-v2
+          fetch_worker content-orchestrator
+
           python - <<'PY'
           from pathlib import Path
-          import re
-          root=Path('.live-snapshot')
-          path=root/'modules/content-orchestrator/mcp-entry.js'
-          text=path.read_text('utf-8',errors='replace')
-          lines=text.splitlines()
-          matches=[]
-          for needle in ['function applyPublicationDate', 'applyPublicationDate =', 'Published:', 'Last updated:', '게시일:', '작성일:']:
-              for i,line in enumerate(lines):
-                  if needle in line:
-                      lo=max(0,i-30); hi=min(len(lines),i+80)
-                      matches.append(f'=== {needle} @ {i+1} ===\n'+'\n'.join(f'{j+1:06d}: {lines[j]}' for j in range(lo,hi)))
-          report='\n\n'.join(matches)+'\n'
-          target=root/'extracted/publication-date-context.txt'
-          target.write_text(report,encoding='utf-8')
-          print(report[:40000])
+
+          root=Path('/tmp/live-patch')
+
+          def load(name):
+              return (root/f'{name}.before').read_bytes().decode('utf-8', errors='surrogateescape')
+          def save(name,text):
+              (root/f'{name}.after').write_bytes(text.encode('utf-8', errors='surrogateescape'))
+          def replace_one(text, old, new, label):
+              count=text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly 1 match, got {count}')
+              return text.replace(old,new,1)
+
+          # -------- API Hub: prevent critic/repair conflict with internal navigation,
+          # validate locators before emitting them, and tighten writer-original source quality.
+          hub=load('api-hub-v2')
+          writer_marker='When seoBrief is supplied, use it as planning and search-intent context:'
+          writer_insert='''SOURCE QUALITY BOUNDARY \\u2014 for general technical standards, safety guidance, typical savings, costs, rebates, eligibility or performance benchmarks, prefer supplied primary/official/standards-body evidence whenever available. A contractor, installer, retailer, affiliate, lead-generation or vendor marketing page may support a fact specifically about that business or product, but must not be used as the evidence for a general industry benchmark or universal recommendation. Same-site internal-navigation links are not evidence sources and must not be put into Article.sources merely to satisfy a source requirement.\n'''
+          hub=replace_one(hub, writer_marker, writer_insert+writer_marker, 'writer source-quality marker')
+
+          critic_marker='LOCATION CONTRACT \\u2014 every issue.location must be machine-targetable.'
+          critic_insert='''SAME-SITE INTERNAL NAVIGATION IS NOT AN EVIDENCE SOURCE \\u2014 HTML marked with data-smileseon-internal-links="1" is a Related guides/internal-navigation block. Do not emit a source-authority, source-verification, citation-quality or replace/remove-source issue solely because one of those links points to the current site. Internal navigation may still be flagged when the URL is actually broken, unsafe, duplicated, misleading or topically irrelevant.\n\nLOCATOR VALIDATION \\u2014 never fabricate an HTML locator. Before returning an html p|h2|h3|li|blockquote N location, enumerate the supported blocks in the current supplied Article in the one shared document-order sequence, confirm N exists, and confirm the tag at N exactly matches the emitted tag. Recount on every critic pass; never reuse an index from a prior article version.\n\nWRITER-ORIGINAL SOURCE QUALITY \\u2014 audit Article.sources and the factual claims they support even when they came from the original writer rather than a repair. Contractor, installer, retailer, affiliate, lead-generation or vendor marketing pages are not adequate evidence for general technical standards, typical savings, costs, safety thresholds, rebates or universal recommendations unless the claim is specifically about that vendor/product. Prefer primary official agencies, standards bodies or original research when the supplied Article/research makes that support available.\n\n'''
+          hub=replace_one(hub, critic_marker, critic_insert+critic_marker, 'critic locator marker')
+
+          repair_marker='This is Google Blogger / Blogspot: Article.title is rendered outside Article.html'
+          repair_insert='''INTERNAL NAVIGATION SAFETY \\u2014 HTML marked with data-smileseon-internal-links="1" is internal navigation, not an evidence source. Never delete or replace that navigation block merely because a critic describes the same-site link as an unverified, weak or non-authoritative source. Preserve it and apply other valid repair issues normally. Actual broken, unsafe, duplicated, misleading or irrelevant internal-link defects may still be repaired when precisely targeted.\nSTALE LOCATOR SAFETY \\u2014 if a critic locator does not exist in the supplied current Article, do not guess a nearby block and do not broaden the edit. Leave that nonexistent target untouched while applying other valid targets.\n'''
+          hub=replace_one(hub, repair_marker, repair_insert+repair_marker, 'repair safety marker')
+
+          for required in [
+              'SAME-SITE INTERNAL NAVIGATION IS NOT AN EVIDENCE SOURCE',
+              'LOCATOR VALIDATION',
+              'WRITER-ORIGINAL SOURCE QUALITY',
+              'INTERNAL NAVIGATION SAFETY',
+              'STALE LOCATOR SAFETY',
+              'PUBLICATION DATE PLACEHOLDER'
+          ]:
+              if required not in hub:
+                  raise SystemExit(f'API Hub missing required marker after patch: {required}')
+          save('api-hub-v2',hub)
+
+          # -------- Orchestrator: retain the already-deployed append-only expansion guard,
+          # ignore only stale locators, protect marked internal navigation from source-authority repairs,
+          # and content-detect date placeholders outside server-managed publication metadata.
+          orch=load('content-orchestrator')
+          helper_anchor='var EXACT_HTML_LOCATION_RE = /html\\s+(p|h2|h3|li|blockquote)\\s+(\\d+)/gi;\n'
+          helper_code='''var SMILESEON_INTERNAL_LINK_MARKER_RE = /data-smileseon-internal-links\\s*=\\s*["']1["']/i;\nvar SMILESEON_SOURCE_AUTHORITY_RE = /\\b(?:source|sources|citation|citations|reference|references|authority|authoritative|verified|credible|trusted|evidence)\\b|출처|인용|근거|검증|신뢰/i;\nvar SMILESEON_SOURCE_REPAIR_RE = /\\b(?:remove|replace|delete|drop|swap|use|cite|citation|source)\\b|제거|교체|삭제|대체|출처|인용/i;\nvar SMILESEON_INTERNAL_LINK_DEFECT_RE = /\\b(?:broken|dead|404|unsafe|javascript|duplicate|duplicated|irrelevant|unrelated|misleading|incorrect|wrong|malformed|redirect\\s*loop|not\\s*found)\\b|깨진|끊긴|404|위험|중복|관련\\s*없|무관|오해|잘못된|틀린|유효하지\\s*않|찾을\\s*수\\s*없/i;\nfunction smileseonRepairIssueText(issue3) {\n  return [issue3?.code, issue3?.location, issue3?.reason, issue3?.message, issue3?.repairInstruction].map((value) => String(value || "")).join(" ");\n}\nfunction smileseonIsSourceAuthorityRepairIssue(issue3) {\n  const value = smileseonRepairIssueText(issue3);\n  if (SMILESEON_INTERNAL_LINK_DEFECT_RE.test(value)) return false;\n  return SMILESEON_SOURCE_AUTHORITY_RE.test(value) && SMILESEON_SOURCE_REPAIR_RE.test(value);\n}\nfunction smileseonProtectedInternalNavIndexes(parts, issues = []) {\n  const protectedIndexes = new Set();\n  for (const issue3 of Array.isArray(issues) ? issues : []) {\n    if (!smileseonIsSourceAuthorityRepairIssue(issue3)) continue;\n    const issueScope = targetedRepairScope([issue3]);\n    const { resolved } = resolveHtmlTargets(issueScope.htmlTargets, parts.blocks);\n    for (const index of resolved) {\n      const block = parts.blocks[index - 1];\n      if (block && SMILESEON_INTERNAL_LINK_MARKER_RE.test(block.raw)) protectedIndexes.add(index);\n    }\n  }\n  return protectedIndexes;\n}\n'''
+          orch=replace_one(orch, helper_anchor, helper_anchor+helper_code, 'orchestrator helper anchor')
+
+          old_constrain='''  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);\n  if (unresolved.length > 0) throw repairGuardError("TARGETED_REPAIR_TARGET_NOT_FOUND", { target: unresolved[0] });\n'''
+          new_constrain='''  const { resolved: htmlTargets } = resolveHtmlTargets(scope.htmlTargets, original.blocks);\n  for (const protectedIndex of smileseonProtectedInternalNavIndexes(original, issues)) htmlTargets.delete(protectedIndex);\n  if (htmlTargets.size === 0) return constrained;\n'''
+          orch=replace_one(orch, old_constrain, new_constrain, 'constrain stale-target poison')
+
+          old_assert='''  const { resolved: htmlTargets, unresolved } = resolveHtmlTargets(scope.htmlTargets, original.blocks);\n  if (original.blocks.length !== repaired.blocks.length) {\n    const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);\n    if (insertions && unresolved.length === 0) {\n      return true;\n    }\n'''
+          new_assert='''  const { resolved: htmlTargets } = resolveHtmlTargets(scope.htmlTargets, original.blocks);\n  for (const protectedIndex of smileseonProtectedInternalNavIndexes(original, issues)) htmlTargets.delete(protectedIndex);\n  if (htmlTargets.size === 0) throw repairGuardError("TARGETED_REPAIR_CHANGED_HTML_WITHOUT_RESOLVABLE_TARGET");\n  if (original.blocks.length !== repaired.blocks.length) {\n    const insertions = appendOnlyInsertions(original.blocks, repaired.blocks);\n    if (insertions) {\n      return true;\n    }\n'''
+          orch=replace_one(orch, old_assert, new_assert, 'assert stale-target expansion poison')
+
+          old_final='''  if (unresolved.length > 0) {\n    throw repairGuardError("TARGETED_REPAIR_TARGET_NOT_FOUND", { target: unresolved[0] });\n  }\n  return true;\n'''
+          orch=replace_one(orch, old_final, '  return true;\n', 'final stale-target throw')
+
+          date_anchor='function text(value) {\n'
+          date_helpers='''var SMILESEON_DATE_PLACEHOLDER_RE = /(?:\\[(?:current[_\\s-]*)?date\\]|\\{\\{\\s*(?:current[_\\s-]*)?date\\s*\\}\\})/i;\nvar SMILESEON_PUBLICATION_DATE_SLOT_RE = /(?:Published|게시일|작성일|Last\\s+updated|Updated|Reviewed|최종\\s*수정)\\s*:\\s*\\[DATE\\]/gi;\nfunction smileseonDatePlaceholderResidue(value) {\n  const source = String(value || "");\n  const withoutServerSlots = source.replace(SMILESEON_PUBLICATION_DATE_SLOT_RE, "");\n  return SMILESEON_DATE_PLACEHOLDER_RE.test(withoutServerSlots);\n}\n'''
+          orch=replace_one(orch, date_anchor, date_helpers+date_anchor, 'date helper anchor')
+
+          qa_anchor='''  for (const rule of BLOCK_PATTERNS) {\n    if (rule.pattern.test(combined)) issues.push(issue2(rule.code, "block", rule.message, "content"));\n  }\n  for (const rule of WARN_PATTERNS) {\n'''
+          qa_new='''  for (const rule of BLOCK_PATTERNS) {\n    if (rule.pattern.test(combined)) issues.push(issue2(rule.code, "block", rule.message, "content"));\n  }\n  if (smileseonDatePlaceholderResidue(combined)) {\n    issues.push(issue2("PLACEHOLDER_DATE_TOKEN", "block", "Unresolved date placeholder remains outside server-managed publication metadata.", "content"));\n  }\n  for (const rule of WARN_PATTERNS) {\n'''
+          orch=replace_one(orch, qa_anchor, qa_new, 'deterministic date residue check')
+
+          if 'TARGETED_REPAIR_INSERTION_REJECTED' not in orch:
+              raise SystemExit('Expansion guard marker disappeared')
+          if 'acceptInsertions(before.html, insertions' not in orch:
+              raise SystemExit('Expansion acceptance path disappeared')
+          if 'smileseonProtectedInternalNavIndexes' not in orch:
+              raise SystemExit('Internal navigation protection missing')
+          if 'PLACEHOLDER_DATE_TOKEN' not in orch:
+              raise SystemExit('Date content guard missing')
+          if 'Related Articles' not in orch:
+              raise SystemExit('Related Articles publish path disappeared')
+          if '8000' not in orch:
+              raise SystemExit('Length-floor logic disappeared')
+          save('content-orchestrator',orch)
+          print('PATCH_STATIC_CHECKS_OK')
           PY
-      - name: Commit context to snapshot branch
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .live-snapshot/extracted/publication-date-context.txt
-          if git diff --cached --quiet; then echo 'CONTEXT_UNCHANGED'; exit 0; fi
-          git commit -m 'ops: locate live publication date substitution'
-          git push origin HEAD:ops/live-runtime-snapshot-20260923
+
+          content_type() {
+            python - "$1" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding='utf-8',errors='replace').read()
+          vals=re.findall(r'^content-type:\s*(.+)$',text,flags=re.I|re.M)
+          if not vals: raise SystemExit('content-type header missing')
+          print(vals[-1].strip())
+          PY
+          }
+
+          put_worker() {
+            local worker="$1"
+            local file="$2"
+            local ctype
+            ctype="$(content_type "/tmp/live-patch/${worker}.headers")"
+            echo "Updating ${worker} content only"
+            curl --fail-with-body --silent --show-error -X PUT \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: ${ctype}" \
+              --data-binary "@${file}" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${worker}/content" \
+              > "/tmp/live-patch/${worker}.put.json"
+          }
+
+          rollback_worker() {
+            local worker="$1"
+            local ctype
+            ctype="$(content_type "/tmp/live-patch/${worker}.headers")"
+            echo "ROLLBACK ${worker}"
+            curl --fail-with-body --silent --show-error -X PUT \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: ${ctype}" \
+              --data-binary "@/tmp/live-patch/${worker}.before" \
+              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${worker}/content" \
+              >/dev/null
+          }
+
+          hub_done=0
+          orch_done=0
+          rollback_on_error() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              set +e
+              if [ "$orch_done" -eq 1 ]; then rollback_worker content-orchestrator; fi
+              if [ "$hub_done" -eq 1 ]; then rollback_worker api-hub-v2; fi
+            fi
+            exit "$status"
+          }
+          trap rollback_on_error ERR
+
+          # Prompt layer first; if the guard layer fails, both are rolled back.
+          put_worker api-hub-v2 /tmp/live-patch/api-hub-v2.after
+          hub_done=1
+          put_worker content-orchestrator /tmp/live-patch/content-orchestrator.after
+          orch_done=1
+
+          # Read back the active content and verify the exact hardening markers plus existing live features.
+          fetch_worker api-hub-v2
+          mv /tmp/live-patch/api-hub-v2.before /tmp/live-patch/api-hub-v2.readback
+          fetch_worker content-orchestrator
+          mv /tmp/live-patch/content-orchestrator.before /tmp/live-patch/content-orchestrator.readback
+
+          python - <<'PY'
+          from pathlib import Path
+          root=Path('/tmp/live-patch')
+          hub=(root/'api-hub-v2.readback').read_bytes().decode('utf-8',errors='ignore')
+          orch=(root/'content-orchestrator.readback').read_bytes().decode('utf-8',errors='ignore')
+          hub_markers=[
+            'SAME-SITE INTERNAL NAVIGATION IS NOT AN EVIDENCE SOURCE',
+            'LOCATOR VALIDATION',
+            'WRITER-ORIGINAL SOURCE QUALITY',
+            'INTERNAL NAVIGATION SAFETY',
+            'STALE LOCATOR SAFETY',
+            'PUBLICATION DATE PLACEHOLDER'
+          ]
+          orch_markers=[
+            'smileseonProtectedInternalNavIndexes',
+            'TARGETED_REPAIR_INSERTION_REJECTED',
+            'PLACEHOLDER_DATE_TOKEN',
+            'Related Articles'
+          ]
+          missing=[m for m in hub_markers if m not in hub]+[m for m in orch_markers if m not in orch]
+          if missing: raise SystemExit('READBACK_MISSING: '+', '.join(missing))
+          poison='if (unresolved.length > 0) throw repairGuardError("TARGETED_REPAIR_TARGET_NOT_FOUND"'
+          if poison in orch: raise SystemExit('STALE_TARGET_POISON_STILL_PRESENT')
+          print('LIVE_READBACK_OK')
+          print('EXPANSION_GUARD_COUNT',orch.count('TARGETED_REPAIR_INSERTION_REJECTED'))
+          print('INTERNAL_LINK_MARKER_COUNT',orch.count('data-smileseon-internal-links'))
+          print('DATE_GUARD_COUNT',orch.count('PLACEHOLDER_DATE_TOKEN'))
+          PY
+
+          trap - ERR
+          echo 'LIVE_PATCH_DEPLOYED_OK'
