@@ -2046,3 +2046,26 @@ jobs:
             updated:job.updated_at
           }));
           NODE
+
+      - name: Run the verification article directly, since it has no daily-plan slot
+        if: always()
+        shell: bash
+        env:
+          VERIFY_JOB_ID: '251'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          const jobId=String(process.env.VERIFY_JOB_ID||'').trim();
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          if(!jobId){ console.log('NO_VERIFY_JOB_ID'); process.exit(0); }
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          const read=await fetch(`${base}/api/jobs/${jobId}`,{headers,cache:'no-store'});
+          const job=read.ok?((await read.json()).job||{}):{};
+          console.log('BEFORE',JSON.stringify({status:job.status,updated:job.updated_at}));
+          // runScheduledAutomaticWork iterates daily-plan slots, so a job created straight through
+          // /api/jobs/new is never selected -- it sat queued because nothing was looking for it.
+          if(String(job.status||'')!=='queued'){ console.log('NOT_QUEUED_SKIPPING'); process.exit(0); }
+          const r=await fetch(`${base}/api/jobs/${jobId}/run`,{method:'POST',headers});
+          console.log('RUN',r.status,JSON.stringify(await r.json().catch(()=>({}))));
+          NODE
