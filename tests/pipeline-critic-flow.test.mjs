@@ -205,10 +205,9 @@ test('new article pipeline threads the critic\'s actual provider (e.g. free-ai v
   assert.equal(rounds[1].meta.criticProvider, 'free-ai');
 });
 
-test('new article pipeline regenerates instead of patching when critic finds multiple core information gaps', async () => {
+test('core information gaps no longer trigger a rewrite; the article finishes and keeps them as advice', async () => {
   const calls = [];
   const first = article('<p>Generic answer.</p><p>More generic advice.</p>');
-  const second = article('<p>Concrete decision criteria and actionable detail.</p>');
 
   const result = await runNewArticlePipeline(
     env,
@@ -222,27 +221,27 @@ test('new article pipeline regenerates instead of patching when critic finds mul
           coreIssue('html p 1', 'Repair-versus-replace criteria are missing.'),
           coreIssue('html p 2', 'Stop conditions and failure signals are missing.')
         ]
-      },
-      { article: second },
-      { status: 'PASS', score: 98, issues: [] }
+      }
     ], calls)
   );
 
+  // Replanning made articles worse -- job 154 came back from one 1,604 words shorter -- and a
+  // second candidate is a second full set of paid calls for a verdict the critic will repeat.
   assert.equal(result.status, 'READY');
-  assert.equal(result.candidateRegenerated, true);
-  assert.equal(result.candidateAttempt, 2);
-  assert.equal(result.candidateHistory[0].reviewReason, 'MASTER_REPLAN_REQUIRED');
-  assert.equal(calls.filter((call) => call.path === '/api/hub/ai/repair').length, 0);
+  assert.notEqual(result.candidateRegenerated, true);
   assert.deepEqual(calls.map((call) => call.path), [
-    '/api/hub/ai/writer',
-    '/api/hub/ai/critic',
     '/api/hub/ai/writer',
     '/api/hub/ai/critic'
   ]);
-  assert.match(calls[2].body.retryReason, /MASTER_REPLAN_REQUIRED/);
+  // What the critic found is not thrown away; it rides along with the finished article.
+  assert.equal(result.advisoryReview.haltedOn, 'MASTER_REPLAN_REQUIRED');
+  assert.equal(result.advisoryReview.criticStatus, 'FAIL');
+  assert.equal(result.advisoryReview.issues.length, 2);
+  // A READY result carries no reviewReason at all -- there is nothing left for a person to do.
+  assert.equal('reviewReason' in result, false);
 });
 
-test('new article pipeline retries the currently flagged location before NEEDS_REVIEW', async () => {
+test('the flagged location is repaired, then the article finishes with the verdict attached', async () => {
   const calls = [];
   const original = article('<p>Problem.</p>');
   const repairedOnce = article('<p>Still problematic.</p>');
@@ -267,10 +266,12 @@ test('new article pipeline retries the currently flagged location before NEEDS_R
     ], calls)
   );
 
-  assert.equal(result.status, 'NEEDS_REVIEW');
-  assert.equal(result.reviewReason, 'CRITIC_FAILED_AFTER_MAX_TARGETED_REPAIRS');
+  // Repair still runs its full budget; what changed is where an unsatisfied critic lands.
+  assert.equal(result.status, 'READY');
   assert.equal(result.repairAttempts, 2);
   assert.equal(result.finalCritic.status, 'FAIL');
+  assert.equal(result.advisoryReview.haltedOn, 'CRITIC_FAILED_AFTER_MAX_TARGETED_REPAIRS');
+  assert.equal(result.advisoryReview.criticScore, 92);
   assert.deepEqual(calls.map((call) => call.path), [
     '/api/hub/ai/writer',
     '/api/hub/ai/critic',
@@ -281,12 +282,11 @@ test('new article pipeline retries the currently flagged location before NEEDS_R
   ]);
 });
 
-test('new article pipeline regenerates one fresh candidate only after targeted repairs are exhausted', async () => {
+test('a second candidate is not written once targeted repairs are exhausted', async () => {
   const calls = [];
   const first = article('<p>First candidate problem.</p>');
   const firstRepair = article('<p>First candidate still weak.</p>');
   const secondRepair = article('<p>First candidate still failing.</p>');
-  const second = article('<p>Fresh candidate is concise and useful.</p>');
   const limitedEnv = { ...env, TARGETED_REPAIR_MAX_ATTEMPTS: '2' };
 
   const result = await runNewArticlePipeline(
@@ -298,17 +298,36 @@ test('new article pipeline regenerates one fresh candidate only after targeted r
       { article: firstRepair },
       { status: 'FAIL', score: 89, issues: [issue()] },
       { article: secondRepair },
-      { status: 'FAIL', score: 90, issues: [issue()] },
-      { article: second },
-      { status: 'PASS', score: 98, issues: [] }
+      { status: 'FAIL', score: 90, issues: [issue()] }
     ], calls)
   );
 
   assert.equal(result.status, 'READY');
-  assert.equal(result.candidateRegenerated, true);
-  assert.equal(result.candidateAttempt, 2);
-  assert.equal(result.candidateHistory.length, 2);
-  assert.equal(calls.filter((call) => call.path === '/api/hub/ai/writer').length, 2);
-  assert.equal(calls[6].body.candidateAttempt, 2);
-  assert.equal(calls[6].body.retryReason, 'CRITIC_FAILED_AFTER_MAX_TARGETED_REPAIRS');
+  assert.equal(calls.filter((call) => call.path === '/api/hub/ai/writer').length, 1);
+  assert.equal(result.advisoryReview.criticScore, 90);
+});
+
+// The safety property of the inversion: the critic advises, but the deterministic gate still
+// has an absolute veto over anything code can actually verify.
+test('a deterministic block still stops the article from reaching READY', async () => {
+  const calls = [];
+  const withPlaceholder = article('<p>Cost is [insert price here] per unit.</p>');
+  const limitedEnv = { ...env, TARGETED_REPAIR_MAX_ATTEMPTS: '2', NEW_ARTICLE_MAX_CANDIDATES: '1' };
+
+  const result = await runNewArticlePipeline(
+    limitedEnv,
+    { blogId: '11', topic: 'test topic', language: 'en' },
+    makeFetch([
+      { article: withPlaceholder },
+      { status: 'FAIL', score: 90, issues: [issue()] },
+      { article: withPlaceholder },
+      { status: 'FAIL', score: 90, issues: [issue()] },
+      { article: withPlaceholder },
+      { status: 'FAIL', score: 90, issues: [issue()] }
+    ], calls)
+  );
+
+  assert.equal(result.status, 'NEEDS_REVIEW');
+  assert.equal(result.reviewReason, 'DETERMINISTIC_QA_BLOCKED');
+  assert.equal(result.deterministicQa.status, 'BLOCK');
 });

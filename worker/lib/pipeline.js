@@ -3,6 +3,7 @@ import { callHub } from './api-hub.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { assertTargetedRepairPreserved, constrainTargetedRepair } from './targeted-repair-guard.js';
 import { liftBlocksOutOfParagraphs, stripWriterOwnedImages } from './article-image-sanitizer.js';
+import { deterministicQaAllowsPublish, runDeterministicQualityGate } from './deterministic-quality-gate.js';
 
 const DEFAULT_MAX_TARGETED_REPAIRS = 2;
 const DEFAULT_MAX_NEW_ARTICLE_CANDIDATES = 2;
@@ -164,6 +165,39 @@ async function criticCheck(env, article, fetchImpl, hooks, context, criticCheckC
   ));
 }
 
+// The critic decided whether an article could be published, and a model told to "actively look
+// for concrete violations" and "return all concrete issues you can support" always finds one.
+// PASS additionally demanded a score of 95 with zero issues. Nothing in that loop had a reason
+// to converge, and it did not: roughly half of all articles never reached PASS, each spending
+// four continuations and dozens of paid calls before being held for a person who then published
+// them anyway. A queue that produces drafts for a human to force through is not automation.
+//
+// The deterministic gate decides now. It checks what code can actually verify -- contract
+// fields, leftover placeholders and citation stubs, executable URLs, script tags, unsafe markup
+// -- and only those block publication. The critic still runs and repair still improves what it
+// can, but the verdict ends up as advice attached to the finished article rather than a gate
+// nobody can pass.
+function resolveAfterAdvisoryReview(outcome) {
+  const deterministicQa = runDeterministicQualityGate(outcome.article);
+  if (!deterministicQaAllowsPublish(deterministicQa)) {
+    return { ...outcome, status: 'FAIL', deterministicQa, reviewReason: 'DETERMINISTIC_QA_BLOCKED' };
+  }
+  const critic = outcome.finalCritic || null;
+  return {
+    ...outcome,
+    status: 'PASS',
+    deterministicQa,
+    advisoryReview: {
+      haltedOn: outcome.reviewReason ?? null,
+      criticStatus: critic?.status ?? null,
+      criticScore: critic?.score ?? critic?.totalScore ?? null,
+      issues: Array.isArray(critic?.issues) ? critic.issues : [],
+      styleLint: outcome.styleLint ?? null
+    },
+    reviewReason: null
+  };
+}
+
 async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
   const maxRepairs = maxTargetedRepairs(env);
   const repairStrategy = context.repairStrategy || TARGETED_REPAIR;
@@ -208,7 +242,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
         };
       }
       if (context.structuralReplanOnCritic === true && structuralReplanRequired(critic)) {
-        return {
+        return resolveAfterAdvisoryReview({
           status: 'FAIL',
           article,
           initialCritic,
@@ -220,7 +254,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
           repairGuardViolations,
           styleLint: styleLintSummary(initialLint, lintHistory),
           reviewReason: 'MASTER_REPLAN_REQUIRED'
-        };
+        });
       }
       issueSource = 'critic';
       issues = critic.issues;
@@ -234,7 +268,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
     }
 
     if (repairAttempts >= maxRepairs) {
-      return {
+      return resolveAfterAdvisoryReview({
         status: 'FAIL',
         article,
         initialCritic,
@@ -248,14 +282,14 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
         reviewReason: issueSource === 'linter'
           ? 'NATURAL_WRITING_LINT_BLOCKED_AFTER_MAX_TARGETED_REPAIRS'
           : 'CRITIC_FAILED_AFTER_MAX_TARGETED_REPAIRS'
-      };
+      });
     }
 
     // Repair runs only on what it is structurally able to change. When nothing is left, spending
     // attempts is pure waste: every one of them would be rejected by the guard.
     const applicableIssues = repairableIssues(issues);
     if (applicableIssues.length === 0) {
-      return {
+      return resolveAfterAdvisoryReview({
         status: 'FAIL',
         article,
         initialCritic,
@@ -267,7 +301,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
         repairGuardViolations,
         styleLint: styleLintSummary(initialLint, lintHistory),
         reviewReason: 'STRUCTURAL_REPLAN_REQUIRED'
-      };
+      });
     }
 
     let repairSucceeded = false;
@@ -317,7 +351,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
           meta: error.meta ?? null
         });
         if (repairAttempts >= maxRepairs) {
-          return {
+          return resolveAfterAdvisoryReview({
             status: 'FAIL',
             article,
             initialCritic,
@@ -329,13 +363,13 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
             repairGuardViolations,
             styleLint: styleLintSummary(initialLint, lintHistory),
             reviewReason: 'TARGETED_REPAIR_SCOPE_VIOLATION'
-          };
+          });
         }
       }
     }
 
     if (!repairSucceeded) {
-      return {
+      return resolveAfterAdvisoryReview({
         status: 'FAIL',
         article,
         initialCritic,
@@ -347,7 +381,7 @@ async function qualityLoop(env, initialArticle, fetchImpl, hooks, context) {
         repairGuardViolations,
         styleLint: styleLintSummary(initialLint, lintHistory),
         reviewReason: 'TARGETED_REPAIR_EXHAUSTED'
-      };
+      });
     }
 
     currentLint = lintNaturalWriting(article);
@@ -370,6 +404,11 @@ function readyResult(evaluation, extra = {}) {
     repairStrategy: evaluation.repairStrategy,
     repairGuardViolations: evaluation.repairGuardViolations,
     styleLint: evaluation.styleLint,
+    // An article that ships with the critic still unsatisfied carries what it said. Dropping it
+    // here would make "published" and "published clean" look identical in the job record, and
+    // the point of the inversion is that the difference stays visible.
+    ...(evaluation.advisoryReview ? { advisoryReview: evaluation.advisoryReview } : {}),
+    ...(evaluation.deterministicQa ? { deterministicQa: evaluation.deterministicQa } : {}),
     ...extra
   };
 }
@@ -387,6 +426,7 @@ function reviewResult(evaluation, extra = {}) {
     repairGuardViolations: evaluation.repairGuardViolations,
     styleLint: evaluation.styleLint,
     reviewReason: evaluation.reviewReason || 'TARGETED_REPAIR_EXHAUSTED',
+    ...(evaluation.deterministicQa ? { deterministicQa: evaluation.deterministicQa } : {}),
     ...extra
   };
 }

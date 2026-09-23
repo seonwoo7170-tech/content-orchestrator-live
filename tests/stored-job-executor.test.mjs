@@ -35,30 +35,31 @@ test('stored job supports repeated Natural Writing targeted repairs before Criti
   assert.equal(out.result.repairAttempts,2);
 });
 
-test('stored new-article job regenerates after two targeted repairs are exhausted', async () => {
+// A stored job used to write a whole second article once repairs ran out, then critique that
+// too: eight paid calls to answer a verdict the critic had already given twice. It now finishes
+// on the first article and files the critic's remaining objections as advice.
+test('stored new-article job finishes on the first article instead of writing a second', async () => {
   const states=[];
   const issue={code:'READABILITY',severity:'MEDIUM',location:'html p 1',reason:'still weak',repairInstruction:'repair only html p 1'};
   const first={...article,html:'<p>Problem.</p>'};
   const repair1={...article,html:'<p>Problem one.</p>'};
   const repair2={...article,html:'<p>Problem two.</p>'};
-  const fresh={...article,html:'<p>Fresh concise answer.</p>'};
   const fetchImpl=router([
     {article:first},
     {status:'FAIL',score:86,issues:[issue]},
     {article:repair1},
     {status:'FAIL',score:88,issues:[issue]},
     {article:repair2},
-    {status:'FAIL',score:90,issues:[issue]},
-    {article:fresh},
-    {status:'PASS',score:98,issues:[]}
+    {status:'FAIL',score:90,issues:[issue]}
   ]);
   const out=await processStoredJob({API_HUB_BASE_URL:'https://hub',HUB_API_KEY:'k'}, {id:4,mode:'new_article',status:'queued',blog_id:'b',topic:'t',payload_json:'{"language":"ko"}'}, {fetchImpl,saveState:async(s)=>states.push(s)});
   assert.deepEqual(states,[
-    'writing','critic_review','repairing','final_critic','repairing','final_critic','writing','critic_review','ready'
+    'writing','critic_review','repairing','final_critic','repairing','final_critic','ready'
   ]);
   assert.equal(out.state,'ready');
-  assert.equal(out.result.candidateRegenerated,true);
-  assert.equal(out.result.candidateAttempt,2);
+  assert.notEqual(out.result.candidateRegenerated,true);
+  assert.equal(out.result.advisoryReview.criticStatus,'FAIL');
+  assert.equal(out.result.advisoryReview.criticScore,90);
 });
 
 test('existing post is fully rewritten then becomes ready for same-post update', async () => {
