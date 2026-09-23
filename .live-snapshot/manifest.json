@@ -1,0 +1,59 @@
+{
+  "capturedAt": "2026-09-23",
+  "workers": {
+    "content-orchestrator": {
+      "contentType": "multipart/form-data; boundary=c1ecfc2c84281c27ee74bfeeeee4a4039f442e2ae58d461a2add92621947",
+      "combinedSha256": "a9c1dfb71a3adfab959ba2f87837fa631b2e9145469150a17edee145e7bc2904",
+      "markers": {
+        "TARGETED_REPAIR_INSERTION_REJECTED": 1,
+        "TARGETED_REPAIR_CHANGED_HTML_STRUCTURE": 4,
+        "CHANGED_HTML_STRUCTURE": 4,
+        "TARGET_NOT_FOUND": 2,
+        "data-smileseon-internal-links": 3,
+        "PLACEHOLDER_DATE": 0,
+        "8000": 9,
+        "Related Articles": 1,
+        "[DATE]": 0
+      },
+      "files": [
+        {
+          "path": "modules/content-orchestrator/a5d4d0ae9bf0a18b666f06b1864089d3fe4057cc-yoga.wasm",
+          "size": 71736,
+          "sha256": "7ba9c9483c8c38a468e9aef4a95ed72fad8a43594be8e5123eb3bdb6479edf5b"
+        },
+        {
+          "path": "modules/content-orchestrator/dd4dd8881e2df4e64203b5c0ae65e1648ab55207-resvg.wasm",
+          "size": 2478606,
+          "sha256": "22bf6e9f9a100d972da0411a69c5ba504367fc1fa87b3b64e3f35e53926d2d70"
+        },
+        {
+          "path": "modules/content-orchestrator/mcp-entry.js",
+          "size": 1985201,
+          "sha256": "20e10b898b7ecc00a4daadaa98a432ada0aaafe3087b6dc1f576df47d5bdd19d"
+        }
+      ]
+    },
+    "api-hub-v2": {
+      "contentType": "multipart/form-data; boundary=6ab8444e9d2b0df7bc6272dcd50507f864605ae85eb16c1bd184e5954a44",
+      "combinedSha256": "16a185f767f3dfccd4ac7d3c8a9c3675ab446e7ee26ca6b02b3e692fead4dfb8",
+      "markers": {
+        "TARGETED_REPAIR_INSERTION_REJECTED": 0,
+        "TARGETED_REPAIR_CHANGED_HTML_STRUCTURE": 0,
+        "CHANGED_HTML_STRUCTURE": 0,
+        "TARGET_NOT_FOUND": 0,
+        "data-smileseon-internal-links": 0,
+        "PLACEHOLDER_DATE": 0,
+        "8000": 0,
+        "Related Articles": 0,
+        "[DATE]": 4
+      },
+      "files": [
+        {
+          "path": "modules/api-hub-v2/index.js",
+          "size": 297653,
+          "sha256": "16a185f767f3dfccd4ac7d3c8a9c3675ab446e7ee26ca6b02b3e692fead4dfb8"
+        }
+      ]
+    }
+  }
+}
