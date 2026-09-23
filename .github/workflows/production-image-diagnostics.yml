@@ -1673,3 +1673,70 @@ jobs:
             commentsEnabled:!/comments are (closed|disabled)/i.test(post.text) && /comment/i.test(post.text)
           }));
           NODE
+
+      - name: Compare each blog's recent pipeline output against its own older content (read-only)
+        if: always()
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          const UA={'user-agent':'Mozilla/5.0 (compatible; smileseon-content-audit/1.0)'};
+          async function getJson(url,headers=UA){
+            const r=await fetch(url,{headers,cache:'no-store',redirect:'follow'});
+            if(!r.ok) throw new Error('FETCH_FAILED:'+url+':'+r.status);
+            return r.json();
+          }
+          function strip(v){
+            return String(v||'').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi,' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi,' ')
+              .replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
+          }
+          function stats(v){
+            v=v.slice().sort((a,b)=>a-b);
+            if(!v.length) return null;
+            const at=(q)=>v[Math.min(v.length-1,Math.floor(v.length*q))];
+            return {n:v.length,min:v[0],median:at(0.5),max:v[v.length-1]};
+          }
+          const CUT='2026-08-01';
+          const blogsResp=await getJson(base+'/api/blogs',{'x-admin-api-key':admin});
+          for(const blog of (Array.isArray(blogsResp.blogs)?blogsResp.blogs:[])){
+            let origin; try{ origin=new URL(String(blog.url)).origin; }catch{ continue; }
+            const tag=String(blog.name||blog.blogId).replace(/\s+/g,'_');
+            const rows=[];
+            try{
+              let start=1,total=null;
+              for(let page=0;page<20;page+=1){
+                const feed=await getJson(`${origin}/feeds/posts/default?alt=json&max-results=150&start-index=${start}`);
+                const f=feed.feed||{};
+                if(total===null) total=Number(f['openSearch$totalResults']?.$t||0);
+                const entries=Array.isArray(f.entry)?f.entry:[];
+                if(!entries.length) break;
+                for(const e of entries){
+                  const html=String(e.content?.$t||'');
+                  const text=strip(html);
+                  const host=new URL(origin).hostname.replace(/^www\./,'');
+                  const links=[...html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["']/gi)].map((m)=>m[1]);
+                  rows.push({
+                    published:String(e.published?.$t||'').slice(0,10),
+                    chars:text.length,
+                    h2:(html.match(/<h2\b/gi)||[]).length,
+                    inLinks:links.filter((h)=>h.includes(host)).length
+                  });
+                }
+                start+=entries.length;
+                if(total && start>total) break;
+              }
+            }catch(e){ console.log('SPLIT_FEED_FAILED',tag,String(e.message||e)); continue; }
+            const recent=rows.filter((r)=>r.published>=CUT);
+            const older=rows.filter((r)=>r.published<CUT);
+            console.log('ERA_SPLIT',tag,JSON.stringify({
+              cutoff:CUT,
+              recentChars:stats(recent.map((r)=>r.chars)),
+              olderChars:stats(older.map((r)=>r.chars)),
+              recentH2:stats(recent.map((r)=>r.h2)),
+              olderH2:stats(older.map((r)=>r.h2)),
+              recentZeroInternalLinks:recent.filter((r)=>r.inLinks===0).length,
+              olderZeroInternalLinks:older.filter((r)=>r.inLinks===0).length
+            }));
+          }
+          NODE
