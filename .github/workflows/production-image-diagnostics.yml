@@ -2047,6 +2047,33 @@ jobs:
           }));
           NODE
 
+      - name: Read the verification article's job events to see where it stopped
+        if: always()
+        shell: bash
+        env:
+          VERIFY_JOB_ID: '251'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          const jobId=String(process.env.VERIFY_JOB_ID||'').trim();
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          if(!jobId){ console.log('NO_VERIFY_JOB_ID'); process.exit(0); }
+          const headers={'x-admin-api-key':admin};
+          const r=await fetch(`${base}/api/jobs/${jobId}/events?limit=40`,{headers,cache:'no-store'});
+          if(!r.ok){ console.log('EVENTS_READ_FAILED',r.status); process.exit(0); }
+          const body=await r.json().catch(()=>({}));
+          const events=Array.isArray(body.events)?body.events:[];
+          console.log('EVENT_COUNT',events.length);
+          for(const e of events.slice(-25)){
+            console.log('EVENT',JSON.stringify({
+              at:e.created_at||e.at||null,
+              stage:e.stage||e.event||null,
+              detail:String(JSON.stringify(e.detail ?? e.meta ?? e.payload ?? '')).slice(0,220)
+            }));
+          }
+          NODE
+
       - name: Run the verification article directly, since it has no daily-plan slot
         if: always()
         shell: bash
