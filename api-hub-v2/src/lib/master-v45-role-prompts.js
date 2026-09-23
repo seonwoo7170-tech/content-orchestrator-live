@@ -5,6 +5,17 @@ const ROLES = Object.freeze(['writer', 'critic', 'repair']);
 const ROLE_SET = new Set(ROLES);
 const cache = new Map();
 
+const RUNTIME_CLARIFICATIONS = Object.freeze({
+  writer: '',
+  critic: `RUNTIME CRITIC CLARIFICATION — preserve the exact integrated Master v4.5 above and apply these machine-safety clarifications in addition to it.
+1. SAME-SITE INTERNAL NAVIGATION IS NOT AN EVIDENCE SOURCE. HTML marked with data-smileseon-internal-links="1" is a Related guides / internal-navigation block. Do not emit a source-authority, source-verification, citation-quality, or replace/remove-source issue solely because one of those links points to the current site. Internal navigation may still be flagged when the URL is actually broken, misleading, unsafe, duplicated, or topically irrelevant.
+2. NEVER FABRICATE AN HTML LOCATOR. Before returning an html p|h2|h3|li|blockquote N location, enumerate only those supported blocks in one shared document-order sequence starting at 1, confirm that N exists, and confirm that the tag at N exactly matches the emitted tag. Recount from the supplied current Article on every critic pass; never reuse an index from a prior version.
+3. PLACEHOLDERS ARE CONTENT DEFECTS, NOT CODE-NAME CONTRACTS. If a literal placeholder such as [DATE] remains, report the actual token and exact valid location. Do not rely on a particular issue-code spelling to convey the defect.`,
+  repair: `RUNTIME REPAIR CLARIFICATION — preserve the exact integrated Master v4.5 above and apply these machine-safety clarifications in addition to it.
+1. HTML marked with data-smileseon-internal-links="1" is internal navigation, not an evidence source. Never delete or replace that navigation block merely because a critic describes the same-site link as an unverified, weak, or non-authoritative source. Preserve it and apply any other valid repair issues normally. Actual broken, unsafe, duplicated, misleading, or irrelevant internal-link defects may still be repaired when precisely targeted.
+2. A critic locator that does not exist in the supplied current Article is stale. Do not guess a nearby block and do not broaden the edit. Leave that nonexistent target untouched while applying other valid targets.`
+});
+
 function utf8Bytes(value) {
   return new TextEncoder().encode(String(value || ''));
 }
@@ -54,8 +65,13 @@ export async function loadMasterV45RolePrompt(role) {
     });
   }
 
+  const runtimeClarification = String(RUNTIME_CLARIFICATIONS[key] || '').trim();
+  const effectiveText = runtimeClarification ? `${sourceText}\n\n${runtimeClarification}` : sourceText;
+  const effectiveBytes = utf8Bytes(effectiveText);
+  const effectiveDigest = await sha256Hex(effectiveBytes);
+
   const result = Object.freeze({
-    text: sourceText,
+    text: effectiveText,
     sourceText,
     meta: Object.freeze({
       role: key,
@@ -68,9 +84,9 @@ export async function loadMasterV45RolePrompt(role) {
       integratedMaster: true,
       sourceMasterSha256: MASTER_V45.sha256,
       sourceMasterSize: MASTER_V45.size,
-      runtimeClarification: null,
-      effectiveSize: MASTER_V45.size,
-      effectiveSha256: MASTER_V45.sha256
+      runtimeClarification: runtimeClarification || null,
+      effectiveSize: effectiveBytes.byteLength,
+      effectiveSha256: effectiveDigest
     })
   });
   cache.set(key, result);
