@@ -32,4 +32,4 @@ jobs:
           test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
       - name: Patch the current live bundles without rebuilding stale repository source
-        run: python scripts/live-repair-hardening-20260923.py
+        run: python scripts/live-repair-hardening-upload.py
