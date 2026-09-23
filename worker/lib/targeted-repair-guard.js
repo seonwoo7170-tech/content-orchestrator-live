@@ -13,6 +13,7 @@ const EXACT_HTML_LOCATION_RE = /html\s+(p|h2|h3|li|blockquote)\s+(\d+)/gi;
 const INTERNAL_LINK_MARKER_RE = /data-smileseon-internal-links\s*=\s*["']1["']/i;
 const SOURCE_AUTHORITY_RE = /\b(?:source|sources|citation|citations|reference|references|authority|authoritative|verified|credible|trusted|evidence)\b|출처|인용|근거|검증|신뢰/i;
 const SOURCE_REPAIR_RE = /\b(?:remove|replace|delete|drop|swap|use|cite|citation|source)\b|제거|교체|삭제|대체|출처|인용/i;
+const INTERNAL_LINK_DEFECT_RE = /\b(?:broken|dead|404|unsafe|javascript|duplicate|duplicated|irrelevant|unrelated|misleading|incorrect|wrong|malformed|redirect\s*loop|not\s*found)\b|깨진|끊긴|404|위험|중복|관련\s*없|무관|오해|잘못된|틀린|유효하지\s*않|찾을\s*수\s*없/i;
 
 function equalValue(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
@@ -66,6 +67,7 @@ function issueText(issue) {
 
 function isSourceAuthorityRepairIssue(issue) {
   const value = issueText(issue);
+  if (INTERNAL_LINK_DEFECT_RE.test(value)) return false;
   return SOURCE_AUTHORITY_RE.test(value) && SOURCE_REPAIR_RE.test(value);
 }
 
