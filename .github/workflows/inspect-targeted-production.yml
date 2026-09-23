@@ -19,47 +19,35 @@ jobs:
         with:
           ref: ops/live-runtime-snapshot-20260923
           fetch-depth: 0
-      - name: Extract remaining live source sections
+      - name: Locate publication-date substitution
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
           import re
-          root=Path('.live-snapshot'); out=root/'extracted'; out.mkdir(parents=True,exist_ok=True)
-          specs={
-            'orchestrator': (root/'modules/content-orchestrator/mcp-entry.js', {
-              'worker/lib/expansion-acceptance.js',
-              'worker/lib/internal-links.js',
-              'worker/lib/publisher.js',
-              'worker/lib/job-runner.js',
-            }),
-            'hub': (root/'modules/api-hub-v2/index.js', {
-              'src/lib/master-v45-role-prompts.js',
-              'src/lib/ai-routes.js',
-              'src/lib/article-length.js',
-              'src/lib/blogger-posts.js',
-              'src/lib/write-policy.js',
-            }),
-          }
-          for kind,(path,wanted) in specs.items():
-            text=path.read_text('utf-8',errors='replace')
-            markers=[(m.start(),m.group(1).strip()) for m in re.finditer(r'^// ([^\n]+\.js)\s*$',text,re.M)]
-            for idx,(start,name) in enumerate(markers):
-              if name not in wanted: continue
-              finish=markers[idx+1][0] if idx+1<len(markers) else len(text)
-              section=text[start:finish].rstrip()+'\n'
-              target=out/f'{kind}__{name.replace("/","__")}'
-              target.write_text(section,encoding='utf-8')
-              print(target.name, len(section))
+          root=Path('.live-snapshot')
+          path=root/'modules/content-orchestrator/mcp-entry.js'
+          text=path.read_text('utf-8',errors='replace')
+          lines=text.splitlines()
+          matches=[]
+          for needle in ['function applyPublicationDate', 'applyPublicationDate =', 'Published:', 'Last updated:', '게시일:', '작성일:']:
+              for i,line in enumerate(lines):
+                  if needle in line:
+                      lo=max(0,i-30); hi=min(len(lines),i+80)
+                      matches.append(f'=== {needle} @ {i+1} ===\n'+'\n'.join(f'{j+1:06d}: {lines[j]}' for j in range(lo,hi)))
+          report='\n\n'.join(matches)+'\n'
+          target=root/'extracted/publication-date-context.txt'
+          target.write_text(report,encoding='utf-8')
+          print(report[:40000])
           PY
-      - name: Commit extraction to snapshot branch
+      - name: Commit context to snapshot branch
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .live-snapshot/extracted
-          if git diff --cached --quiet; then echo 'EXTRACTION_UNCHANGED'; exit 0; fi
-          git commit -m 'ops: extract remaining live Sep 23 modules'
+          git add .live-snapshot/extracted/publication-date-context.txt
+          if git diff --cached --quiet; then echo 'CONTEXT_UNCHANGED'; exit 0; fi
+          git commit -m 'ops: locate live publication date substitution'
           git push origin HEAD:ops/live-runtime-snapshot-20260923
