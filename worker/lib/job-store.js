@@ -43,8 +43,25 @@ const CONTINUATION_RESULT_CODES = new Set([
   'CRITIC_REVIEW_CONTINUE',
   'QUALITY_REVIEW_LIMIT_REACHED',
   'REPAIR_BLOCKED_BY_GUARD',
-  'CRITIC_SCHEMA_INVALID'
+  'CRITIC_SCHEMA_INVALID',
+  // The state machine refusing repairing -> ready is the machinery failing, not a verdict about
+  // the article, and the article is finished when it happens. It belongs with the others.
+  'JOB_TRANSITION_INVALID'
 ]);
+
+// Images are paid KIE generations and they belong to the job, not to one version of its article.
+// A machine fault can lose result_json -- the transition error threw before the result was ever
+// saved -- and without this the retry would then delete perfectly good images and pay to generate
+// them again, which is exactly what must never happen. A genuine content retry still clears them.
+const MACHINE_FAULT_RETRY_CODES = new Set([
+  ...CONTINUATION_RESULT_CODES,
+  'JOB_TRANSITION_INVALID',
+  'STALE_PIPELINE_EXECUTION'
+]);
+
+function isMachineFaultRetry(row) {
+  return MACHINE_FAULT_RETRY_CODES.has(String(row?.last_error_code || row?.error || '').toUpperCase());
+}
 const CONTINUATION_BUDGET_EXHAUSTED_CODES = new Set(['QUALITY_REVIEW_LIMIT_REACHED', 'REPAIR_BLOCKED_BY_GUARD']);
 
 function hasContinuationResult(row) {
@@ -306,7 +323,7 @@ export async function resetStoredJobForManualRetry(env, id) {
   // next tick. The retry is an explicit decision to give it a fresh set of rounds.
   const resetContinuationBudget = preserveContinuation && isQualityLimitHold(row);
   const preservePublishReady = !preserveContinuation && hasPublishReadyResult(row);
-  const preserveImages = preserveContinuation || preservePublishReady;
+  const preserveImages = preserveContinuation || preservePublishReady || isMachineFaultRetry(row);
   const statements = [];
   if (publication?.status === 'failed') {
     statements.push(db.prepare(

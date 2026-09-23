@@ -41,7 +41,9 @@ test('ordinary retry clears stale artifacts but preserves duplicate-publication 
 test('Critic review continuation retry preserves the repaired result and images', () => {
   assert.match(jobStore, /hasContinuationResult/);
   assert.match(jobStore, /last_error_code = 'CRITIC_REVIEW_CONTINUE'/);
-  assert.match(jobStore, /const preserveImages = preserveContinuation \|\| preservePublishReady;/);
+  // Widened on 2026-09-23: a machine-fault retry keeps its paid images even when the article was
+  // lost before it could be saved.
+  assert.match(jobStore, /const preserveImages = preserveContinuation \|\| preservePublishReady \|\| isMachineFaultRetry\(row\);/);
   assert.match(jobStore, /preserveResult: preserveImages,/);
   assert.match(jobStore, /preserveImages$/m);
   assert.match(jobStore, /if \(!preserveImages\)/);

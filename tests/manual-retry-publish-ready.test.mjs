@@ -12,7 +12,7 @@ test('a job that failed only at the publish/write layer with a finished READY re
 
 test('manual retry resets a publish-ready job straight to ready instead of queued, and never touches its images', () => {
   assert.match(source, /const preservePublishReady = !preserveContinuation && hasPublishReadyResult\(row\);/);
-  assert.match(source, /const preserveImages = preserveContinuation \|\| preservePublishReady;/);
+  assert.match(source, /const preserveImages = preserveContinuation \|\| preservePublishReady \|\| isMachineFaultRetry\(row\);/);
   assert.match(source, /if \(!preserveImages\) \{\s*statements\.push\(db\.prepare\('DELETE FROM job_images WHERE job_id = \?'\)/);
   assert.match(source, /SET status = 'ready',/);
 });
@@ -42,7 +42,7 @@ test('a quality-limit hold keeps its article and images on a manual retry', asyn
   assert.match(codes, /'QUALITY_REVIEW_LIMIT_REACHED'/);
   assert.match(source, /if \(!CONTINUATION_RESULT_CODES\.has\(/);
   // The preserving branch is what skips the job_images delete.
-  assert.match(source, /const preserveImages = preserveContinuation \|\| preservePublishReady;/);
+  assert.match(source, /const preserveImages = preserveContinuation \|\| preservePublishReady \|\| isMachineFaultRetry\(row\);/);
 });
 
 test('a quality-limit retry clears the continuation counter it was held on', async () => {
