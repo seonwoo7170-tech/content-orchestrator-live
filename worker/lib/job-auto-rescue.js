@@ -28,6 +28,20 @@ const MAX_REVIEW_CONTINUATIONS = 4;
 // false on all five and nobody could see it. A hold that says which of the two happened is
 // the difference between reading one number and reading a day of job history.
 const REPAIR_BLOCKED_CODE = 'REPAIR_BLOCKED_BY_GUARD';
+
+// A hold caused by the machinery, not by a verdict about the article, used to sit there until
+// a person retried it by hand. That is how 2026-09-22 was spent: every fix shipped left a
+// backlog only a manual retry could drain, and the backlog outlived several fixes. These holds
+// now drain themselves once, well after the fault, so shipping a fix is enough.
+//
+// Strictly bounded, because an automatic retry into a still-broken pipeline just pays to fail
+// again: at most MAX_MACHINE_FAULT_REVIVALS over a job's life, no sooner than
+// MACHINE_FAULT_REVIVAL_DELAY_MINUTES after the failure, and only for a job that still has its
+// article and no unsafe publication. A content verdict (QUALITY_REVIEW_LIMIT_REACHED) is
+// deliberately not on this list: repeating it would not change the critic's mind.
+const MACHINE_FAULT_HOLD_CODES = new Set(['CRITIC_SCHEMA_INVALID', REPAIR_BLOCKED_CODE]);
+const MACHINE_FAULT_REVIVAL_DELAY_MINUTES = 180;
+const MAX_MACHINE_FAULT_REVIVALS = 2;
 const LEGACY_ROUTE_CODES = new Set(['API_HUB_404', 'API_HUB_405']);
 const LEGACY_REVIEW_HOLD_CODES = new Set([LEGACY_REVIEW_RETRY_CODE, STALE_PIPELINE_CODE]);
 
@@ -91,6 +105,72 @@ function repairBlockedByGuard(row) {
   if (!result || result.repairApplied !== false) return false;
   const violations = Array.isArray(result.repairGuardViolations) ? result.repairGuardViolations : [];
   return violations.length > 0;
+}
+
+// A machine fault can strike at any point, so the saved result is not always the NEEDS_REVIEW
+// shape hasSavedReviewContinuation looks for -- job 223 held on CRITIC_SCHEMA_INVALID with a
+// reviewReason of TARGETED_REPAIR_SCOPE_VIOLATION. What re-entry actually needs is the article,
+// which is also what must not be thrown away, so that is what is required here.
+function hasSavedArticle(row) {
+  const result = parseSavedResult(row);
+  return Boolean(result?.article && typeof result.article === 'object');
+}
+
+function machineFaultRevivals(row) {
+  const value = Number(parseSavedResult(row)?.machineFaultRevivals || 0);
+  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+}
+
+function isMachineFaultHold(row, now) {
+  if (String(row?.recovery_state || '') !== 'held') return false;
+  if (!MACHINE_FAULT_HOLD_CODES.has(String(row?.hold_reason || ''))) return false;
+  if (!hasSavedArticle(row)) return false;
+  if (machineFaultRevivals(row) >= MAX_MACHINE_FAULT_REVIVALS) return false;
+  const failedAt = Date.parse(row?.last_failure_at || row?.updated_at || '');
+  if (!Number.isFinite(failedAt)) return false;
+  return now.getTime() - failedAt >= MACHINE_FAULT_REVIVAL_DELAY_MINUTES * 60_000;
+}
+
+async function reviveMachineFaultHold(db, row, now) {
+  const jobId = Number(row.id);
+  const status = String(row.status || '');
+  const holdReason = String(row.hold_reason || '');
+  if (await hasUnsafePublication(db, jobId)) {
+    return { jobId, action: 'skipped', reason: 'MANUAL_RETRY_REQUIRES_PUBLICATION_REVIEW' };
+  }
+
+  const result = await db.prepare(
+    `UPDATE jobs
+        SET status = 'failed',
+            error = ?,
+            retry_count = 0,
+            recovery_state = 'retry_wait',
+            next_retry_at = ?,
+            hold_reason = NULL,
+            last_error_code = ?,
+            last_failure_at = NULL,
+            result_json = json_set(result_json, '$.machineFaultRevivals', ?),
+            updated_at = datetime('now')
+      WHERE id = ?
+        AND archived_at IS NULL
+        AND status = ?
+        AND recovery_state = 'held'
+        AND hold_reason = ?`
+  ).bind(
+    REVIEW_CONTINUE_CODE,
+    now.toISOString(),
+    REVIEW_CONTINUE_CODE,
+    machineFaultRevivals(row) + 1,
+    jobId,
+    status,
+    holdReason
+  ).run();
+
+  return {
+    jobId,
+    action: Number(result?.meta?.changes || 0) === 1 ? 'revived_machine_fault' : 'skipped',
+    reason: holdReason
+  };
 }
 
 function isReviewContinuationRetry(row) {
@@ -360,6 +440,11 @@ export async function primeAutomaticJobRescue(env, options = {}) {
             AND result_json IS NOT NULL
           )
           OR (
+            recovery_state = 'held'
+            AND hold_reason IN ('CRITIC_SCHEMA_INVALID', 'REPAIR_BLOCKED_BY_GUARD')
+            AND result_json IS NOT NULL
+          )
+          OR (
             mode = 'repair_existing'
             AND status = 'failed'
             AND recovery_state IN ('retry_wait','held')
@@ -378,6 +463,10 @@ export async function primeAutomaticJobRescue(env, options = {}) {
     const status = String(row.status || '');
     if (isLegacyReviewHold(row)) {
       items.push(await reviveLegacyReviewHold(db, row, now));
+      continue;
+    }
+    if (isMachineFaultHold(row, now)) {
+      items.push(await reviveMachineFaultHold(db, row, now));
       continue;
     }
     if (isLegacyRouteFailure(row)) {

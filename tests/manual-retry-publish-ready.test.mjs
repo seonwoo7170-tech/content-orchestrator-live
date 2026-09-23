@@ -109,3 +109,29 @@ test('a continuation does not hand the job a fresh transient-retry budget', asyn
   // The stale/timeout path still stops at MAX_JOB_RETRIES, which now caps the job as a whole.
   assert.match(source, /if \(retryCount >= MAX_JOB_RETRIES\)/);
 });
+
+// 2026-09-22 was spent draining backlogs by hand: every fix that shipped left held jobs that
+// only a manual retry could move, and the backlog outlived several fixes. A hold caused by the
+// machinery rather than by a verdict about the article now drains itself, so shipping the fix
+// is enough. Bounded hard, because retrying into a still-broken pipeline only pays to fail
+// again -- and a content verdict is deliberately excluded, since repeating it changes nothing.
+test('a machine-fault hold revives itself, a content verdict does not', async () => {
+  const source = await readFile(new URL('../worker/lib/job-auto-rescue.js', import.meta.url), 'utf8');
+  assert.match(source, /MACHINE_FAULT_HOLD_CODES = new Set\(\['CRITIC_SCHEMA_INVALID', REPAIR_BLOCKED_CODE\]\)/);
+  assert.doesNotMatch(source.slice(source.indexOf('MACHINE_FAULT_HOLD_CODES'), source.indexOf('LEGACY_ROUTE_CODES')), /QUALITY_REVIEW_LIMIT_REACHED/);
+  assert.match(source, /if \(isMachineFaultHold\(row, now\)\) \{/);
+});
+
+test('the self-revival is bounded by a lifetime count, a delay, an article and publication safety', async () => {
+  const source = await readFile(new URL('../worker/lib/job-auto-rescue.js', import.meta.url), 'utf8');
+  const detector = source.slice(source.indexOf('function isMachineFaultHold'), source.indexOf('async function reviveMachineFaultHold'));
+  assert.match(detector, /machineFaultRevivals\(row\) >= MAX_MACHINE_FAULT_REVIVALS/);
+  assert.match(detector, /MACHINE_FAULT_REVIVAL_DELAY_MINUTES \* 60_000/);
+  assert.match(detector, /hasSavedArticle\(row\)/);
+  const reviver = source.slice(source.indexOf('async function reviveMachineFaultHold'), source.indexOf('function isReviewContinuationRetry'));
+  assert.match(reviver, /await hasUnsafePublication\(db, jobId\)/);
+  // The count is written back, or the same job would revive forever.
+  assert.match(reviver, /json_set\(result_json, '\$\.machineFaultRevivals', \?\)/);
+  // It re-enters as a continuation, which is the branch that keeps the article and its images.
+  assert.match(reviver, /last_error_code = \?,/);
+});

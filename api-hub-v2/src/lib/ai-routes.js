@@ -92,10 +92,32 @@ function validateRepairArticle(value, input) {
   return validateArticleShape(value, { language: input?.article?.language }, 'REPAIR');
 }
 
+// The critic is a language model and its output is prose that happens to be JSON. Demanding
+// an exact uppercase token from it is a design error, not a contract: a verdict of "pass" or
+// " PASS" parsed cleanly and then failed validation, and because both providers are language
+// models they tend to make the same formatting choice, which is why the free-ai -> Cloudflare
+// fallback could not rescue it. Five jobs -- 214, 215, 217, 223 and 230 -- were held on
+// CRITIC_SCHEMA_INVALID by 2026-09-23 with a finished article and a perfectly readable verdict
+// attached. Normalising the shape the model chose costs nothing and changes no verdict; what
+// the critic actually decided is still the only thing that counts.
+const CRITIC_STATUS_ALIASES = new Map([
+  ['PASS', 'PASS'], ['PASSED', 'PASS'], ['PASSES', 'PASS'], ['OK', 'PASS'],
+  ['FAIL', 'FAIL'], ['FAILED', 'FAIL'], ['FAILS', 'FAIL']
+]);
+
+function normalizeCriticStatus(value) {
+  return CRITIC_STATUS_ALIASES.get(String(value ?? '').trim().toUpperCase()) || null;
+}
+
+function normalizeCriticSeverity(value) {
+  const severity = String(value ?? '').trim().toUpperCase();
+  return CRITIC_SEVERITIES.has(severity) ? severity : null;
+}
+
 function validateCriticIssue(issue) {
   if (!issue || typeof issue !== 'object') return false;
   if (typeof issue.code !== 'string' || !issue.code.trim()) return false;
-  if (!CRITIC_SEVERITIES.has(issue.severity)) return false;
+  if (!normalizeCriticSeverity(issue.severity)) return false;
   if (typeof issue.location !== 'string' || !issue.location.trim()) return false;
   if (typeof issue.reason !== 'string' || !issue.reason.trim()) return false;
   if (typeof issue.repairInstruction !== 'string' || !issue.repairInstruction.trim()) return false;
@@ -103,7 +125,8 @@ function validateCriticIssue(issue) {
 }
 
 function normalizeCriticResult(parsed) {
-  if (!parsed || typeof parsed !== 'object' || !['PASS', 'FAIL'].includes(parsed.status)) {
+  const status = parsed && typeof parsed === 'object' ? normalizeCriticStatus(parsed.status) : null;
+  if (!status) {
     throw Object.assign(new Error('CRITIC_SCHEMA_INVALID'), { status: 502 });
   }
 
@@ -112,11 +135,12 @@ function normalizeCriticResult(parsed) {
     throw Object.assign(new Error('CRITIC_SCORE_INVALID'), { status: 502 });
   }
 
-  const issues = Array.isArray(parsed.issues) ? parsed.issues : [];
-  if (!issues.every(validateCriticIssue)) {
+  const rawIssues = Array.isArray(parsed.issues) ? parsed.issues : [];
+  if (!rawIssues.every(validateCriticIssue)) {
     throw Object.assign(new Error('CRITIC_ISSUE_SCHEMA_INVALID'), { status: 502 });
   }
-  if (parsed.status === 'FAIL' && issues.length === 0) {
+  const issues = rawIssues.map((issue) => ({ ...issue, severity: normalizeCriticSeverity(issue.severity) }));
+  if (status === 'FAIL' && issues.length === 0) {
     throw Object.assign(new Error('CRITIC_FAIL_WITHOUT_ISSUES'), { status: 502 });
   }
 
@@ -126,7 +150,7 @@ function normalizeCriticResult(parsed) {
       score,
       status: 'FAIL',
       issues,
-      contractNormalized: parsed.status === 'PASS' ? 'PASS_WITH_ISSUES_TO_FAIL' : undefined
+      contractNormalized: status === 'PASS' ? 'PASS_WITH_ISSUES_TO_FAIL' : undefined
     };
   }
 

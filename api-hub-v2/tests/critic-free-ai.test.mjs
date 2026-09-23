@@ -164,3 +164,43 @@ test('a contract error from the Workers AI fallback still fails the request', as
     /CRITIC_SCHEMA_INVALID/
   );
 });
+
+// The critic is a language model; its output is prose that happens to be JSON. Requiring an
+// exact uppercase token was a design error, not a contract. Because both providers are
+// language models they tend to make the same formatting choice, so the free-ai -> Cloudflare
+// fallback could not rescue it, and jobs 214, 215, 217, 223 and 230 were all held on
+// CRITIC_SCHEMA_INVALID with a finished article and a perfectly readable verdict attached.
+test('a verdict the model wrote in its own casing is read, not rejected', async () => {
+  for (const status of ['pass', ' PASS ', 'Passed', 'ok']) {
+    const result = await critic(FREE_AI_ENV, { article: ARTICLE }, noWorkersAi(),
+      freeAiFetch({ status, score: 100, issues: [] }));
+    assert.equal(result.status, 'PASS', `${JSON.stringify(status)} should read as PASS`);
+  }
+});
+
+test('a FAIL verdict in the model’s own casing keeps its issues and its verdict', async () => {
+  const issue = {
+    code: 'UNSUPPORTED_CLAIM',
+    severity: 'high',
+    location: 'html p 1',
+    reason: 'Unsupported.',
+    repairInstruction: 'Qualify the statement.'
+  };
+  const result = await critic(FREE_AI_ENV, { article: ARTICLE }, noWorkersAi(),
+    freeAiFetch({ status: 'failed', score: 60, issues: [issue] }));
+  assert.equal(result.status, 'FAIL');
+  assert.equal(result.issues.length, 1);
+  // Severity is normalised too, so downstream severity checks are not tripped by casing.
+  assert.equal(result.issues[0].severity, 'HIGH');
+});
+
+test('a verdict that is genuinely not a verdict is still rejected by both providers', async () => {
+  const badOnWorkersAi = {
+    async run() { return { response: JSON.stringify({ status: 'MAYBE', score: 100, issues: [] }) }; }
+  };
+  await assert.rejects(
+    () => critic(FREE_AI_ENV, { article: ARTICLE }, badOnWorkersAi,
+      freeAiFetch({ status: 'MAYBE', score: 100, issues: [] })),
+    (error) => String(error.message) === 'CRITIC_SCHEMA_INVALID'
+  );
+});
