@@ -19,57 +19,68 @@ jobs:
         with:
           ref: ops/live-runtime-snapshot-20260923
           fetch-depth: 0
-      - name: Analyze captured live bundles
+      - name: Extract selected live source sections
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
-          import re
+          import re, shutil
+
           root=Path('.live-snapshot')
-          targets=[
-            root/'modules/content-orchestrator/mcp-entry.js',
-            root/'modules/api-hub-v2/index.js'
-          ]
-          needles=[
-            'TARGETED_REPAIR_INSERTION_REJECTED',
-            'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE',
-            'TARGET_NOT_FOUND',
-            'data-smileseon-internal-links',
-            'Related Articles',
-            '[DATE]',
-            '8000',
-            'targeted-repair-guard.js',
-            'internal-link-injector.js',
-            'deterministic-quality-gate.js',
-            'auto-publisher.js',
-            'state-machine.js',
-            'pipeline.js'
-          ]
-          out=[]
-          for path in targets:
+          out=root/'extracted'
+          if out.exists(): shutil.rmtree(out)
+          out.mkdir(parents=True,exist_ok=True)
+
+          bundles={
+            'orchestrator': root/'modules/content-orchestrator/mcp-entry.js',
+            'hub': root/'modules/api-hub-v2/index.js',
+          }
+          wanted={
+            'orchestrator': {
+              'worker/lib/targeted-repair-guard.js',
+              'worker/lib/pipeline.js',
+              'worker/lib/deterministic-quality-gate.js',
+              'worker/lib/internal-link-injector.js',
+              'worker/lib/auto-publisher.js',
+              'worker/lib/state-machine.js',
+              'worker/lib/stored-job-executor.js',
+            },
+            'hub': {
+              'api-hub-v2/src/lib/master-v45-role-prompts.js',
+              'api-hub-v2/src/lib/ai-routes.js',
+            },
+          }
+          term_re=re.compile(r'(TARGETED_REPAIR|TARGET_NOT_FOUND|Related Articles|\[DATE\]|body.{0,20}(?:floor|length)|(?:floor|minimum|minBody).{0,30}(?:8000|body)|8000)',re.I)
+
+          for kind,path in bundles.items():
             text=path.read_text('utf-8',errors='replace')
-            out.append(f'===== FILE {path} size={len(text)} =====')
+            markers=[]
+            for m in re.finditer(r'^// ([^\n]+\.js)\s*$',text,re.M):
+              markers.append((m.start(),m.end(),m.group(1).strip()))
+            (out/f'{kind}-module-index.txt').write_text('\n'.join(name for _,_,name in markers)+'\n',encoding='utf-8')
+            for idx,(start,end,name) in enumerate(markers):
+              if name not in wanted[kind]: continue
+              finish=markers[idx+1][0] if idx+1<len(markers) else len(text)
+              section=text[start:finish].rstrip()+'\n'
+              safe=name.replace('/','__')
+              (out/f'{kind}__{safe}').write_text(section,encoding='utf-8')
             lines=text.splitlines()
-            for needle in needles:
-              hits=[i for i,line in enumerate(lines) if needle in line]
-              out.append(f'\n--- NEEDLE {needle!r} hits={len(hits)} ---')
-              for i in hits[:20]:
-                lo=max(0,i-10); hi=min(len(lines),i+11)
-                out.append(f'@@ line {i+1} @@')
-                out.extend(f'{j+1:06d}: {lines[j]}' for j in range(lo,hi))
-          report='\n'.join(out)+'\n'
-          (root/'bundle-marker-report.txt').write_text(report,encoding='utf-8')
-          print(report[:50000])
+            hits=[]
+            for i,line in enumerate(lines):
+              if term_re.search(line):
+                lo=max(0,i-4); hi=min(len(lines),i+5)
+                hits.append(f'@@ {kind} line {i+1} @@\n'+'\n'.join(f'{j+1:06d}: {lines[j]}' for j in range(lo,hi)))
+            (out/f'{kind}-term-contexts.txt').write_text('\n\n'.join(hits)+'\n',encoding='utf-8')
+          print('EXTRACTED', *sorted(p.name for p in out.iterdir()), sep='\n')
           PY
-      - name: Commit analysis to snapshot branch
+      - name: Commit extracted live source to ops branch
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .live-snapshot/bundle-marker-report.txt
-          git diff --cached --check
-          if git diff --cached --quiet; then echo 'REPORT_UNCHANGED'; exit 0; fi
-          git commit -m 'ops: analyze live Sep 23 worker bundle markers'
+          git add .live-snapshot/extracted
+          if git diff --cached --quiet; then echo 'EXTRACTION_UNCHANGED'; exit 0; fi
+          git commit -m 'ops: extract live Sep 23 source sections'
           git push origin HEAD:ops/live-runtime-snapshot-20260923
