@@ -155,3 +155,31 @@ test('a repair that lands outside the resolved block is dropped, not accepted', 
   assert.equal(constrained.html, before.html);
   assert.equal(assertTargetedRepairPreserved(before, constrained, [issue('html p 2')]), true);
 });
+
+// Job 216 was a 92-score article with one finding: INVALID_HTML_NESTING, a <ul> inside a <p>.
+// Repair did the only thing that fixes it and moved the list out, and the guard rejected the
+// result because the block count went 44 -> 47 -- lifting a three-item list out of a paragraph
+// necessarily creates three <li> blocks. Repair cannot win that argument and should never have
+// been asked to, so the nesting is straightened out before the first critic pass instead.
+test('lifting a list out of a paragraph is done up front, so the block count never moves', async () => {
+  const { liftBlocksOutOfParagraphs } = await import('../worker/lib/article-image-sanitizer.js');
+  const messy = '<p>Intro text<ul><li>a</li><li>b</li><li>c</li></ul></p><p>After.</p>';
+  const clean = liftBlocksOutOfParagraphs({ html: messy }).html;
+  assert.equal(clean, '<p>Intro text</p><ul><li>a</li><li>b</li><li>c</li></ul><p>After.</p>');
+
+  // The guard now sees the same block count before and after any in-block repair.
+  const before = article(clean);
+  const after = article(clean.replace('Intro text', 'Intro text repaired'));
+  assert.equal(assertTargetedRepairPreserved(before, after, [issue('html p 1')]), true);
+});
+
+test('text on both sides of a lifted block is preserved as its own paragraphs', async () => {
+  const { liftBlocksOutOfParagraphs } = await import('../worker/lib/article-image-sanitizer.js');
+  assert.equal(
+    liftBlocksOutOfParagraphs({ html: '<p>Before<ul><li>a</li></ul>After</p>' }).html,
+    '<p>Before</p><ul><li>a</li></ul><p>After</p>'
+  );
+  // A paragraph with nothing but inline markup is left exactly as it was.
+  const inline = '<p>Nested <strong>inline</strong> only.</p>';
+  assert.equal(liftBlocksOutOfParagraphs({ html: inline }).html, inline);
+});

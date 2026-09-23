@@ -2,7 +2,7 @@ import { validateArticle, validateCriticResult } from './contracts.js';
 import { callHub } from './api-hub.js';
 import { lintNaturalWriting } from './natural-writing-linter.js';
 import { assertTargetedRepairPreserved, constrainTargetedRepair } from './targeted-repair-guard.js';
-import { stripWriterOwnedImages } from './article-image-sanitizer.js';
+import { liftBlocksOutOfParagraphs, stripWriterOwnedImages } from './article-image-sanitizer.js';
 
 const DEFAULT_MAX_TARGETED_REPAIRS = 2;
 const DEFAULT_MAX_NEW_ARTICLE_CANDIDATES = 2;
@@ -431,7 +431,12 @@ export async function runNewArticlePipeline(env, request, fetchImpl = fetch, hoo
       },
       fetchImpl
     );
-    const writtenArticle = stripWriterOwnedImages(validateArticle(writer.article ?? writer));
+    // Invalid block nesting is straightened out before the first critic pass, so the block
+    // count the targeted-repair guard relies on is stable from the start. Job 216 lost every
+    // repair attempt to a count that only moved because a list was lifted out of a paragraph.
+    const writtenArticle = liftBlocksOutOfParagraphs(
+      stripWriterOwnedImages(validateArticle(writer.article ?? writer))
+    );
     // A TourAPI-grounded writer call carries the attraction's own real photos; keep the
     // most recent candidate's set so the image stage can use them instead of generating
     // stand-in scenes (see prepareNewArticleImages in daily-auto-work.js).
@@ -474,7 +479,7 @@ export async function runNewArticlePipeline(env, request, fetchImpl = fetch, hoo
 }
 
 export async function runNewArticleContinuationPipeline(env, priorResult, fetchImpl = fetch, hooks = {}) {
-  const article = validateArticle(priorResult?.article);
+  const article = liftBlocksOutOfParagraphs(validateArticle(priorResult?.article));
   const seoBrief = hooks?.seoBrief || priorResult?.seoBrief || null;
   const evaluation = await qualityLoop(env, article, fetchImpl, hooks, {
     initialCriticStage: 'continued_initial',
@@ -571,7 +576,7 @@ export async function runExistingRepairPipeline(env, sourcePost, fetchImpl = fet
 export async function runExistingRepairContinuationPipeline(env, priorResult, fetchImpl = fetch, hooks = {}) {
   const identity = priorResult?.identity;
   if (!identity?.blogId || !identity?.bloggerPostId) throw new Error('REPAIR_CONTINUATION_IDENTITY_MISSING');
-  const article = validateArticle(priorResult?.article);
+  const article = liftBlocksOutOfParagraphs(validateArticle(priorResult?.article));
   const seoBrief = hooks?.seoBrief || priorResult?.seoBrief || null;
   const evaluation = await qualityLoop(env, article, fetchImpl, hooks, {
     initialCriticStage: 'existing_post_continued_diagnosis',

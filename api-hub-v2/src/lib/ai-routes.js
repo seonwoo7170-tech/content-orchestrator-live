@@ -92,6 +92,41 @@ function validateRepairArticle(value, input) {
   return validateArticleShape(value, { language: input?.article?.language }, 'REPAIR');
 }
 
+// Targeted repair is asked to return the complete article, and sometimes it returns only the
+// parts it touched -- which is the honest reading of "change only the flagged location".
+// Validating that raw response as a whole article then killed the job on a missing title:
+// REPAIR_ARTICLE_TITLE_REQUIRED held jobs 172 and 206. The complete article is sitting in the
+// request, and the worker's targeted-repair guard rebuilds the result from it anyway, so the
+// only thing this validation ever achieved was throwing work away. Read what the model
+// changed and keep the rest; the guard is still the authority on what is allowed to change.
+const REPAIR_TEXT_FIELDS = Object.freeze(['title', 'html', 'searchDescription', 'language', 'topic']);
+const REPAIR_ARRAY_FIELDS = Object.freeze(['labels', 'sources']);
+
+function mergeRepairArticle(parsed, input) {
+  const returned = parsed?.article && typeof parsed.article === 'object' && !Array.isArray(parsed.article)
+    ? parsed.article
+    : parsed;
+  if (!returned || typeof returned !== 'object' || Array.isArray(returned)) {
+    throw Object.assign(new Error('REPAIR_ARTICLE_REQUIRED'), { status: 502 });
+  }
+
+  const base = input?.article && typeof input.article === 'object' && !Array.isArray(input.article)
+    ? input.article
+    : null;
+  if (!base) return returned;
+
+  const merged = { ...base, ...returned };
+  // A field the model omitted, blanked, or returned in the wrong type is a field it did not
+  // repair, so it keeps the value the caller sent.
+  for (const field of REPAIR_TEXT_FIELDS) {
+    if (typeof merged[field] !== 'string' || !merged[field].trim()) merged[field] = base[field];
+  }
+  for (const field of REPAIR_ARRAY_FIELDS) {
+    if (!Array.isArray(merged[field])) merged[field] = base[field];
+  }
+  return merged;
+}
+
 // The critic is a language model and its output is prose that happens to be JSON. Demanding
 // an exact uppercase token from it is a design error, not a contract: a verdict of "pass" or
 // " PASS" parsed cleanly and then failed validation, and because both providers are language
@@ -399,7 +434,7 @@ export async function repair(env, input, aiBinding = env?.AI, fetchImpl = fetch)
   try { parsed = parseJsonText(result.response); } catch {
     throw Object.assign(new Error('REPAIR_JSON_INVALID'), { status: 502, meta: MASTER_V45 });
   }
-  const article = validateRepairArticle(parsed, input);
+  const article = validateRepairArticle(mergeRepairArticle(parsed, input), input);
   return {
     article,
     ...providerMetadata(result),

@@ -95,3 +95,47 @@ test('Repair rejects a language-changing response', async () => {
     /REPAIR_LANGUAGE_MISMATCH/
   );
 });
+
+// Targeted repair is told to change only the flagged location, and an honest reading of that
+// is to return only what changed. Validating the raw response as a whole article then killed
+// the job on a missing title -- REPAIR_ARTICLE_TITLE_REQUIRED held jobs 172 and 206 -- while
+// the complete article sat in the request and the worker's guard rebuilt from it anyway.
+test('a repair that returns only the field it changed keeps the rest of the article', async () => {
+  const before = article();
+  const binding = aiMock(() => ({ response: JSON.stringify({ html: '<h2>First section</h2><p>Repaired answer.</p>' }) }));
+
+  const result = await repair({ REPAIR_MODEL: '@cf/openai/gpt-oss-120b' }, {
+    article: before,
+    issues: [{ code: 'READABILITY', severity: 'LOW', location: 'html p 1', reason: 'r', repairInstruction: 'i' }]
+  }, binding);
+
+  assert.equal(result.article.html, '<h2>First section</h2><p>Repaired answer.</p>');
+  assert.equal(result.article.title, before.title);
+  assert.equal(result.article.topic, before.topic);
+  assert.deepEqual(result.article.labels, before.labels);
+});
+
+test('a blanked or wrongly typed field falls back to the value the caller sent', async () => {
+  const before = article();
+  const binding = aiMock(() => ({
+    response: JSON.stringify({ article: { title: '   ', html: '<p>Changed.</p>', labels: 'not-an-array' } })
+  }));
+
+  const result = await repair({ REPAIR_MODEL: '@cf/openai/gpt-oss-120b' }, {
+    article: before,
+    issues: [{ code: 'READABILITY', severity: 'LOW', location: 'html p 1', reason: 'r', repairInstruction: 'i' }]
+  }, binding);
+
+  assert.equal(result.article.title, before.title);
+  assert.deepEqual(result.article.labels, before.labels);
+  assert.equal(result.article.html, '<p>Changed.</p>');
+});
+
+test('a response that is not an article at all is still rejected', async () => {
+  const binding = aiMock(() => ({ response: JSON.stringify(['not', 'an', 'article']) }));
+
+  await assert.rejects(
+    () => repair({ REPAIR_MODEL: '@cf/openai/gpt-oss-120b' }, { article: article(), issues: [] }, binding),
+    (error) => String(error.message) === 'REPAIR_ARTICLE_REQUIRED'
+  );
+});
