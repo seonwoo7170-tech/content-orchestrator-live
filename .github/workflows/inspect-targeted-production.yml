@@ -14,78 +14,62 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: production
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ops/live-runtime-snapshot-20260923
           fetch-depth: 0
-      - name: Capture sanitized live Worker modules
+      - name: Analyze captured live bundles
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$CLOUDFLARE_API_TOKEN"
-          test -n "$CLOUDFLARE_ACCOUNT_ID"
-          rm -rf .live-snapshot
-          mkdir -p .live-snapshot/raw
-          for worker in content-orchestrator api-hub-v2; do
-            curl --fail-with-body --silent --show-error \
-              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
-              -D ".live-snapshot/raw/${worker}.headers" \
-              -o ".live-snapshot/raw/${worker}.body" \
-              "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${worker}/content/v2"
-          done
           python - <<'PY'
           from pathlib import Path
-          from email import policy
-          from email.parser import BytesParser
-          import hashlib,json,re
-          root=Path('.live-snapshot'); out=root/'modules'; out.mkdir(parents=True,exist_ok=True)
-          manifest={'capturedAt':'2026-09-23','workers':{}}
-          def safe(v):
-              v=(v or '').replace('\\','/').split('/')[-1]
-              return re.sub(r'[^A-Za-z0-9._-]+','_',v) or 'module.txt'
-          for worker in ('content-orchestrator','api-hub-v2'):
-              hdr=(root/'raw'/f'{worker}.headers').read_text('utf-8',errors='replace')
-              body=(root/'raw'/f'{worker}.body').read_bytes()
-              m=re.findall(r'^content-type:\s*(.+)$',hdr,flags=re.I|re.M)
-              ctype=m[-1].strip() if m else 'application/javascript'
-              wd=out/worker; wd.mkdir(parents=True,exist_ok=True); saved=[]
-              if 'multipart/' in ctype.lower():
-                  msg=BytesParser(policy=policy.default).parsebytes((f'Content-Type: {ctype}\r\nMIME-Version: 1.0\r\n\r\n').encode()+body)
-                  for idx,part in enumerate(msg.iter_parts(),1):
-                      candidate=part.get_filename() or part.get_param('name',header='content-disposition') or f'part-{idx}.txt'
-                      if str(candidate).lower() in {'metadata','metadata.json'} or part.get_content_type()=='application/json': continue
-                      payload=part.get_payload(decode=True) or b''
-                      if not payload: continue
-                      p=wd/safe(candidate)
-                      if p.exists(): p=wd/f'{idx:03d}-{safe(candidate)}'
-                      p.write_bytes(payload); saved.append(p)
-              else:
-                  p=wd/'worker.js'; p.write_bytes(body); saved.append(p)
-              combined=b'\n'.join(p.read_bytes() for p in saved)
-              needles=[b'TARGETED_REPAIR_INSERTION_REJECTED',b'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE',b'CHANGED_HTML_STRUCTURE',b'TARGET_NOT_FOUND',b'data-smileseon-internal-links',b'PLACEHOLDER_DATE',b'8000',b'Related Articles',b'[DATE]']
-              manifest['workers'][worker]={
-                  'contentType':ctype,
-                  'combinedSha256':hashlib.sha256(combined).hexdigest(),
-                  'markers':{n.decode():combined.count(n) for n in needles},
-                  'files':[{'path':str(p.relative_to(root)),'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in saved]
-              }
-          (root/'manifest.json').write_text(json.dumps(manifest,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
-          print(json.dumps(manifest,indent=2,ensure_ascii=False))
+          import re
+          root=Path('.live-snapshot')
+          targets=[
+            root/'modules/content-orchestrator/mcp-entry.js',
+            root/'modules/api-hub-v2/index.js'
+          ]
+          needles=[
+            'TARGETED_REPAIR_INSERTION_REJECTED',
+            'TARGETED_REPAIR_CHANGED_HTML_STRUCTURE',
+            'TARGET_NOT_FOUND',
+            'data-smileseon-internal-links',
+            'Related Articles',
+            '[DATE]',
+            '8000',
+            'targeted-repair-guard.js',
+            'internal-link-injector.js',
+            'deterministic-quality-gate.js',
+            'auto-publisher.js',
+            'state-machine.js',
+            'pipeline.js'
+          ]
+          out=[]
+          for path in targets:
+            text=path.read_text('utf-8',errors='replace')
+            out.append(f'===== FILE {path} size={len(text)} =====')
+            lines=text.splitlines()
+            for needle in needles:
+              hits=[i for i,line in enumerate(lines) if needle in line]
+              out.append(f'\n--- NEEDLE {needle!r} hits={len(hits)} ---')
+              for i in hits[:20]:
+                lo=max(0,i-10); hi=min(len(lines),i+11)
+                out.append(f'@@ line {i+1} @@')
+                out.extend(f'{j+1:06d}: {lines[j]}' for j in range(lo,hi))
+          report='\n'.join(out)+'\n'
+          (root/'bundle-marker-report.txt').write_text(report,encoding='utf-8')
+          print(report[:50000])
           PY
-          rm -rf .live-snapshot/raw
-      - name: Commit snapshot to ops branch
+      - name: Commit analysis to snapshot branch
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .live-snapshot
+          git add .live-snapshot/bundle-marker-report.txt
           git diff --cached --check
-          if git diff --cached --quiet; then echo 'SNAPSHOT_UNCHANGED'; exit 0; fi
-          git commit -m 'ops: snapshot live Cloudflare worker source 2026-09-23'
+          if git diff --cached --quiet; then echo 'REPORT_UNCHANGED'; exit 0; fi
+          git commit -m 'ops: analyze live Sep 23 worker bundle markers'
           git push origin HEAD:ops/live-runtime-snapshot-20260923
