@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import time
 import uuid
 from email import policy
@@ -17,6 +18,7 @@ SPEC = importlib.util.spec_from_file_location(
 if SPEC is None or SPEC.loader is None:
     raise SystemExit("LIVE_HARDENING_IMPORT_FAILED")
 mod = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = mod
 SPEC.loader.exec_module(mod)
 
 MAIN_MODULE = {
