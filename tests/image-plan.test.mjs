@@ -222,3 +222,60 @@ test('a writer-supplied hook still beats the heading fallback', () => {
     html: '<h2>Core Decision: When to Upgrade vs. Repair</h2><p>a.</p>'
   }), 'Your Breaker Is Telling You');
 });
+
+// Production baked "Unlock 30% Energy Savings!", "발열 10도 낮추는 비법", "Unlock AI ROI Secrets"
+// and "5분 만에 최강 방어" onto thumbnails on 2026-09-22. Two of those print a figure the article
+// never measured -- a fabricated claim on an image, for blogs still in AdSense review. The
+// writer prompt asks for plain wording; this is the part that does not depend on it complying.
+test('a hyped caption is dropped in favour of the article’s own heading', () => {
+  const article = {
+    title: 'Best Insulation Types for Older Homes',
+    topic: 'insulation',
+    language: 'en',
+    html: '<h2>Where Old Homes Lose Heat</h2><p>Body.</p>',
+    thumbnailHook: 'Unlock AI ROI Secrets'
+  };
+  assert.equal(buildThumbnailHook(article), 'Where Old Homes Lose Heat');
+  assert.equal(buildThumbnailHook({
+    title: 'CPU 서멀구리스 교체 가이드',
+    topic: '서멀구리스',
+    language: 'ko',
+    html: '<h2>교체 시기 판단</h2><p>본문.</p>',
+    thumbnailHook: '발열 10도 낮추는 비법'
+  }), '교체 시기 판단');
+});
+
+test('a figure the article never states is dropped, one it does state is kept', () => {
+  const base = {
+    title: 'Home Energy Audit',
+    topic: 'energy audit',
+    language: 'en',
+    html: '<h2>Where Old Homes Lose Heat</h2><p>The visit takes 90 minutes.</p>'
+  };
+  assert.equal(buildThumbnailHook({ ...base, thumbnailHook: 'Save 30% on Heating' }), 'Where Old Homes Lose Heat');
+  assert.equal(buildThumbnailHook({ ...base, thumbnailHook: 'Plan for 90 Minutes' }), 'Plan for 90 Minutes');
+});
+
+test('an ordinary concrete caption still wins over every fallback', () => {
+  assert.equal(buildThumbnailHook({
+    title: 'How to Inspect and Replace Worn Weatherstripping',
+    topic: 'weatherstripping',
+    language: 'en',
+    html: '<h2>Where Old Homes Lose Heat</h2><p>Body.</p>',
+    thumbnailHook: 'Seal Drafts, Save Bills'
+  }), 'Seal Drafts, Save Bills');
+});
+
+// The list-marker strip required no separator, so it ate the leading digit of any caption that
+// simply starts with a number: "5분이면 끝" reached the thumbnail as "분이면 끝".
+test('a caption that starts with a real number keeps it, a list marker is still stripped', () => {
+  const ko = (thumbnailHook, html) => buildThumbnailHook({
+    title: '제목', topic: '주제', language: 'ko',
+    html: html || '<h2>교체 시기 판단</h2><p>본문.</p>',
+    thumbnailHook
+  });
+  assert.equal(ko('5분이면 끝', '<p>5분이면 됩니다.</p><h2>설정 순서</h2>'), '5분이면 끝');
+  assert.equal(ko('먼저 볼 3가지', '<p>3가지를 봅니다.</p><h2>점검</h2>'), '먼저 볼 3가지');
+  assert.equal(ko('1. 첫 번째 항목'), '첫 번째 항목');
+  assert.equal(ko('① 첫 번째 항목'), '첫 번째 항목');
+});

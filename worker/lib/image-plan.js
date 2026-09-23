@@ -107,7 +107,10 @@ function imageAltText(article, text, role) {
 
 function normalizeHook(value, language) {
   const text = cleanText(value)
-    .replace(/^\s*[\d①-⑳]+[.)\-:]?\s*/, '')
+    // A list marker needs its separator. Without one this ate the leading digit of a caption
+    // that simply starts with a number -- "5분이면 끝" arrived as "분이면 끝" -- so plain digits now
+    // require a trailing .):- while circled numerals, which are only ever list markers, do not.
+    .replace(/^\s*(?:\d+[.)\-:]|[①-⑳][.)\-:]?)\s*/, '')
     .replace(/[.!?。！？]+$/g, '')
     .trim();
   if (!text) return '';
@@ -139,11 +142,32 @@ function hookFromHeadings(html, language, title) {
   return '';
 }
 
+// The writer prompt asks for a plain, concrete caption, but a prompt alone did not hold: on
+// 2026-09-22 production baked "Unlock 30% Energy Savings!", "\ubc1c\uc5f4 10\ub3c4 \ub0ae\ucd94\ub294 \ube44\ubc95", "Unlock AI ROI
+// Secrets" and "5\ubd84 \ub9cc\uc5d0 \ucd5c\uac15 \ubc29\uc5b4" onto thumbnails. Two of those print a figure the article never
+// measured, which is a fabricated claim on an image for a blog still in AdSense review. So the
+// rule is enforced here too: a caption that hypes or invents a number is dropped, and the
+// existing heading fallback supplies the article's own words instead.
+const HOOK_HYPE_RE = /\b(?:unlock|secrets?|insider|ultimate|guaranteed|miracle|shocking|unbelievable)\b|(?:\ube44\ubc95|\ucd5c\uac15|\uadf9\uac15|\uafc0\ud301|\ube44\ubc00|\ub300\ubc15|\ucda9\uaca9|\ubb34\uc870\uac74|\uc644\ubcbd\s*(?:\ubc29\uc5b4|\ucc28\ub2e8|\ud574\uacb0|\ubcf5\uad6c))/i;
+
+function hookNumbersSupported(hook, article) {
+  const figures = String(hook || '').match(/\d+/g);
+  if (!figures) return true;
+  const body = `${cleanText(article?.title)} ${String(article?.html || '').replace(/<[^>]*>/g, ' ')}`;
+  return figures.every((figure) => body.includes(figure));
+}
+
+function usableWriterHook(hook, article) {
+  if (!hook) return false;
+  if (HOOK_HYPE_RE.test(hook)) return false;
+  return hookNumbersSupported(hook, article);
+}
+
 export function buildThumbnailHook(article) {
   const language = String(article?.language || '').toLowerCase() === 'en' ? 'en' : 'ko';
   const title = cleanText(article?.title);
   const explicit = normalizeHook(article?.thumbnailHook, language);
-  if (explicit && explicit.toLowerCase() !== title.toLowerCase()) return explicit;
+  if (explicit && explicit.toLowerCase() !== title.toLowerCase() && usableWriterHook(explicit, article)) return explicit;
 
   const fromHeading = hookFromHeadings(article?.html, language, title);
   if (fromHeading) return fromHeading;
