@@ -1209,3 +1209,21 @@ jobs:
             }
           }
           NODE
+
+      # The app shows today's plan as "2/20 linked, 17 held". A freshly generated slot is
+      # inserted pending with a null hold_reason, so today's plan cannot start out held --
+      # which means the 17 is almost certainly the standing backlog of held jobs rather than
+      # anything about today. These three reads settle it: today's slots by status, every held
+      # job by its reason, and where the held ones came from.
+      - name: Is today's plan actually held, or is that the standing backlog? (read-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_DEPLOY_API_TOKEN is missing'; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo 'CLOUDFLARE_ACCOUNT_ID is missing'; exit 1; }
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT 'SLOT | ' || plan_date || ' | ' || status || ' | hold=' || COALESCE(hold_reason,'-') || ' | job=' || (CASE WHEN job_id IS NULL THEN 'none' ELSE 'set' END) || ' | n=' || COUNT(*) AS row_text FROM daily_plan_slots WHERE plan_date >= date('now','-1 day') GROUP BY plan_date, status, hold_reason, (job_id IS NULL) ORDER BY plan_date DESC, status;"
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT 'HELD | ' || COALESCE(hold_reason,'(none)') || ' | ' || status || ' | n=' || COUNT(*) AS row_text FROM jobs WHERE archived_at IS NULL AND recovery_state = 'held' GROUP BY hold_reason, status ORDER BY COUNT(*) DESC;"
+          npx --yes wrangler@latest d1 execute content-orchestrator --remote --json --command \
+            "SELECT 'HELDJOB | ' || id || ' | ' || status || ' | ' || COALESCE(hold_reason,'-') || ' | created=' || substr(created_at,1,16) AS row_text FROM jobs WHERE archived_at IS NULL AND recovery_state = 'held' ORDER BY id;"
