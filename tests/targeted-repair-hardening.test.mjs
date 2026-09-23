@@ -80,19 +80,21 @@ test('source-authority criticism cannot delete a marked internal-navigation bloc
   assert.deepEqual(inspection.protectedInternalNavigationTargets, ['p:2']);
 });
 
-test('non-source repairs may still fix a marked internal-navigation block', () => {
+test('a genuinely broken marked source link remains repairable', () => {
   const before = article('<p>Main content is here.</p><p data-smileseon-internal-links="1"><strong>Related guides</strong><br><a href="https://smileinfo.net/bad">Broken guide</a></p>');
   const candidate = article('<p>Main content is here.</p><p data-smileseon-internal-links="1"><strong>Related guides</strong><br><a href="https://smileinfo.net/fixed">Fixed guide</a></p>');
   const issues = [{
-    code: 'BROKEN_INTERNAL_LINK',
+    code: 'BROKEN_INTERNAL_SOURCE_LINK',
     location: 'html p 2',
-    reason: 'The navigation URL is broken.',
-    repairInstruction: 'Replace the broken URL with the valid internal URL.'
+    reason: 'This internal source link is broken and returns 404.',
+    repairInstruction: 'Replace the broken source URL with the valid internal URL.'
   }];
 
   const repaired = constrainTargetedRepair(before, candidate, issues);
   assert.match(repaired.html, /\/fixed/);
   assert.equal(assertTargetedRepairPreserved(before, repaired, issues), true);
+  const inspection = inspectTargetedRepairTargets(before, issues);
+  assert.deepEqual(inspection.protectedInternalNavigationTargets, []);
 });
 
 test('literal date placeholders are blocked by content, regardless of critic code naming', () => {
