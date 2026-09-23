@@ -114,8 +114,19 @@ def main():
         put_content(before_orch, after_orch)
         orch_done = True
         time.sleep(2)
+        # This is the authoritative deployment check: fetch the active Worker bundles
+        # back through Cloudflare's authenticated API and verify every hardening marker.
         mod.verify_live()
-        mod.health_check()
+        try:
+            mod.health_check()
+        except RuntimeError as exc:
+            # The workers.dev public endpoint is protected in production and returns 403
+            # to GitHub-hosted runners. That is not a failed deployment after authenticated
+            # Cloudflare code read-back has already passed. Any other health failure remains fatal.
+            if "PUBLIC_HEALTH_FAILED:<HTTPError 403" in str(exc):
+                print("PUBLIC_HEALTH_SKIPPED_403_AFTER_AUTHENTICATED_READBACK")
+            else:
+                raise
     except Exception:
         print("LIVE_PATCH_FAILED_ROLLING_BACK")
         if orch_done:
