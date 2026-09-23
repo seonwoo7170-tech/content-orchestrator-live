@@ -1958,3 +1958,50 @@ jobs:
             .filter((b)=>String(b.blogId)!==blogId)
             .map((b)=>({blogId:b.blogId,inheritGlobal:b.inheritGlobal,enabled:b.effective?.enabled,newArticles:b.effective?.newArticlesEnabled,autoPublish:b.effective?.autoPublishEnabled}))));
           NODE
+
+      - name: Read smileinfo.net's queue, then create exactly one verification article
+        if: always()
+        shell: bash
+        env:
+          TARGET_BLOG_HOST: 'smileinfo.net'
+          VERIFY_TOPIC: 'How to Test and Reset a GFCI Outlet That Keeps Tripping'
+          CREATE_VERIFICATION_JOB: 'true'
+        run: |
+          node - <<'NODE'
+          const base=process.env.BASE_URL;
+          const admin=process.env.ADMIN_API_KEY;
+          if(!admin) throw new Error('ADMIN_API_KEY_MISSING');
+          const headers={'x-admin-api-key':admin,'content-type':'application/json'};
+          async function api(path,init){
+            const r=await fetch(base+path,{headers,cache:'no-store',...init});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok) throw new Error(`API_FAILED:${path}:${r.status}:${String(j.error||'unknown').slice(0,160)}`);
+            return j;
+          }
+          const targetHost=String(process.env.TARGET_BLOG_HOST||'').toLowerCase();
+          const blogs=await api('/api/blogs');
+          const blog=(Array.isArray(blogs.blogs)?blogs.blogs:[]).find((b)=>{
+            try{ return new URL(String(b.url||'')).hostname.toLowerCase().replace(/^www\./,'')===targetHost; }catch{ return false; }
+          });
+          if(!blog){ console.log('TARGET_BLOG_NOT_FOUND'); process.exit(1); }
+          const blogId=String(blog.blogId);
+
+          // Anything already waiting for this blog would publish the moment automation is turned
+          // back on, and every one of those was written before today's fixes. This is what decides
+          // whether enabling for one article is safe.
+          for(const status of ['queued','running','ready','needs_review','failed']){
+            const r=await api(`/api/jobs?status=${status}&blogId=${encodeURIComponent(blogId)}&limit=50`);
+            const rows=(Array.isArray(r.jobs)?r.jobs:[]).filter((j)=>String(j.blog_id||j.blogId||'')===blogId);
+            console.log('QUEUE',status,JSON.stringify({
+              count:rows.length,
+              jobs:rows.slice(0,12).map((j)=>({id:j.id,mode:j.mode,hold:j.hold_reason||null,updated:j.updated_at}))
+            }));
+          }
+
+          if(String(process.env.CREATE_VERIFICATION_JOB)!=='true'){ console.log('NO_JOB_CREATED'); process.exit(0); }
+          const created=await api('/api/jobs/new',{
+            method:'POST',
+            body:JSON.stringify({ blogId, topic: String(process.env.VERIFY_TOPIC), language: 'en' })
+          });
+          console.log('VERIFICATION_JOB',JSON.stringify(created));
+          NODE
