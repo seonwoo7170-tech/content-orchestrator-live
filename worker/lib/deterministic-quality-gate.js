@@ -12,6 +12,9 @@ const WARN_PATTERNS = Object.freeze([
   { code: 'PLACEHOLDER_EXAMPLE_DOMAIN', pattern: /https?:\/\/(?:www\.)?example\.(?:com|org|net)\b/i, message: '예시용 도메인이 남아 있을 수 있습니다.' }
 ]);
 
+const DATE_PLACEHOLDER_RE = /(?:\[(?:current[_\s-]*)?date\]|\{\{\s*(?:current[_\s-]*)?date\s*\}\})/i;
+const PUBLICATION_DATE_SLOT_RE = /(?:Published|게시일|작성일|Last\s+updated|Updated|Reviewed|최종\s*수정)\s*:\s*\[DATE\]/gi;
+
 function text(value) {
   return String(value ?? '').trim();
 }
@@ -51,6 +54,15 @@ function articleContractIssues(article) {
   return issues;
 }
 
+function datePlaceholderResidue(value) {
+  const source = String(value || '');
+  // [DATE] is intentional only in the publication metadata labels that applyPublicationDate()
+  // rewrites immediately before Blogger publication. Strip those exact slots, then reject any
+  // remaining date-shaped token by content rather than by whatever issue code a model invented.
+  const withoutServerSlots = source.replace(PUBLICATION_DATE_SLOT_RE, '');
+  return DATE_PLACEHOLDER_RE.test(withoutServerSlots);
+}
+
 export function runDeterministicQualityGate(article) {
   const issues = articleContractIssues(article);
   if (!article || typeof article !== 'object') {
@@ -62,6 +74,9 @@ export function runDeterministicQualityGate(article) {
 
   for (const rule of BLOCK_PATTERNS) {
     if (rule.pattern.test(combined)) issues.push(issue(rule.code, 'block', rule.message, 'content'));
+  }
+  if (datePlaceholderResidue(combined)) {
+    issues.push(issue('PLACEHOLDER_DATE_TOKEN', 'block', '발행 시점 메타데이터 영역 밖에 날짜 자리표시자가 남아 있습니다.', 'content'));
   }
   for (const rule of WARN_PATTERNS) {
     if (rule.pattern.test(combined)) issues.push(issue(rule.code, 'warn', rule.message, 'content'));
