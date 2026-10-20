@@ -1,0 +1,27 @@
+{
+  "feeds": [
+    "https://rss.blog.naver.com/YOUR_BLOG_ID.xml"
+  ],
+  "posts": [
+    {
+      "title": "에어컨 실외기 소음 원인과 자가 점검 5단계",
+      "url": "https://example.blogspot.com/2026/07/aircon-noise.html",
+      "summary": "실외기 진동·팬 소음 원인별 점검 방법과 수리 비용 정리",
+      "keywords": ["에어컨 실외기 소음", "실외기 진동", "에어컨 소음"]
+    }
+  ],
+  "persona": "10년차 가전 설치·수리 기사이자 생활정보 블로거입니다.",
+  "scan": {
+    "queries": [],
+    "per_query": 30,
+    "sort": "date",
+    "min_score": 2,
+    "exclude_words": ["광고", "홍보", "알바"]
+  },
+  "min_relevance": 3,
+  "utm": {
+    "utm_source": "naver_kin",
+    "utm_medium": "referral",
+    "utm_campaign": "kin_answer"
+  }
+}
